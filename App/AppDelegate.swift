@@ -243,6 +243,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             }
         }
         AppDelegate.log.info("Quit save finished in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - start))s")
+        if let recorder = browserManager?.activityRecorder {
+            recorder.finish {
+                DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+            }
+            return .terminateLater
+        }
         return .terminateNow
     }
 

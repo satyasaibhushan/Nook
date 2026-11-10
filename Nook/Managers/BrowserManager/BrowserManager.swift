@@ -418,6 +418,7 @@ class BrowserManager: ObservableObject {
     weak var aiService: AIService?
     weak var aiConfigService: AIConfigService?
 
+    let activityRecorder: ActivityRecorder
     var siteRoutingManager: SiteRoutingManager
     var externalMiniWindowManager = ExternalMiniWindowManager()
     let peekManager = PeekManager()
@@ -455,6 +456,7 @@ class BrowserManager: ObservableObject {
             legacyProfiles: Self.legacyProfileRecords(in: modelContext),
             legacyTree: { [modelContext] in LegacyTabImport.tree(from: modelContext) })
         self.tabs = tabs
+        self.activityRecorder = ActivityRecorder(tabs: tabs, registry: windowRegistry, settings: settings)
         // The first space's data store is the one the app starts on.
         let initialProfile = tabs.orderedSpaces.first.flatMap { tabs.profile(forSpace: $0.id) }
         self.currentProfileSubject = CurrentValueSubject(initialProfile)

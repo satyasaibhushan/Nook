@@ -13,9 +13,12 @@ public struct NookURLCommand: Equatable, Sendable {
         case space(UUID)
     }
 
+    public enum RecordingState: String, Equatable, Sendable { case pause, resume, toggle }
+
     public enum Action: Equatable, Sendable {
         case open(URL, reuse: Bool)
         case search(String)
+        case recording(RecordingState)
         case switchSpace
         case close(UUID)
         case pin(UUID)
@@ -63,6 +66,9 @@ public struct NookURLCommand: Equatable, Sendable {
             background = flag == "1"
         }
         switch host {
+        case "recording":
+            guard let state = take("state").flatMap(RecordingState.init(rawValue:)) else { return nil }
+            action = .recording(state)
         case "open":
             guard let raw = take("url"), let url = webURL(raw) else { return nil }
             action = .open(url, reuse: take("reuse") == "1")

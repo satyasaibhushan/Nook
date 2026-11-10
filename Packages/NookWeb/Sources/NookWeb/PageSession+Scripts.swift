@@ -14,7 +14,7 @@ extension PageSession {
     /// Script message handler names this session registers on each of its web views.
     var messageHandlerNames: [String] {
         ["mediaStateChange_\(itemID.uuidString)", "backgroundColor_\(itemID.uuidString)",
-         "historyStateDidChange", "nookShortcutDetect",
+         "historyStateDidChange", "nookShortcutDetect", Self.activityMediaHandler,
          "nookSponsorBlock"]
     }
 
@@ -273,9 +273,12 @@ extension PageSession: WKScriptMessageHandler {
         // These handlers live in the page world, so any frame can post to them. Every script
         // that feeds them runs in the main frame only; media state is the exception, since a
         // player can sit in a subframe.
-        guard message.frameInfo.isMainFrame || message.name.hasPrefix("mediaStateChange_") else { return }
+        guard message.frameInfo.isMainFrame || message.name.hasPrefix("mediaStateChange_") || message.name == Self.activityMediaHandler else { return }
 
         switch message.name {
+        case Self.activityMediaHandler:
+            receiveActivityMedia(message)
+
         case "linkHover":
             let href = message.body as? String
             self.onLinkHover?(href)

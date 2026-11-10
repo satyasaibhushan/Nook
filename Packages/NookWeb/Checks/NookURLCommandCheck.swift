@@ -24,6 +24,15 @@ struct NookURLCommandCheck {
         precondition(parse("nook://open?url=https://a.com&space=") == nil && parse("nook://open?url=https://a.com&space=%20") == nil)
         precondition(parse("nook://search?q=a&space=" + String(repeating: "x", count: 9000)) == nil)
 
+        for state in ["pause", "resume", "toggle"] {
+            let command = parse("nook://recording?state=\(state)")
+            precondition(command?.action == .recording(NookURLCommand.RecordingState(rawValue: state)!))
+            precondition(command?.background == false && command?.ignored == [])
+        }
+        for suffix in ["", "?state=", "?state=stop", "?state=PAUSE", "?mode=pause"] {
+            precondition(parse("nook://recording\(suffix)") == nil)
+        }
+
         // Hostile or malformed
         for bad in [
             "nook://open", "nook://open?url=", "nook://open?url=file:///etc/passwd",

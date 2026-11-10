@@ -387,6 +387,10 @@ struct NookCommands: Commands {
             }
 
             CommandMenu("Privacy") {
+                Button(browserManager.activityRecorder.recordingPaused ? "Resume Recording" : "Pause Recording") {
+                    browserManager.activityRecorder.setPaused(!browserManager.activityRecorder.recordingPaused)
+                }
+                Divider()
                 Menu("Clear Cookies") {
                     Button("Clear Cookies for Current Site") {
                         browserManager.clearCurrentPageCookies()

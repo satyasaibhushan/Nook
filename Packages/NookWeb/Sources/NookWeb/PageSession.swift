@@ -160,6 +160,8 @@ public final class PageSession: NSObject, Identifiable {
 
     // MARK: - Media State
 
+    var activityMediaDocument: String?
+    var activityMediaFrames: [String: (playing: Bool, updated: Date)] = [:]
     public var hasPlayingVideo: Bool = false
     public var hasVideoContent: Bool = false
     public var hasPiPActive: Bool = false
@@ -418,6 +420,7 @@ public final class PageSession: NSObject, Identifiable {
         }
         controller.removeScriptMessageHandler(forName: Self.translateHandlerName, contentWorld: Self.translateWorld)
         controller.add(self, contentWorld: Self.translateWorld, name: Self.translateHandlerName)
+        configureActivityMedia(in: webView)
         webView.customUserAgent = PlatformUserAgent.custom
         // Let the web content control its own background so extension styles (like Dark
         // Reader) can paint dark backgrounds. The themed background shows only while loading.
@@ -485,6 +488,7 @@ public final class PageSession: NSObject, Identifiable {
         resetTranslation()
         loadingState = .idle
         hasPiPActive = false
+        activityMediaFrames.removeAll()
         hasPlayingVideo = false
         hasPlayingAudio = false
         hasAudioContent = false

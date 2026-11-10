@@ -195,7 +195,7 @@ class WebViewCoordinator {
         let controller = webView.configuration.userContentController
         let handlerNames = [
             "mediaStateChange_\(itemID.uuidString)", "backgroundColor_\(itemID.uuidString)",
-            "historyStateDidChange", "nookShortcutDetect",
+            "historyStateDidChange", "nookShortcutDetect", "nookActivityMedia",
         ]
         for name in handlerNames {
             controller.removeScriptMessageHandler(forName: name)

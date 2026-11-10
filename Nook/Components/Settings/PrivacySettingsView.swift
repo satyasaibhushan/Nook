@@ -54,6 +54,14 @@ struct PrivacySettingsView: View {
                 )
             }
 
+            Section("Activity") {
+                settingToggle(
+                    "Record activity",
+                    detail: "Saves time spent on pages to a local activity log. Private windows are never recorded.",
+                    isOn: $settings.recordActivity
+                )
+            }
+
             Section("History") {
                 settingToggle(
                     "Search page text in history",
