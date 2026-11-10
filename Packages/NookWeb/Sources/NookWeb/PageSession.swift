@@ -106,6 +106,7 @@ public final class PageSession: NSObject, Identifiable {
         }
     }
 
+    public internal(set) var loadingNavigationID = UUID()
     public var loadingState: LoadingState = .idle
     public var isLoading: Bool { loadingState.isLoading }
     public var canGoBack: Bool = false
