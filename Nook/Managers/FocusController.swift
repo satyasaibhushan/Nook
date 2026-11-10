@@ -33,7 +33,8 @@ final class FocusController {
     @ObservationIgnored private var lastCovered: [UUID: URL] = [:]
     @ObservationIgnored private var pendingLabels: [UUID: (url: URL, task: Task<Void, Never>)] = [:]
     @ObservationIgnored private var modesDate: Date?
-    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var fileMonitors: [DispatchSourceFileSystemObject] = []
+    @ObservationIgnored private var activationObserver: NSObjectProtocol?
     @ObservationIgnored private var keyMonitor: Any?
     @ObservationIgnored private let tabs: TabsController
     @ObservationIgnored private let stateStore: ActivityStateStore
@@ -56,16 +57,39 @@ final class FocusController {
         recorder.modeProvider = { [weak self] in self?.activeMode?.name }
         resume()
         observe()
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.labeller.reloadIfChanged()
-                self?.reloadModesIfChanged()
-            }
+        watchFiles()
+        activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            DispatchQueue.main.async { self?.watchFiles(); self?.reconcileFiles() }
         }
-        RunLoop.main.add(timer!, forMode: .common)
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             MainActor.assumeIsolated { self?.interceptKey(event) ?? event }
         }
+    }
+
+    private func watchFiles() {
+        fileMonitors.forEach { $0.cancel() }
+        fileMonitors.removeAll()
+        let files = labeller.files
+        let paths = [stateStore.url.deletingLastPathComponent(), files.rulesURL, files.labelsURL, files.modesURL]
+        for (index, path) in paths.enumerated() {
+            let descriptor = open(path.path, O_EVTONLY)
+            guard descriptor >= 0 else { continue }
+            let monitor = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: .main)
+            monitor.setEventHandler { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.reconcileFiles()
+                    if index == 0 { self?.watchFiles() }
+                }
+            }
+            monitor.setCancelHandler { close(descriptor) }
+            monitor.resume()
+            fileMonitors.append(monitor)
+        }
+    }
+
+    private func reconcileFiles() {
+        labeller.reloadIfChanged()
+        reloadModesIfChanged()
     }
 
     // MARK: - Modes

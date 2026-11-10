@@ -68,10 +68,6 @@ final class ActivityRecorder {
             }
             return event
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
-        }
-        RunLoop.main.add(timer!, forMode: .common)
         for name in [NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
                      NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -154,8 +150,25 @@ final class ActivityRecorder {
         lastCheckpoint = Date()
     }
 
+    private func updateTimer(needed: Bool) {
+        guard !stopping else { return }
+        if !needed {
+            timer?.invalidate()
+            timer = nil
+        } else if timer == nil {
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+            timer.tolerance = 0.1
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
+        }
+    }
+
     private func refresh() {
         let now = Date()
+        let hasPlayingMedia = tabs.sessions.contains { $0.activityMediaPlaying }
+        updateTimer(needed: NSApp.isActive || hasPlayingMedia)
         var pages: [ActivityPage] = []
         if ready && !stopping && suspensionReasons.isEmpty && !recordingPaused && settings.recordActivity {
             let keyWindow = registry.allWindows.first { !$0.isIncognito && $0.window?.isKeyWindow == true }
