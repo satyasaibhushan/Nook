@@ -1,12 +1,12 @@
 // Nook Link Hints
-// Press f outside a text field to label everything clickable in view; type a label to
-// click it. Escape or any other key cancels. Runs in every frame, each for its own content.
+// Press Option+F to label everything clickable in view; type a label to click it. Escape or any other key cancels. Runs in every frame, each for its own content.
 (function () {
     if (window.__nookLinkHints) return;
     window.__nookLinkHints = true;
 
-    // Home row first, so most labels need no reach.
-    const ALPHABET = "sadjklewcmpgh";
+    // Easiest keys first. One-key labels are dealt from the front; when a page has more
+    // targets than keys, the keys at the back become the first key of two-key labels.
+    const ALPHABET = "asdfjklghewruiocvmn1234567890tybpqxz";
     const CLICKABLE = [
         "a[href]", "button", "input:not([type=hidden])", "textarea", "select", "summary",
         "label[for]", "[onclick]", "[contenteditable=''],[contenteditable=true]",
@@ -66,19 +66,18 @@
         return false;
     }
 
-    // Equal-length labels, so no label is the start of another.
+    // As many one-key labels as the count allows, in page order, and no label that is the
+    // start of another, so a click fires on the last key without waiting.
     function labels(count) {
-        let length = 1;
-        while (Math.pow(ALPHABET.length, length) < count) length++;
+        const size = ALPHABET.length;
+        let prefixes = 0;
+        while (size - prefixes + prefixes * size < count && prefixes < size) prefixes++;
         const out = [];
-        for (let index = 0; index < count; index++) {
-            let label = "";
-            let rest = index;
-            for (let place = 0; place < length; place++) {
-                label = ALPHABET[rest % ALPHABET.length] + label;
-                rest = Math.floor(rest / ALPHABET.length);
+        for (let index = 0; index < size - prefixes && out.length < count; index++) out.push(ALPHABET[index]);
+        for (let first = size - prefixes; first < size; first++) {
+            for (let second = 0; second < size && out.length < count; second++) {
+                out.push(ALPHABET[first] + ALPHABET[second]);
             }
-            out.push(label);
         }
         return out;
     }
@@ -108,6 +107,8 @@
         shadow.appendChild(style);
 
         const names = labels(targets.length);
+        // Beyond every two-key label there is nothing left to type; the page's tail goes unlabelled.
+        targets.length = names.length;
         hints = targets.map(({ element, rect }, index) => {
             const chip = document.createElement("span");
             chip.className = "chip";
@@ -194,9 +195,8 @@
             typed += key;
             return narrow();
         }
-        if (event.key !== "f" || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.repeat) return;
-        const target = event.composedPath()[0];
-        if (isEditable(target)) return;
+        // By physical key: with Option held, the character macOS reports is not "f".
+        if (event.code !== "KeyF" || !event.altKey || event.metaKey || event.ctrlKey || event.shiftKey || event.repeat) return;
         swallow(event);
         show();
     }, true);
