@@ -250,9 +250,17 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
                 emit(list); return
             }
-            if command == "ax" {
+            if command == "ax" || command == "ax-focused" {
                 var rows: [[String: Any]] = []
-                tree(AXUIElementCreateApplication(Int32(a[1])!), [], 0, &rows); emit(rows); return
+                let application = AXUIElementCreateApplication(Int32(a[1])!)
+                var root = application
+                if command == "ax-focused" {
+                    guard let focused = attr(application,"AXFocusedWindow"), CFGetTypeID(focused) == AXUIElementGetTypeID() else {
+                        throw NSError(domain:"no focused browser window",code:15)
+                    }
+                    root = focused as! AXUIElement
+                }
+                tree(root, [], 0, &rows); emit(rows); return
             }
             if command == "press" {
                 var element = AXUIElementCreateApplication(Int32(a[1])!)
@@ -362,14 +370,18 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             let pid = spec["pid"] as? Int32
             let requestedWindow = spec["window_id"] as? UInt32
             let window = content.windows.first(where: { $0.owningApplication?.processID == pid && $0.windowLayer == 0 && $0.frame.width > 300 && $0.frame.height > 300 && (requestedWindow == nil || $0.windowID == requestedWindow) })
-            guard let display = content.displays.first(where: { window == nil || $0.frame.intersects(window!.frame) }) else {
+            // A background browser can disappear from the shareable window list.
+            // Activation captures retain its verified foreground display region.
+            let region = spec["region"] as? [Double]
+            let frame = region.flatMap { $0.count == 4 ? CGRect(x:$0[0],y:$0[1],width:$0[2],height:$0[3]) : nil } ?? window?.frame
+            guard let display = content.displays.first(where: { frame == nil || $0.frame.intersects(frame!) }) else {
                 throw NSError(domain: "no display available", code: 4)
             }
-            if pid != nil && window == nil { throw NSError(domain: "no browser window for pid \(pid!)", code: 4) }
+            if pid != nil && frame == nil { throw NSError(domain: "no browser window for pid \(pid!)", code: 4) }
             // Capture the visible display region so app activation and occlusion are observable too.
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let config = SCStreamConfiguration()
-            let rect = window?.frame.intersection(display.frame) ?? display.frame
+            let rect = frame?.intersection(display.frame) ?? display.frame
             config.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
             let backing = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.displayID })?.backingScaleFactor ?? 1
             let scale = (spec["native_resolution"] as? Bool ?? false) ? backing : 1
