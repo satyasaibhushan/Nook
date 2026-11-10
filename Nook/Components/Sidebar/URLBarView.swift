@@ -41,10 +41,10 @@ struct URLBarView: View {
                 searchManager.clearSuggestions()
                 return
             }
-            searchManager.searchSuggestions(for: value, includeWebSuggestions: !isLikelyURL(value))
+            searchManager.searchSuggestions(for: value, source: .inlineAddress)
         }
         .onChange(of: searchManager.suggestions) { _, _ in
-            if let selectedSuggestion, !inlineSuggestions.contains(selectedSuggestion) {
+            if let selectedSuggestion, !inlineSuggestions.contains(where: { $0.id == selectedSuggestion.id }) {
                 self.selectedSuggestion = nil
             }
         }
@@ -279,7 +279,7 @@ struct URLBarView: View {
 
     private var selectedSuggestionIndex: Int {
         guard let selectedSuggestion else { return showsInitialSuggestions ? -1 : 0 }
-        return inlineSuggestions.firstIndex(of: selectedSuggestion) ?? (showsInitialSuggestions ? -1 : 0)
+        return inlineSuggestions.firstIndex { $0.id == selectedSuggestion.id } ?? (showsInitialSuggestions ? -1 : 0)
     }
 
     private func moveSuggestionSelection(by direction: Int) {
@@ -374,7 +374,7 @@ struct URLBarView: View {
 
     private var inlineSuggestionList: some View {
         VStack(spacing: 0) {
-            ForEach(Array(inlineSuggestions.enumerated()), id: \.offset) { index, suggestion in
+            ForEach(Array(inlineSuggestions.enumerated()), id: \.element.id) { index, suggestion in
                 Button {
                     submitAddress(suggestion)
                 } label: {
@@ -459,7 +459,7 @@ struct URLBarView: View {
     private func submitAddress(_ chosen: SearchManager.SearchSuggestion? = nil) {
         guard !isComposingAddress else { return }
         let suggestions = inlineSuggestions
-        let selected = selectedSuggestion.flatMap { selection in suggestions.first { $0 == selection } }
+        let selected = selectedSuggestion.flatMap { selection in suggestions.first { $0.id == selection.id } }
         let typed = addressText.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallback = typed.isEmpty ? nil : SearchManager.SearchSuggestion(text: typed, type: isLikelyURL(typed) ? .url : .search)
         guard let suggestion = chosen ?? selected ?? fallback else { return }

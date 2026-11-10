@@ -33,8 +33,7 @@ public class SearchManager {
     private var searchTask: Task<Void, Never>?
     private var historyTask: Task<Void, Never>?
     private var autofillTask: Task<Void, Never>?
-    /// The last results each leg produced. Held rather than re-derived from `suggestions`, and
-    /// kept across a keystroke so a leg that is still running does not blank its own rows.
+    /// Each leg belongs to one query. Rows from an older query must never remain selectable.
     private var historyRows: [SearchSuggestion] = []
     private var webRows: [SearchSuggestion] = []
     private var textRows: [SearchSuggestion] = []
@@ -60,7 +59,21 @@ public class SearchManager {
     }
 
     public struct SearchSuggestion: Identifiable, Equatable {
-        public let id = UUID()
+        public enum ID: Hashable {
+            case tab(UUID)
+            case history(URL)
+            case url(String)
+            case search(String)
+        }
+
+        public var id: ID {
+            switch type {
+            case .tab(let match): return .tab(match.itemID)
+            case .history(let entry): return .history(entry.url)
+            case .url: return .url(text)
+            case .search: return .search(text)
+            }
+        }
         public let text: String
         public let type: SuggestionType
 
@@ -81,9 +94,9 @@ public class SearchManager {
             case (.search, .search), (.url, .url):
                 return lhs.text == rhs.text
             case (.tab(let lhsTab), .tab(let rhsTab)):
-                return lhs.text == rhs.text && lhsTab.itemID == rhsTab.itemID
+                return lhs.text == rhs.text && lhsTab.itemID == rhsTab.itemID && lhsTab.url == rhsTab.url
             case (.history(let lhsHistory), .history(let rhsHistory)):
-                return lhs.text == rhs.text && lhsHistory.id == rhsHistory.id
+                return lhs.text == rhs.text && lhsHistory == rhsHistory
             default:
                 return false
             }
@@ -105,12 +118,15 @@ public class SearchManager {
         currentSpaceId = window?.spaceID
     }
     
-    @MainActor public func searchSuggestions(for query: String, includeWebSuggestions: Bool = true) {
+    @MainActor public func searchSuggestions(for query: String, source: SearchInputSource = .palette) {
         searchTask?.cancel()
         historyTask?.cancel()
         let generation = UUID()
         searchGeneration = generation
-        if !includeWebSuggestions { webRows = [] }
+        let includeWebSuggestions = source.allowsWebSuggestions(for: query)
+        historyRows = []
+        textRows = []
+        webRows = []
         updateSpaceContext()
         let space = currentSpaceId
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -129,8 +145,7 @@ public class SearchManager {
         }
 
         let tabs = Array(searchTabs(for: query).prefix(2))
-        // Paint what is already known for this keystroke, carrying each leg's last rows. The
-        // palette puts its own row for the typed text above these.
+        // The typed Return row and local tabs do not wait for history or the network.
         compose(tabs: tabs, loading: includeWebSuggestions)
 
         // History is a local lookup, so it runs on this keystroke rather than waiting for a pause
@@ -152,8 +167,7 @@ public class SearchManager {
             self.compose(tabs: tabs, coalescing: true)
         }
 
-        // Inline address editing may request local history only. In particular, a
-        // complete URL must not be sent to the remote suggestion provider.
+        // Inline editing stays local, and complete addresses never reach the provider.
         guard includeWebSuggestions else { return }
         searchTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(125)) } catch { return }
@@ -187,7 +201,10 @@ public class SearchManager {
             return false
         }
         updateResults(coalescing: coalescing) {
-            $0.suggestions = Array((tabs + history + Array(text.prefix(3)) + webRows).prefix(5))
+            let candidates = tabs + history + Array(text.prefix(3)) + webRows
+            $0.suggestions = SearchResultPolicy.retainingShownRows(
+                coalescing ? $0.suggestions : [], candidates: candidates, limit: 5
+            )
             if let loading { $0.isLoading = loading }
             if !coalescing { $0.autofillHost = nil }
         }

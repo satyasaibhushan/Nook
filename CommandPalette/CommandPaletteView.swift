@@ -23,8 +23,8 @@ struct CommandPaletteView: View {
     @Environment(\.nookSettings) var nookSettings
 
     @State private var text: String = ""
-    @State private var selectedSuggestionIndex: Int = -1
-    @State private var hoveredSuggestionIndex: Int? = nil
+    @State private var selectedSuggestionID: SearchManager.SearchSuggestion.ID?
+    @State private var hoveredSuggestionID: SearchManager.SearchSuggestion.ID?
     @State private var userTypedText: String = ""
     @State private var isNavigatingSuggestion: Bool = false
     @State private var activeSiteSearch: SiteSearchEntry? = nil
@@ -36,7 +36,12 @@ struct CommandPaletteView: View {
         return SiteSearchEntry.match(for: text, in: nookSettings.siteSearchEntries)
     }
 
-    /// The Return row first, then what the search found. Index -1 means the Return row.
+    private var selectedSuggestionIndex: Int {
+        guard let selectedSuggestionID else { return -1 }
+        return visibleSuggestions.firstIndex { $0.id == selectedSuggestionID } ?? -1
+    }
+
+    /// The Return row first, then what the search found.
     private var visibleSuggestions: [SearchManager.SearchSuggestion] {
         var found = searchManager.suggestions
         if activeSiteSearch != nil {
@@ -55,11 +60,10 @@ struct CommandPaletteView: View {
         return [primary] + rest.prefix(4)
     }
 
-    /// What Return does with what was typed: the completed host, the address, or a search.
+    /// Async completion is accepted explicitly so it cannot change a displayed Return target.
     private var primarySuggestion: SearchManager.SearchSuggestion? {
         let typed = userTypedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty else { return nil }
-        if let host = completionHost { return SearchManager.SearchSuggestion(text: host, type: .url) }
         return SearchManager.SearchSuggestion(text: typed, type: activeSiteSearch == nil && isLikelyURL(typed) ? .url : .search)
     }
 
@@ -135,6 +139,11 @@ struct CommandPaletteView: View {
                                         prefill: commandPalette.prefilledText,
                                         textColor: NSColor(textFieldColor),
                                         accentColor: NSColor(gradientColorManager.accentColor),
+                                        onTextChange: { value in
+                                            isNavigatingSuggestion = false
+                                            text = value
+                                            updateQuery(value)
+                                        },
                                         onCommand: handleFieldCommand
                                     )
                                     .frame(height: 22)
@@ -152,12 +161,7 @@ struct CommandPaletteView: View {
                                             isNavigatingSuggestion = false
                                             return
                                         }
-                                        completionSuppressed = newValue.count < userTypedText.count
-                                        userTypedText = newValue
-                                        searchManager.searchSuggestions(
-                                            for: newValue
-                                        )
-                                        selectedSuggestionIndex = -1
+                                        if newValue != userTypedText { updateQuery(newValue) }
                                     }
 
                                     if activeSiteSearch == nil, let match = siteSearchMatch {
@@ -202,8 +206,8 @@ struct CommandPaletteView: View {
                             if !visibleSuggestions.isEmpty {
                                 CommandPaletteSuggestionsListView(
                                     suggestions: visibleSuggestions,
-                                    selectedIndex: max(selectedSuggestionIndex, 0),
-                                    hoveredIndex: $hoveredSuggestionIndex,
+                                    selectedID: selectedSuggestionID ?? visibleSuggestions.first?.id,
+                                    hoveredID: $hoveredSuggestionID,
                                     onSelect: { suggestion in
                                         selectSuggestion(suggestion)
                                     }
@@ -236,7 +240,7 @@ struct CommandPaletteView: View {
             text = commandPalette.prefilledText
             userTypedText = text
             completionSuppressed = false
-            selectedSuggestionIndex = -1
+            selectedSuggestionID = nil
             searchManager.searchSuggestions(for: text)
         }
         .onChange(of: commandPalette.isVisible) { _, newVisible in
@@ -245,23 +249,30 @@ struct CommandPaletteView: View {
                 text = ""
                 userTypedText = ""
                 activeSiteSearch = nil
-                selectedSuggestionIndex = -1
+                selectedSuggestionID = nil
             }
         }
         .onChange(of: windowState.spaceID) { _, _ in
             if commandPalette.isVisible {
                 searchManager.updateSpaceContext()
-                searchManager.clearSuggestions()
+                searchManager.searchSuggestions(for: userTypedText)
             }
         }
-        .onChange(of: searchManager.suggestions.count) { _, _ in
-            let count = visibleSuggestions.count
-            if count == 0 {
-                selectedSuggestionIndex = -1
-            } else if selectedSuggestionIndex >= count {
-                selectedSuggestionIndex = count - 1
+        .onChange(of: searchManager.suggestions) { _, _ in
+            if let selectedSuggestionID, !visibleSuggestions.contains(where: { $0.id == selectedSuggestionID }) {
+                self.selectedSuggestionID = nil
+            }
+            if let hoveredSuggestionID, !visibleSuggestions.contains(where: { $0.id == hoveredSuggestionID }) {
+                self.hoveredSuggestionID = nil
             }
         }
+    }
+
+    private func updateQuery(_ value: String) {
+        completionSuppressed = value.count < userTypedText.count
+        userTypedText = value
+        selectedSuggestionID = nil
+        searchManager.searchSuggestions(for: value)
     }
 
     private func handleFieldCommand(_ selector: Selector, _ modifiers: NSEvent.ModifierFlags) -> Bool {
@@ -270,6 +281,7 @@ struct CommandPaletteView: View {
             if let match = siteSearchMatch, activeSiteSearch == nil {
                 withAnimation(NookDesign.Motion.spring) { activeSiteSearch = match }
                 text = ""
+                updateQuery("")
             } else if acceptInlineCompletion() {
                 return true
             } else if selectedSuggestionIndex < 0, visibleSuggestions.count > 1 {
@@ -301,21 +313,20 @@ struct CommandPaletteView: View {
     // MARK: - Suggestions List Subview
     private struct CommandPaletteSuggestionsListView: View {
         let suggestions: [SearchManager.SearchSuggestion]
-        let selectedIndex: Int
-        @Binding var hoveredIndex: Int?
+        let selectedID: SearchManager.SearchSuggestion.ID?
+        @Binding var hoveredID: SearchManager.SearchSuggestion.ID?
         let onSelect: (SearchManager.SearchSuggestion) -> Void
 
         var body: some View {
             LazyVStack(spacing: 5) {
-                ForEach(suggestions.indices, id: \.self) { index in
-                    let suggestion = suggestions[index]
-                    let isHovered = hoveredIndex == index
+                ForEach(suggestions) { suggestion in
+                    let isHovered = hoveredID == suggestion.id
                     // Rows keep the text roles on a neutral fill, so the chosen row reads on any accent.
                     row(for: suggestion, isSelected: false)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 11)
                         .background(
-                            selectedIndex == index
+                            selectedID == suggestion.id
                                 ? NookDesign.Surface.fillPressed
                                 : isHovered
                                     ? NookDesign.Surface.fill
@@ -330,9 +341,9 @@ struct CommandPaletteView: View {
                         .onHoverTracking { hovering in
                             withAnimation(NookDesign.Motion.quick) {
                                 if hovering {
-                                    hoveredIndex = index
+                                    hoveredID = suggestion.id
                                 } else {
-                                    hoveredIndex = nil
+                                    hoveredID = nil
                                 }
                             }
                         }
@@ -388,7 +399,7 @@ struct CommandPaletteView: View {
             }
             text = ""
             activeSiteSearch = nil
-            selectedSuggestionIndex = -1
+            selectedSuggestionID = nil
             commandPalette.close()
             return
         }
@@ -407,6 +418,7 @@ struct CommandPaletteView: View {
     {
         switch suggestion.type {
         case .tab(let match):
+            guard browserManager.tabs.item(match.itemID) != nil else { return }
             browserManager.tabs.select(match.itemID, in: windowState)
         case .history(let historyEntry):
             open(historyEntry.url)
@@ -427,7 +439,7 @@ struct CommandPaletteView: View {
 
         text = ""
         activeSiteSearch = nil
-        selectedSuggestionIndex = -1
+        selectedSuggestionID = nil
         commandPalette.close()
     }
 
@@ -441,6 +453,7 @@ struct CommandPaletteView: View {
     private func acceptInlineCompletion() -> Bool {
         guard let host = autofillTarget else { return false }
         text = host
+        updateQuery(host)
         return true
     }
 
@@ -452,13 +465,14 @@ struct CommandPaletteView: View {
     private func navigateSuggestions(direction: Int) {
         let maxIndex = visibleSuggestions.count - 1
 
-        // Row 0 is the Return row, which index -1 already stands for.
+        let index: Int
         if direction > 0 {
             guard maxIndex >= 1 else { return }
-            selectedSuggestionIndex = min(max(selectedSuggestionIndex, 0) + 1, maxIndex)
+            index = min(max(selectedSuggestionIndex, 0) + 1, maxIndex)
         } else {
-            selectedSuggestionIndex = selectedSuggestionIndex <= 1 ? -1 : selectedSuggestionIndex - 1
+            index = selectedSuggestionIndex <= 1 ? -1 : selectedSuggestionIndex - 1
         }
+        selectedSuggestionID = index < 0 ? nil : visibleSuggestions[index].id
 
         // Update text field to show selected suggestion's info
         isNavigatingSuggestion = true
@@ -489,11 +503,10 @@ struct CommandPaletteView: View {
         }
     }
 
-    /// Globe once Return would navigate, which includes the case where only the inline
-    /// completion makes it a URL.
+    /// The leading icon describes the displayed Return row.
     private var leadingIconName: String {
         guard activeSiteSearch == nil else { return "magnifyingglass" }
-        return isLikelyURL(text) || autofillTarget != nil ? "globe" : "magnifyingglass"
+        return isLikelyURL(text) ? "globe" : "magnifyingglass"
     }
 
     /// Host that what was typed completes to, while it still prefixes it.
@@ -519,7 +532,7 @@ struct CommandPaletteView: View {
         guard selectedSuggestionIndex >= 0, selectedSuggestionIndex < visibleSuggestions.count,
               case .history(let entry) = visibleSuggestions[selectedSuggestionIndex].type else { return false }
         browserManager.historyManager.deleteHistoryEntry(entry.id)
-        selectedSuggestionIndex = -1
+        selectedSuggestionID = nil
         text = userTypedText
         searchManager.searchSuggestions(for: userTypedText)
         return true
@@ -539,6 +552,7 @@ private struct PaletteSearchField: NSViewRepresentable {
     let prefill: String
     let textColor: NSColor
     let accentColor: NSColor
+    let onTextChange: (String) -> Void
     let onCommand: (Selector, NSEvent.ModifierFlags) -> Bool
 
     final class Field: NSTextField {
@@ -567,7 +581,7 @@ private struct PaletteSearchField: NSViewRepresentable {
 
         func controlTextDidChange(_ notification: Notification) {
             guard let field = notification.object as? NSTextField else { return }
-            parent.text = field.stringValue
+            parent.onTextChange(field.stringValue)
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
