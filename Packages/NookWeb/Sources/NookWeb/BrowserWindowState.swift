@@ -29,6 +29,7 @@ public class BrowserWindowState {
 
     /// Sidebar width for this window
     public var sidebarWidth: CGFloat = SidebarWidth.standard
+    public var isSwitchingSpace = false
     public var isSidebarResizeHovered = false
     public var isAddressEditing = false
 
