@@ -599,7 +599,7 @@ public final class NookSettingsService {
             adBlockerEnabledKey: false,
             debugToggleUpdateNotificationKey: false,
             askBeforeQuitKey: true,
-            allowNookURLsKey: false,
+            allowNookURLsKey: true,
             externalLinksInMiniWindowKey: true,
             sidebarPositionKey: SidebarPosition.left.rawValue,
             topBarAddressViewKey: false,
