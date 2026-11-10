@@ -28,6 +28,7 @@ public final class NookSettingsService {
     private let debugToggleUpdateNotificationKey = "settings.debugToggleUpdateNotification"
     private let lastSeenVersionKey = "settings.lastSeenVersion"
     private let askBeforeQuitKey = "settings.askBeforeQuit"
+    private let recordActivityKey = "settings.recordActivity"
     private let allowNookURLsKey = "settings.allowNookURLs"
     private let sidebarPositionKey = "settings.sidebarPosition"
     private let topBarAddressViewKey = "settings.topBarAddressView"
@@ -539,6 +540,10 @@ public final class NookSettingsService {
         }
     }
 
+    public var recordActivity: Bool {
+        didSet { userDefaults.set(recordActivity, forKey: recordActivityKey) }
+    }
+
     public var youTubeHideShorts: Bool {
         didSet { userDefaults.set(youTubeHideShorts, forKey: youTubeHideShortsKey) }
     }
@@ -770,6 +775,7 @@ public final class NookSettingsService {
         } else {
             self.sponsorBlockCategoryOptions = SponsorBlockCategory.defaultCategoryOptions
         }
+        self.recordActivity = userDefaults.object(forKey: recordActivityKey) as? Bool ?? true
         self.youTubeHideShorts = userDefaults.bool(forKey: youTubeHideShortsKey)
         self.youTubeHiddenHomeSections = userDefaults.stringArray(forKey: youTubeHiddenHomeSectionsKey) ?? []
         self.youTubeVideosPerRow = userDefaults.integer(forKey: youTubeVideosPerRowKey)

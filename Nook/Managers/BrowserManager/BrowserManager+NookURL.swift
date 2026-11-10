@@ -26,6 +26,9 @@ extension BrowserManager {
             nookURLLog.info("Ignored nook:// parameters: \(command.ignored.joined(separator: ","), privacy: .public)")
         }
         switch command.action {
+        case .recording(let state):
+            activityRecorder.setPaused(state == .toggle ? !activityRecorder.recordingPaused : state == .pause)
+            return
         case .open, .search, .switchSpace:
             break
         case .reopen(let id):
@@ -99,7 +102,7 @@ extension BrowserManager {
             guard let template = nookSettings?.resolvedSearchEngineTemplate,
                   let url = NookURLCommand.searchURL(for: query, template: template) else { return }
             openFromLauncher(url, reuse: false, space: spaceID, explicit: command.space != nil, in: window)
-        case .close, .pin, .unpin, .reload, .move, .select, .reopen, .folder, .rename, .favorite, .unfavorite:
+        case .recording, .close, .pin, .unpin, .reload, .move, .select, .reopen, .folder, .rename, .favorite, .unfavorite:
             break
         }
     }
@@ -178,7 +181,7 @@ extension BrowserManager {
             }
             guard let window = openBrowserWindow(), !window.isIncognito else { return }
             tabs.select(id, in: window)
-        case .open, .search, .switchSpace, .reopen, .folder:
+        case .recording, .open, .search, .switchSpace, .reopen, .folder:
             break
         }
     }

@@ -75,6 +75,16 @@ struct SidebarBottomBar: View {
             Button("Menu", systemImage: "archivebox") {
                 onMenuTap()
             }
+            .overlay(alignment: .bottomTrailing) {
+                if browserManager.activityRecorder.recordingPaused && !windowState.isIncognito {
+                    Image(systemName: "pause.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .help("Activity recording paused")
+                        .accessibilityLabel("Activity recording paused")
+                        .allowsHitTesting(false)
+                }
+            }
             // A finished download bounces the button its icon flew into.
             .symbolEffect(.bounce, value: browserManager.downloadManager.completedCount)
             .nookSidebarIconButtons()
