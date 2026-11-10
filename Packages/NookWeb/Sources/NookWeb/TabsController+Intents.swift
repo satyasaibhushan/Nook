@@ -235,6 +235,9 @@ extension TabsController {
             device.stampActive(itemID, at: now)
             if let previous, tree.item(previous.itemID) != nil { device.stampActive(previous.itemID, at: now) }
         }
+        let switchInterval = BrowserPerformance.signposter.beginInterval(
+            "TabSwitch", id: BrowserPerformance.signposter.makeSignpostID())
+        let compositorVersion = window.compositorVersion
         // The latest window to select a page takes its live view; others show a placeholder.
         takeControl(itemID, in: window)
         var recent = window.recentItemsBySpace[spaceID, default: []]
@@ -242,19 +245,30 @@ extension TabsController {
         recent.append(itemID)
         window.recentItemsBySpace[spaceID] = recent.suffix(Self.recentLimit)
 
+        var afterFrame: (@MainActor () -> Void)?
         if let session = ensureSession(for: itemID) {
-            if let previous, previous !== session {
-                previous.captureSwitcherSnapshot()
-                dropStaleSwitcherSnapshots()
-            }
+            let switched = session !== previous
+            let left = previous != nil && switched
+            if left { previous?.captureSwitcherSnapshot() }
             session.loadWebViewIfNeeded()
-            session.checkMediaState()
-            if session !== previous {
-                tabEvents?.tabActivated(new: session, previous: previous)
+            if switched { tabEvents?.tabShown(new: session, previous: previous) }
+            // None of this changes the first frame of the page, so it waits until that is drawn.
+            afterFrame = { [weak self, weak session, weak previous] in
+                guard let self, let session else { return }
+                if left { self.dropStaleSwitcherSnapshots() }
+                // A tab closed in the meantime has already told extensions it is gone.
+                guard self.session(for: session.itemID) === session else { return }
+                session.checkMediaState()
+                if switched { self.tabEvents?.tabActivated(new: session, previous: previous) }
             }
         }
         mirror(window)
-        window.refreshCompositor()
+        // takeControl already redrew every window showing the item; this covers one it has not.
+        if window.compositorVersion == compositorVersion { window.refreshCompositor() }
+        AfterFrame.run {
+            BrowserPerformance.signposter.endInterval("TabSwitch", switchInterval)
+            afterFrame?()
+        }
     }
 
     /// Keeps switcher pictures only for each window's 8 most recent tabs (what the card can show).

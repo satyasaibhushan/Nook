@@ -130,15 +130,18 @@ extension BrowserManager: TabEventObserver {
         ExtensionManager.shared.notifyTabOpened(session)
     }
 
-    func tabActivated(new session: PageSession, previous: PageSession?) {
+    func tabShown(new session: PageSession, previous: PageSession?) {
         zoomManager.showZoomLevel(for: session.webView)
-        ExtensionManager.shared.notifyTabActivated(new: session, previous: previous)
-        // Private pages report activation for extensions and the zoom readout only.
+        // Private pages get the zoom readout only; they never count against the budget or move to PiP.
         guard !session.isPrivate else { return }
         // The loaded-page budget was only ever reached from startup warming and split view, so
         // opening tabs by hand never checked it and no cap could bind.
         compositorManager.pageActivated(session.itemID)
         updateSidebarPiP(new: session, previous: previous)
+    }
+
+    func tabActivated(new session: PageSession, previous: PageSession?) {
+        ExtensionManager.shared.notifyTabActivated(new: session, previous: previous)
     }
 
     func tabClosed(itemID: UUID) {

@@ -26,15 +26,24 @@ import WebKit
 
 extension PageSession {
     private static let switcherSnapshotWidth: CGFloat = 400
+    /// A picture this recent of the same address still shows what the page looks like.
+    private static let switcherSnapshotReuse: TimeInterval = 3
 
+    /// Runs before the view leaves the window: WebKit draws nothing for a detached view.
     func captureSwitcherSnapshot() {
         guard !SwitcherPressure.isUnderPressure, let webView, webView.window != nil, webView.bounds.width > 0 else { return }
+        let url = webView.url
+        if switcherSnapshot != nil, let taken = switcherSnapshotTaken, taken.url == url,
+           Date().timeIntervalSince(taken.date) < Self.switcherSnapshotReuse { return }
         let configuration = WKSnapshotConfiguration()
         configuration.snapshotWidth = NSNumber(value: Double(Self.switcherSnapshotWidth))
         configuration.afterScreenUpdates = false
-        webView.takeSnapshot(with: configuration) { [weak self] image, _ in
-            // A picture that arrives after the page unloaded would pin its memory again.
-            if let image, self?.primaryWebView != nil { self?.switcherSnapshot = image }
+        webView.takeSnapshot(with: configuration) { [weak self, weak webView] image, _ in
+            // A picture that arrives after the page unloaded would pin its memory again, and one
+            // from a replaced view or an earlier address would show the wrong page.
+            guard let self, let image, let webView, self.primaryWebView === webView, webView.url == url else { return }
+            self.switcherSnapshot = image
+            self.switcherSnapshotTaken = (Date(), url)
         }
     }
 }

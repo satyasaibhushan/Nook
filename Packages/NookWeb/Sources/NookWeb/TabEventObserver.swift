@@ -12,6 +12,10 @@ import WebKit
 @MainActor
 public protocol TabEventObserver: AnyObject {
     func tabOpened(_ session: PageSession)
+    /// The window now shows `session`. Runs before the frame that draws it, while the
+    /// outgoing page's view is still mounted.
+    func tabShown(new session: PageSession, previous: PageSession?)
+    /// Tells extensions. A switch sends this after its first frame is on screen.
     func tabActivated(new session: PageSession, previous: PageSession?)
     func tabClosed(itemID: UUID)
     func tabMoved(itemID: UUID, from oldIndex: Int?, in oldWindow: BrowserWindowState?, pinnedChanged: Bool)

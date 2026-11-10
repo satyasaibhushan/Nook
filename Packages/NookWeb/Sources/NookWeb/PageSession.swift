@@ -115,6 +115,9 @@ public final class PageSession: NSObject, Identifiable {
     public var isDisplayingPDF: Bool = false
     /// A small picture of the page taken as the window left it, for the Control-Tab switcher.
     public var switcherSnapshot: PlatformImage?
+    /// When `switcherSnapshot` was taken and of which address, so a quick switch back and forth
+    /// reuses it instead of asking WebKit for another.
+    @ObservationIgnored var switcherSnapshotTaken: (date: Date, url: URL?)?
     /// The link under the pointer while Shift is held, for Link Previews; nil otherwise.
     public var linkPreview: LinkPreviewTarget?
     /// Bumped whenever the PDF controls should show: a PDF loads, or the pointer moves over one.
@@ -385,6 +388,7 @@ public final class PageSession: NSObject, Identifiable {
         if !didNotifyOpenToExtensions {
             controller?.tabEvents?.tabOpened(self)
             if controller?.activeWindowSession === self {
+                controller?.tabEvents?.tabShown(new: self, previous: nil)
                 controller?.tabEvents?.tabActivated(new: self, previous: nil)
             }
             didNotifyOpenToExtensions = true
