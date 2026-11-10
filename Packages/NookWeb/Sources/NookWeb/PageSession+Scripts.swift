@@ -97,18 +97,30 @@ extension PageSession {
                 });
                 const observer = new MutationObserver(mutations => {
                     let changed = false;
+                    const added = new Set();
+                    let removed = false;
                     for (const mutation of mutations) {
                         for (const node of mutation.addedNodes) {
-                            if (node.nodeType !== 1) continue;
-                            if (node.matches('audio, video')) { media.add(node); changed = true; }
+                            if (node.nodeType === 1) added.add(node);
+                        }
+                        removed ||= mutation.removedNodes.length > 0;
+                    }
+                    for (const node of added) {
+                        if (!node.isConnected) continue;
+                        // An added ancestor's search already includes this subtree.
+                        let ancestor = node.parentElement;
+                        while (ancestor && !added.has(ancestor)) ancestor = ancestor.parentElement;
+                        if (ancestor) continue;
+                        if (node.matches('audio, video')) { media.add(node); changed = true; }
+                        if (node.firstElementChild) {
                             node.querySelectorAll('audio, video').forEach(element => {
                                 media.add(element); changed = true;
                             });
                         }
-                        if (mutation.removedNodes.length && media.size) {
-                            for (const element of media) {
-                                if (!element.isConnected) { media.delete(element); changed = true; }
-                            }
+                    }
+                    if (removed) {
+                        for (const element of media) {
+                            if (!element.isConnected) { media.delete(element); changed = true; }
                         }
                     }
                     if (streamingSelector && !streamingControl?.isConnected) changed = true;
