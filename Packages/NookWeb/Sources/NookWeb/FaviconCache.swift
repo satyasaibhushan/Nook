@@ -92,6 +92,7 @@ public final class FaviconCache: @unchecked Sendable {
     }
 
     func store(_ image: PlatformImage, for key: String, toDisk: Bool) {
+        let image = Self.boundedForCache(image)
         insert(image, for: key)
         guard toDisk else { return }
         // PNG encoding is CPU work, not I/O; do it on the caller.
@@ -150,6 +151,38 @@ public final class FaviconCache: @unchecked Sendable {
         }
     }
 
+    /// Longest side kept in memory and on disk. Rows draw favicons at 16 pt, the largest use
+    /// is well under 64 pt at 2x, and a 512 px touch icon decodes to 1 MB on its own.
+    static let maxPixelSide = 128
+
+    /// A copy no larger than `maxPixelSide` that keeps the original point size, so it lays out
+    /// exactly as before. Images that already fit, or have no bitmap (PDF), are kept as they are.
+    static func boundedForCache(_ image: PlatformImage) -> PlatformImage {
+        #if canImport(AppKit)
+        let pixels = image.representations.reduce(into: (w: 0, h: 0)) { result, rep in
+            if rep.pixelsWide * rep.pixelsHigh > result.w * result.h { result = (rep.pixelsWide, rep.pixelsHigh) }
+        }
+        let size = image.size
+        guard max(pixels.w, pixels.h) > maxPixelSide, size.width > 0, size.height > 0 else { return image }
+        let scale = CGFloat(maxPixelSide) / CGFloat(max(pixels.w, pixels.h))
+        let width = max(1, Int((CGFloat(pixels.w) * scale).rounded()))
+        let height = max(1, Int((CGFloat(pixels.h) * scale).rounded()))
+        var proposed = CGRect(x: 0, y: 0, width: width, height: height)
+        guard let source = image.cgImage(forProposedRect: &proposed, context: nil, hints: nil),
+              let context = CGContext(
+                  data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return image }
+        context.interpolationQuality = .high
+        context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let bounded = context.makeImage() else { return image }
+        return PlatformImage(cgImage: bounded, size: size)
+        #else
+        return image
+        #endif
+    }
+
     private func fileURL(_ key: String) -> URL {
         directory.appendingPathComponent(fileName(key))
     }
@@ -164,7 +197,8 @@ public final class FaviconCache: @unchecked Sendable {
     }
 
     private func readFromDisk(_ key: String) -> PlatformImage? {
-        guard let data = try? Data(contentsOf: fileURL(key)) else { return nil }
-        return PlatformImage(data: data)
+        guard let data = try? Data(contentsOf: fileURL(key)), let image = PlatformImage(data: data) else { return nil }
+        // Files written before the size bound still hold full-size icons.
+        return Self.boundedForCache(image)
     }
 }
