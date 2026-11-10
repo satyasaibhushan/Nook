@@ -45,7 +45,7 @@ public struct LinksSettingsView: View {
             Section {
                 Toggle("Allow nook:// links", isOn: $settings.allowNookURLs)
             } footer: {
-                Text("Lets launchers like Raycast and Alfred open pages, search and switch spaces, and go to, close, pin, reload or move a tab.")
+                Text("Lets launchers open pages, search, switch spaces, create folders, and select, close, reopen, pin, unpin, reload, move, rename, favorite or unfavorite tabs.")
             }
             #endif
 

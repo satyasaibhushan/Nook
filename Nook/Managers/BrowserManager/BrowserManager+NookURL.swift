@@ -28,7 +28,30 @@ extension BrowserManager {
         switch command.action {
         case .open, .search, .switchSpace:
             break
-        case .close(let id), .pin(let id), .unpin(let id), .reload(let id), .move(let id, _), .select(let id):
+        case .reopen(let id):
+            if !tabs.reopenClosed(id) {
+                nookURLLog.info("Ignored nook:// reopen: no restorable closed item")
+            }
+            return
+        case .folder(let name, let spaceID, let parentID):
+            guard tabs.orderedSpaces.contains(where: { $0.id == spaceID && !$0.isAgent }) else {
+                nookURLLog.info("Ignored nook:// folder: no such space")
+                return
+            }
+            let parent: Parent
+            if let parentID {
+                guard tabs.item(parentID)?.isFolder == true, tabs.spaceID(of: parentID) == spaceID else {
+                    nookURLLog.info("Ignored nook:// folder: no such folder in the space")
+                    return
+                }
+                parent = .folder(itemID: parentID)
+            } else {
+                parent = .pinned(spaceID: spaceID)
+            }
+            tabs.createFolder(title: name, in: parent, after: tabs.children(of: parent).last?.id)
+            return
+        case .close(let id), .pin(let id), .unpin(let id), .reload(let id), .move(let id, _), .select(let id),
+             .rename(let id, _), .favorite(let id), .unfavorite(let id):
             runItemCommand(command.action, on: id)
             return
         }
@@ -41,6 +64,25 @@ extension BrowserManager {
                 return
             }
             spaceID = match
+        }
+        if command.background {
+            guard let target = spaceID ?? windowRegistry?.mostRecentRegularWindow?.spaceID,
+                  tabs.orderedSpaces.contains(where: { $0.id == target && !$0.isAgent }) else {
+                nookURLLog.info("Ignored nook:// background link: no regular space")
+                return
+            }
+            switch command.action {
+            case .open(let url, let reuse):
+                if reuse, tabs.items(inSpace: target).contains(where: { $0.url.map { NookURLCommand.isSamePage($0, url) } == true }) { return }
+                tabs.openInBackground(url: url, spaceID: target)
+            case .search(let query):
+                guard let template = nookSettings?.resolvedSearchEngineTemplate,
+                      let url = NookURLCommand.searchURL(for: query, template: template) else { return }
+                tabs.openInBackground(url: url, spaceID: target)
+            default:
+                break
+            }
+            return
         }
         guard let window = openBrowserWindow(), !window.isIncognito else { return }
         // A window showing the Agent space opens into the first ordinary one.
@@ -57,7 +99,7 @@ extension BrowserManager {
             guard let template = nookSettings?.resolvedSearchEngineTemplate,
                   let url = NookURLCommand.searchURL(for: query, template: template) else { return }
             openFromLauncher(url, reuse: false, space: spaceID, explicit: command.space != nil, in: window)
-        case .close, .pin, .unpin, .reload, .move, .select:
+        case .close, .pin, .unpin, .reload, .move, .select, .reopen, .folder, .rename, .favorite, .unfavorite:
             break
         }
     }
@@ -92,13 +134,42 @@ extension BrowserManager {
                 return
             }
             page.refresh()
-        case .move(_, let folderID):
+        case .move(_, .folder(let folderID)):
             guard folderID != id, tabs.item(folderID)?.isFolder == true, tabs.spaceID(of: folderID) == spaceID else {
                 nookURLLog.info("Ignored nook:// move: no such folder in the item's space")
                 return
             }
             let folder = Parent.folder(itemID: folderID)
             tabs.move(id, to: folder, after: tabs.children(of: folder).last { $0.id != id }?.id)
+        case .move(_, .space(let targetID)):
+            guard targetID != spaceID, tabs.orderedSpaces.contains(where: { $0.id == targetID && !$0.isAgent }) else {
+                nookURLLog.info("Ignored nook:// move: no other regular space")
+                return
+            }
+            let parent: Parent
+            switch tabs.section(of: id) {
+            case .tabs?: parent = .tabs(spaceID: targetID)
+            case .pinned?: parent = .pinned(spaceID: targetID)
+            default:
+                nookURLLog.info("Ignored nook:// move: not in tabs or pinned")
+                return
+            }
+            tabs.move(id, to: parent, after: tabs.children(of: parent).last?.id)
+        case .rename(_, let title):
+            tabs.rename(id, title)
+        case .favorite:
+            guard !item.isFolder, let section = tabs.section(of: id),
+                  section == .tabs(spaceID: spaceID) || section == .pinned(spaceID: spaceID) else {
+                nookURLLog.info("Ignored nook:// favorite: not a regular or pinned tab")
+                return
+            }
+            tabs.pin(id, to: .favorites(spaceID: spaceID))
+        case .unfavorite:
+            guard !item.isFolder, case .favorites? = tabs.section(of: id) else {
+                nookURLLog.info("Ignored nook:// unfavorite: not a favorite tab")
+                return
+            }
+            tabs.pin(id, to: .pinned(spaceID: spaceID))
         case .select:
             guard !item.isFolder else {
                 nookURLLog.info("Ignored nook:// select: a folder")
@@ -106,7 +177,7 @@ extension BrowserManager {
             }
             guard let window = openBrowserWindow(), !window.isIncognito else { return }
             tabs.select(id, in: window)
-        case .open, .search, .switchSpace:
+        case .open, .search, .switchSpace, .reopen, .folder:
             break
         }
     }

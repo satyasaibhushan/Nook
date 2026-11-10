@@ -40,20 +40,54 @@ struct NookURLCommandCheck {
         precondition(parse("nook://open?url=https://a.com&reuse=true")?.action == .open(URL(string: "https://a.com")!, reuse: false))
 
         // Item commands: a UUID in any case; anything else rejects the command.
-        let id = UUID(), folder = UUID()
+        let id = UUID(), folder = UUID(), space = UUID()
         let lower = id.uuidString.lowercased()
         precondition(parse("nook://close?id=\(id.uuidString)")?.action == .close(id))
         precondition(parse("nook://pin?id=\(lower)")?.action == .pin(id))
         precondition(parse("nook://UNPIN?id=\(lower)")?.action == .unpin(id))
         precondition(parse("nook://reload?id=%20\(lower)%20")?.action == .reload(id))
         precondition(parse("nook://select?id=\(lower)")?.action == .select(id))
-        let move = parse("nook://move?id=\(lower)&folder=\(folder.uuidString.lowercased())&space=Work")
-        precondition(move?.action == .move(id, folder: folder) && move?.space == nil && move?.ignored == ["space"])
+        let move = parse("nook://move?id=\(lower)&folder=\(folder.uuidString.lowercased())")
+        precondition(move?.action == .move(id, to: .folder(folder)) && move?.space == nil && move?.ignored == [])
+        precondition(parse("nook://move?id=\(lower)&space=\(space)")?.action == .move(id, to: .space(space)))
+        for command in ["reopen", "favorite", "unfavorite"] {
+            let action: NookURLCommand.Action = command == "reopen" ? .reopen(id) : command == "favorite" ? .favorite(id) : .unfavorite(id)
+            precondition(parse("nook://\(command)?id=\(lower)")?.action == action)
+            for suffix in ["", "?id=", "?id=%20", "?id=bad", "?id=\(lower)x"] {
+                precondition(parse("nook://\(command)\(suffix)") == nil)
+            }
+        }
+        precondition(parse("nook://folder?name=%20Reading%20&space=\(space)")?.action == .folder(name: "Reading", space: space, parent: nil))
+        precondition(parse("nook://folder?name=Reading&space=\(space)&parent=\(folder)")?.action == .folder(name: "Reading", space: space, parent: folder))
+        precondition(parse("nook://rename?id=\(lower)&title=New%20title")?.action == .rename(id, title: "New title"))
+        precondition(parse("nook://rename?id=\(lower)&title=")?.action == .rename(id, title: ""))
+        precondition(parse("nook://rename?id=\(lower)&title=%20")?.action == .rename(id, title: " "))
+        for command in ["open?url=https://a.com", "search?q=hello"] {
+            precondition(parse("nook://\(command)")?.background == false)
+            precondition(parse("nook://\(command)&background=0")?.background == false)
+            let background = parse("nook://\(command)&space=Work&background=1")
+            precondition(background?.background == true && background?.space == "Work" && background?.ignored == [])
+            for flag in ["", "%20", "true", "2", "-1", String(repeating: "1", count: 9000)] {
+                precondition(parse("nook://\(command)&background=\(flag)") == nil)
+            }
+        }
         for bad in [
             "nook://close", "nook://close?id=", "nook://pin?id=%20", "nook://unpin?id=work",
             "nook://reload?id=\(lower.dropLast())", "nook://select?id=\(lower)x", "nook://select?folder=\(lower)",
             "nook://move?id=\(lower)", "nook://move?id=\(lower)&folder=", "nook://move?id=\(lower)&folder=x",
             "nook://move?folder=\(lower)", "nook://close?id=\(lower)&space=",
+            "nook://move?id=\(lower)&space=Work", "nook://move?id=\(lower)&space=",
+            "nook://move?id=\(lower)&space=\(space)&folder=\(folder)",
+            "nook://move?id=\(lower)&space=\(space)&folder=",
+            "nook://move?space=\(space)", "nook://move?id=x&space=\(space)",
+            "nook://open?background=1", "nook://open?url=file:///x&background=1", "nook://search?background=1",
+            "nook://folder", "nook://folder?space=\(space)", "nook://folder?name=&space=\(space)",
+            "nook://folder?name=%20%0A&space=\(space)", "nook://folder?name=F", "nook://folder?name=F&space=Work",
+            "nook://folder?name=F&space=", "nook://folder?name=F&space=\(space)&parent=",
+            "nook://folder?name=F&space=\(space)&parent=x",
+            "nook://folder?space=\(space)&name=" + String(repeating: "x", count: 9000),
+            "nook://rename", "nook://rename?title=x", "nook://rename?id=x&title=x", "nook://rename?id=\(lower)",
+            "nook://rename?id=\(lower)&title=" + String(repeating: "x", count: 9000),
         ] {
             precondition(parse(bad) == nil, bad)
         }
