@@ -178,6 +178,11 @@ extension PageSession {
     /// within a page). Takes the address from WebKit and tells everything that follows it.
     func addressChangedWithoutLoad(in webView: WKWebView?) {
         guard let webView, let url = webView.url else { return }
+        if controller?.settings.youTubeHideShorts == true,
+           let watch = youTubeShortsWatchURL(url) {
+            webView.load(URLRequest(url: watch))
+            return
+        }
         if self.url.absoluteString != url.absoluteString {
             let previous = self.url
             self.url = url
