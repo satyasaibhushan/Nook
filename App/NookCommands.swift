@@ -398,6 +398,7 @@ struct NookCommands: Commands {
                     Button("End Focus") { browserManager.focus.end() }
                         .disabled(browserManager.focus.activeMode == nil)
                 }
+                Button("Activity Report") { browserManager.openActivityReport() }
                 Divider()
                 Menu("Clear Cookies") {
                     Button("Clear Cookies for Current Site") {

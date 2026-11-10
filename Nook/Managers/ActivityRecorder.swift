@@ -123,6 +123,14 @@ final class ActivityRecorder {
         stateQueue.async { [writer] in writer.drain(completion) }
     }
 
+    /// Closes the open stretches so the log on disk covers everything up to now, then calls
+    /// back once it is written. Recording carries on with fresh stretches.
+    func flush(_ completion: @escaping @Sendable () -> Void) {
+        closeStretches()
+        refresh()
+        stateQueue.async { [writer] in writer.drain(completion) }
+    }
+
     private func observe() {
         withObservationTracking { refresh() } onChange: { [weak self] in
             Task { @MainActor in self?.observe() }
