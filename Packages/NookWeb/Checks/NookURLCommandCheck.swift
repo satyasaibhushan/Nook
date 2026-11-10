@@ -39,6 +39,25 @@ struct NookURLCommandCheck {
         precondition(parse("nook://open?url=https://a.com&url=file:///x")?.action == .open(URL(string: "https://a.com")!, reuse: false))
         precondition(parse("nook://open?url=https://a.com&reuse=true")?.action == .open(URL(string: "https://a.com")!, reuse: false))
 
+        // Item commands: a UUID in any case; anything else rejects the command.
+        let id = UUID(), folder = UUID()
+        let lower = id.uuidString.lowercased()
+        precondition(parse("nook://close?id=\(id.uuidString)")?.action == .close(id))
+        precondition(parse("nook://pin?id=\(lower)")?.action == .pin(id))
+        precondition(parse("nook://UNPIN?id=\(lower)")?.action == .unpin(id))
+        precondition(parse("nook://reload?id=%20\(lower)%20")?.action == .reload(id))
+        precondition(parse("nook://select?id=\(lower)")?.action == .select(id))
+        let move = parse("nook://move?id=\(lower)&folder=\(folder.uuidString.lowercased())&space=Work")
+        precondition(move?.action == .move(id, folder: folder) && move?.space == nil && move?.ignored == ["space"])
+        for bad in [
+            "nook://close", "nook://close?id=", "nook://pin?id=%20", "nook://unpin?id=work",
+            "nook://reload?id=\(lower.dropLast())", "nook://select?id=\(lower)x", "nook://select?folder=\(lower)",
+            "nook://move?id=\(lower)", "nook://move?id=\(lower)&folder=", "nook://move?id=\(lower)&folder=x",
+            "nook://move?folder=\(lower)", "nook://close?id=\(lower)&space=",
+        ] {
+            precondition(parse(bad) == nil, bad)
+        }
+
         // Search URL
         let t = "https://www.google.com/search?q=%@"
         precondition(NookURLCommand.searchURL(for: "a&b c+d", template: t)?.absoluteString == "https://www.google.com/search?q=a%26b%20c%2Bd")
