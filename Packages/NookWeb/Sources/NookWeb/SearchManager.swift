@@ -14,12 +14,19 @@ import SwiftUI
 @MainActor
 @Observable
 public class SearchManager {
-    public var suggestions: [SearchSuggestion] = []
-    public var isLoading: Bool = false
-    /// Bare host the omnibox completes to inline, e.g. `facebook.com`. Only set when history has one
-    /// worth offering; the palette re-checks that it still prefixes the typed text before showing it.
-    public var autofillHost: String?
-    
+    private struct Results: Equatable {
+        var suggestions: [SearchSuggestion] = []
+        var isLoading = false
+        var autofillHost: String?
+    }
+
+    private var results = Results()
+    public var suggestions: [SearchSuggestion] { results.suggestions }
+    public var isLoading: Bool { results.isLoading }
+    public var autofillHost: String? { results.autofillHost }
+    @ObservationIgnored private var pendingResults: Results?
+    @ObservationIgnored private var publication: DispatchWorkItem?
+
     public init() {}
 
     private let session = URLSession.shared
@@ -103,17 +110,11 @@ public class SearchManager {
         historyTask?.cancel()
         let generation = UUID()
         searchGeneration = generation
-        isLoading = false
         if !includeWebSuggestions { webRows = [] }
         updateSpaceContext()
         let space = currentSpaceId
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            autofillTask?.cancel()
-            autofillHost = nil
-            historyRows = []
-            textRows = []
-            webRows = []
-            updateSuggestionsIfNeeded([])
+            clearSuggestions()
             return
         }
 
@@ -124,13 +125,13 @@ public class SearchManager {
             let host = await historyManager.autofillHost(prefix: query.trimmingCharacters(in: .whitespacesAndNewlines))
             guard !Task.isCancelled, self.searchGeneration == generation,
                   self.window?.spaceID == space else { return }
-            self.autofillHost = host
+            self.updateResults(coalescing: true) { $0.autofillHost = host }
         }
 
         let tabs = Array(searchTabs(for: query).prefix(2))
         // Paint what is already known for this keystroke, carrying each leg's last rows. The
         // palette puts its own row for the typed text above these.
-        compose(tabs: tabs)
+        compose(tabs: tabs, loading: includeWebSuggestions)
 
         // History is a local lookup, so it runs on this keystroke rather than waiting for a pause
         // in typing. Only the network request is debounced.
@@ -142,19 +143,18 @@ public class SearchManager {
             guard !Task.isCancelled, self.searchGeneration == generation,
                   self.window?.spaceID == space else { return }
             self.historyRows = history
-            self.compose(tabs: tabs)
+            self.compose(tabs: tabs, coalescing: true)
             // Page text second, so title and URL matches paint without waiting on it.
             let text = await self.searchPageText(for: query)
             guard !Task.isCancelled, self.searchGeneration == generation,
                   self.window?.spaceID == space else { return }
             self.textRows = text
-            self.compose(tabs: tabs)
+            self.compose(tabs: tabs, coalescing: true)
         }
 
         // Inline address editing may request local history only. In particular, a
         // complete URL must not be sent to the remote suggestion provider.
         guard includeWebSuggestions else { return }
-        isLoading = true
         searchTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(125)) } catch { return }
             guard let self, !Task.isCancelled else { return }
@@ -162,13 +162,12 @@ public class SearchManager {
             guard !Task.isCancelled, self.searchGeneration == generation,
                   self.window?.spaceID == space else { return }
             self.webRows = webSuggestions
-            self.compose(tabs: tabs)
-            self.isLoading = false
+            self.compose(tabs: tabs, coalescing: true, loading: false)
         }
     }
 
     /// Rebuilds the visible list from the query's local rows plus whatever each leg last returned.
-    @MainActor private func compose(tabs: [SearchSuggestion]) {
+    @MainActor private func compose(tabs: [SearchSuggestion], coalescing: Bool = false, loading: Bool? = nil) {
         // A page that is already an open tab shows once, as the tab.
         let open = Set(tabs.compactMap { row -> String? in
             if case .tab(let match) = row.type { return Self.pageKey(match.url) }
@@ -187,7 +186,11 @@ public class SearchManager {
             if case .history(let entry) = row.type { return !shown.contains(Self.pageKey(entry.url)) }
             return false
         }
-        updateSuggestionsIfNeeded(Array((tabs + history + Array(text.prefix(3)) + webRows).prefix(5)))
+        updateResults(coalescing: coalescing) {
+            $0.suggestions = Array((tabs + history + Array(text.prefix(3)) + webRows).prefix(5))
+            if let loading { $0.isLoading = loading }
+            if !coalescing { $0.autofillHost = nil }
+        }
     }
 
     /// History rows found by words in the page's text, when that setting is on.
@@ -303,56 +306,37 @@ public class SearchManager {
         } catch { return [] }
     }
 
-    private func updateSuggestionsIfNeeded(_ newSuggestions: [SearchSuggestion]) {
-        let shouldAnimate = shouldAnimateChange(from: suggestions, to: newSuggestions)
-        
-        if shouldAnimate {
-            withAnimation(.easeInOut(duration: 0.25)) {
-                suggestions = newSuggestions
+    /// Local rows publish immediately. Async legs finishing in one turn share a publication.
+    private func updateResults(coalescing: Bool = false, _ update: (inout Results) -> Void) {
+        var next = coalescing ? (pendingResults ?? results) : results
+        update(&next)
+        if coalescing {
+            pendingResults = next
+            guard publication == nil else { return }
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, let pending = self.pendingResults else { return }
+                self.pendingResults = nil
+                self.publication = nil
+                if self.results != pending { self.results = pending }
             }
+            publication = work
+            DispatchQueue.main.async(execute: work)
         } else {
-            suggestions = newSuggestions
+            publication?.cancel()
+            publication = nil
+            pendingResults = nil
+            if results != next { results = next }
         }
     }
-    
-    private func shouldAnimateChange(from oldSuggestions: [SearchSuggestion], to newSuggestions: [SearchSuggestion]) -> Bool {
-        if oldSuggestions.isEmpty != newSuggestions.isEmpty {
-            return true
-        }
-        
-        // Always animate if count changes significantly
-        if abs(oldSuggestions.count - newSuggestions.count) > 2 {
-            return true
-        }
-        
-        // Compare suggestion texts to see if there are significant changes
-        let oldTexts = Set(oldSuggestions.map { $0.text })
-        let newTexts = Set(newSuggestions.map { $0.text })
-        
-        // Calculate how many suggestions are different
-        let intersection = oldTexts.intersection(newTexts)
-        let totalUnique = oldTexts.union(newTexts).count
-        let similarityRatio = Double(intersection.count) / Double(max(totalUnique, 1))
-        
-        // Only animate if less than 60% of suggestions are the same
-        return similarityRatio < 0.6
-    }
-    
-    
+
     public func clearSuggestions() {
         searchTask?.cancel()
         historyTask?.cancel()
         autofillTask?.cancel()
-        autofillHost = nil
         historyRows = []
         textRows = []
         webRows = []
         searchGeneration = UUID()
-        if !suggestions.isEmpty {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                suggestions = []
-            }
-        }
-        isLoading = false
+        updateResults { $0 = Results() }
     }
 }
