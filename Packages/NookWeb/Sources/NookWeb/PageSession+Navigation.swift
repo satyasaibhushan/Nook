@@ -416,6 +416,14 @@ extension PageSession: WKNavigationDelegate {
             return
         }
 
+        if navigationAction.targetFrame?.isMainFrame == true,
+           controller?.settings.youTubeHideShorts == true,
+           let url = navigationAction.request.url, let watch = youTubeShortsWatchURL(url) {
+            decisionHandler(.cancel)
+            webView.load(URLRequest(url: watch))
+            return
+        }
+
         // Air Traffic Control — route cross-domain navigations to designated spaces.
         // Main frame only: an embedded iframe must not open tabs in another space.
         if navigationAction.targetFrame?.isMainFrame == true,

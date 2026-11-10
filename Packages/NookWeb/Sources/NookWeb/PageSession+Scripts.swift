@@ -331,6 +331,11 @@ extension PageSession: WKScriptMessageHandler {
             // has already updated webView.url for a same-document navigation by the time
             // the message arrives.
             if let url = message.webView?.url {
+                if controller?.settings.youTubeHideShorts == true,
+                   let watch = youTubeShortsWatchURL(url) {
+                    message.webView?.load(URLRequest(url: watch))
+                    return
+                }
                 if self.url.absoluteString != url.absoluteString {
                     self.url = url
                     // NOTE: Do NOT call syncTabAcrossWindows here. SPA navigations
