@@ -132,9 +132,9 @@ struct NookCommands: Commands {
             .modifier(dynamicShortcut(.undoCloseTab))
 
             Button("Reopen Closed Tab") {
-                if let window = windowRegistry.activeWindow { browserManager.tabs.reopenLastClosed(in: window) }
+                shortcutManager.executeMenuAction(.undoCloseTab)
             }
-            .keyboardShortcut("t", modifiers: [.command, .shift])
+            .modifier(dynamicShortcut(.undoCloseTab))
         }
 
         // File Section
@@ -148,6 +148,18 @@ struct NookCommands: Commands {
             }
             .modifier(dynamicShortcut(.togglePinTab))
             .disabled(browserManager.pinToggleIsPin == nil)
+
+            Button("Duplicate Tab") {
+                shortcutManager.executeMenuAction(.duplicateTab)
+            }
+            .modifier(dynamicShortcut(.duplicateTab))
+            .disabled(windowRegistry.activeWindow?.selectedItemID == nil)
+
+            Button("Close Tab") {
+                shortcutManager.executeMenuAction(.closeTab)
+            }
+            .modifier(dynamicShortcut(.closeTab))
+            .disabled(windowRegistry.activeWindow == nil || windowRegistry.activeWindow?.isCommandPaletteVisible == true)
 
             Button("New Window") {
                 browserManager.createNewWindow()
@@ -179,6 +191,20 @@ struct NookCommands: Commands {
             }
             .modifier(dynamicShortcut(.printPage))
             .disabled(browserManager.tabs.activeWindowSession == nil)
+        }
+
+        CommandGroup(before: .windowList) {
+            Button("Next Tab") {
+                shortcutManager.executeMenuAction(.nextTab)
+            }
+            .modifier(dynamicShortcut(.nextTab))
+            .disabled(windowRegistry.activeWindow == nil)
+
+            Button("Previous Tab") {
+                shortcutManager.executeMenuAction(.previousTab)
+            }
+            .modifier(dynamicShortcut(.previousTab))
+            .disabled(windowRegistry.activeWindow == nil)
         }
 
         // Sidebar commands
@@ -330,6 +356,20 @@ struct NookCommands: Commands {
         }
 
         Group {
+            CommandMenu("History") {
+                Button("Back") {
+                    shortcutManager.executeMenuAction(.goBack)
+                }
+                .modifier(dynamicShortcut(.goBack))
+                .disabled(browserManager.tabs.activeWindowSession?.canGoBackOrReturn != true)
+
+                Button("Forward") {
+                    shortcutManager.executeMenuAction(.goForward)
+                }
+                .modifier(dynamicShortcut(.goForward))
+                .disabled(browserManager.tabs.activeWindowSession?.canGoForward != true)
+            }
+
             CommandMenu("Spaces") {
                 Button("Next Space") {
                     if let window = windowRegistry.activeWindow { browserManager.tabs.selectNextSpace(in: window) }

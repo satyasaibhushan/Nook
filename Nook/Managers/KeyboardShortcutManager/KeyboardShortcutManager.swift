@@ -506,6 +506,12 @@ class KeyboardShortcutManager {
         return true
     }
 
+    /// Menu clicks step through the sidebar; only a Control-Tab key event opens the switcher.
+    func executeMenuAction(_ action: ShortcutAction) {
+        lastShortcutWasControlTab = false
+        executeAction(action)
+    }
+
     private func executeAction(_ action: ShortcutAction) {
         guard let browserManager = browserManager else { return }
 
