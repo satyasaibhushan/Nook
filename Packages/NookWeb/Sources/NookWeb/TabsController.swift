@@ -28,7 +28,16 @@ public final class TabsController {
     // MARK: - State
 
     public private(set) var tree: TabTree
-    public internal(set) var device: DeviceState
+    public internal(set) var device: DeviceState {
+        get {
+            access(keyPath: \.device)
+            return deviceStorage
+        }
+        set {
+            withMutation(keyPath: \.device) { deviceStorage = newValue }
+        }
+    }
+    @ObservationIgnored private var deviceStorage: DeviceState
     /// Tabs closed or idle out of the tabs sections (`archive.json`).
     public internal(set) var archive = Archive()
     /// Tabs shielded at the last auto-archive pass; one that dropped out gets a fresh stamp.
@@ -146,13 +155,13 @@ public final class TabsController {
             } else {
                 tree = Self.seed(from: legacyProfiles)
             }
-            device = DeviceState()
-            device.firstLaunchCompleted = true
+            deviceStorage = DeviceState()
+            deviceStorage.firstLaunchCompleted = true
         case .loaded, .restoredFromBackup:
             tree = loaded.tree
-            device = loaded.device
+            deviceStorage = loaded.device
             // A quit ends every page, so pinned tabs and favorites start at their home URL again.
-            device.openPages = [:]
+            deviceStorage.openPages = [:]
         }
         log.info("Tabs loaded: \(String(describing: loaded.outcome), privacy: .public), \(self.tree.items.count) items")
         if case .readOnly(let reason) = loaded.outcome {
@@ -774,7 +783,7 @@ public final class TabsController {
             window.split = record.split
             window.pendingFrame = record.frame
             window.applyPendingFrame()
-            device.windows[index].id = window.id
+            updateDeviceUnobserved { $0.windows[index].id = window.id }
         }
         if window.spaceID == nil {
             window.spaceID = tree.orderedSpaces.first?.id
@@ -800,7 +809,7 @@ public final class TabsController {
         guard !isTerminating else { return }
         // The last window's record stays to reopen it, at the size it had when it closed.
         guard !others.isEmpty else { return mirror(window) }
-        device.windows.removeAll { $0.id == window.id }
+        updateDeviceUnobserved { $0.windows.removeAll { $0.id == window.id } }
         save()
     }
 
@@ -808,6 +817,13 @@ public final class TabsController {
     public func unclaimedWindowRecords() -> [WindowRecord] {
         let open = Set(regularWindows.map(\.id))
         return device.windows.filter { !open.contains($0.id) }
+    }
+
+    /// For the parts of `device` no view shows: activity stamps and saved window records. They
+    /// change on every tab switch, and a change through `device` would redraw every sidebar row.
+    /// They still go to disk with the next `save()`.
+    func updateDeviceUnobserved(_ body: (inout DeviceState) -> Void) {
+        body(&deviceStorage)
     }
 
     /// Copies a regular window's selection into DeviceState.windows.
@@ -820,9 +836,9 @@ public final class TabsController {
             split: window.split, frame: frame)
         if let index = device.windows.firstIndex(where: { $0.id == window.id }) {
             guard device.windows[index] != record else { return }
-            device.windows[index] = record
+            updateDeviceUnobserved { $0.windows[index] = record }
         } else {
-            device.windows.append(record)
+            updateDeviceUnobserved { $0.windows.append(record) }
         }
         save()
     }

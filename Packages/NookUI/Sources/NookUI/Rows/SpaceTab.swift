@@ -15,11 +15,15 @@ import NookTabsCore
 import NookWeb
 
 /// One tab row in the sidebar outline.
-public struct SpaceTab: View {
+public struct SpaceTab: View, Equatable {
     let item: Item
     var menuContext: TabMenuContext = .sidebar
     /// A tab with a trail of child tabs draws a chevron that collapses it, as a folder row does.
     var hasChildren = false
+    /// Passed in rather than read here, so a tab switch redraws only the two rows it changes.
+    let isSelected: Bool
+    /// Part of a multi-selection of two or more visible tabs.
+    let isMultiSelected: Bool
 
     @State private var isHovering: Bool = false
     @State private var isCloseHovering: Bool = false
@@ -41,11 +45,20 @@ public struct SpaceTab: View {
     public init(
         item: Item,
         menuContext: TabMenuContext = .sidebar,
-        hasChildren: Bool = false
+        hasChildren: Bool = false,
+        isSelected: Bool,
+        isMultiSelected: Bool
     ) {
         self.item = item
         self.menuContext = menuContext
         self.hasChildren = hasChildren
+        self.isSelected = isSelected
+        self.isMultiSelected = isMultiSelected
+    }
+
+    public static func == (lhs: SpaceTab, rhs: SpaceTab) -> Bool {
+        lhs.item == rhs.item && lhs.menuContext == rhs.menuContext && lhs.hasChildren == rhs.hasChildren
+            && lhs.isSelected == rhs.isSelected && lhs.isMultiSelected == rhs.isMultiSelected
     }
 
     /// The folder row's chevron; clicking it collapses the trail without selecting the tab.
@@ -79,7 +92,7 @@ public struct SpaceTab: View {
             windowState.multiSelection.clear()
             if selectedOnPress {
                 selectedOnPress = false
-            } else if isCurrentTab {
+            } else if isSelected {
                 startRename(title)
             } else {
                 if isRenaming { commitRename() }
@@ -201,7 +214,7 @@ public struct SpaceTab: View {
                         .strokeBorder(accentColor, lineWidth: NookDesign.Size.hairlineWidth)
                 }
             }
-            .nookTabSurface(selected: isCurrentTab || isMultiSelected, hovered: isHovering)
+            .nookTabSurface(selected: isSelected || isMultiSelected, hovered: isHovering)
             // Developer Mode on this tab's site, marked as Arc marks it.
             .overlay {
                 if nookSettings.isDeveloperSite(tabs.currentURL(for: item)?.host) {
@@ -248,10 +261,6 @@ public struct SpaceTab: View {
         return Text(tidy.title) + Text("  " + site).foregroundColor(.secondary)
     }
 
-    private var isMultiSelected: Bool {
-        windowState.multiSelection.contains(item.id) && tabs.selectedItems(in: windowState).contains(item.id)
-    }
-
     /// Whether the key is down for the click being handled.
     private func clickHolds(_ key: EventModifiers) -> Bool {
         #if os(macOS)
@@ -262,16 +271,12 @@ public struct SpaceTab: View {
         #endif
     }
 
-    private var isCurrentTab: Bool {
-        tabs.selectedItemID(in: windowState) == item.id
-    }
-
     private var showsReset: Bool { tabs.hasLeftHome(item.id) }
 
     /// A plain press on another tab selects it at once; the release then has nothing to do.
     private func selectOnPress() {
         selectedOnPress = false
-        guard !isCurrentTab, !clickHolds(.command), !clickHolds(.shift) else { return }
+        guard !isSelected, !clickHolds(.command), !clickHolds(.shift) else { return }
         windowState.multiSelection.clear()
         selectedOnPress = true
         tabs.select(item.id, in: windowState)
