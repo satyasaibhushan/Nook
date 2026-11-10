@@ -72,7 +72,7 @@ struct SpaceView: View {
                 }
 
                 VStack(spacing: NookDesign.Spacing.sectionGap) {
-                    separatorAndNewTab(regular: regular)
+                    separatorAndNewTab(regular: regular, hasPinned: rows.contains { $0.section == .pinned })
                     sectionList(.tabs(spaceID: spaceID), rows: regular, split: split, showsTail: true)
                 }
             }
@@ -273,7 +273,7 @@ struct SpaceView: View {
 
     // MARK: - Separator and New Tab
 
-    private func separatorAndNewTab(regular: [Row]) -> some View {
+    private func separatorAndNewTab(regular: [Row], hasPinned: Bool) -> some View {
         let looseTabs = regular.filter { $0.depth == 0 && !$0.item.isFolder }.map(\.item.id)
         let kept = [windowState.selectedItemID, windowState.split?.leftItemID, windowState.split?.rightItemID].compactMap { $0 }
         let clearable = tabs.tabsToClear(in: spaceID, keeping: kept)
@@ -293,7 +293,7 @@ struct SpaceView: View {
             )
             .padding(.horizontal, NookDesign.Spacing.md)
 
-            if tabs.rows(space: spaceID).allSatisfy({ $0.section != .pinned }), dragSession.isDragging {
+            if !hasPinned, dragSession.isDragging {
                 // Reuse the New Tab slot, so revealing an empty pin target cannot push the
                 // whole list down beneath the pointer at the start of a drag.
                 sectionList(.pinned(spaceID: spaceID), rows: [], split: nil, showsTail: false)
