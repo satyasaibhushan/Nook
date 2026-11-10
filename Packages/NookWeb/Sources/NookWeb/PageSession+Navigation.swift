@@ -153,7 +153,7 @@ extension PageSession: WKNavigationDelegate {
         // Fetch favicon after page loads
         if let currentURL = webView.url {
             Task { @MainActor in
-                await self.fetchAndSetFavicon(for: currentURL)
+                await self.fetchAndSetFavicon(for: currentURL, in: webView)
             }
         }
 
