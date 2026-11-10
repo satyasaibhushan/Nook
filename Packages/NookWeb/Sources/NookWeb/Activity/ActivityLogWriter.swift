@@ -25,11 +25,11 @@ public final class ActivityLogWriter: @unchecked Sendable {
     public func write(closed: [ActivityAccounting.Stretch], open: [ActivityAccounting.Stretch]) {
         queue.async {
             self.perform {
-                try self.finishPending()
                 for stretch in closed {
                     self.entries[stretch.id] = Entry(stretch: stretch)
                     self.pending.insert(stretch.id)
                 }
+                // Persist pending offsets and new rows before retrying a failed append.
                 try self.saveJournal()
                 try self.finishPending()
                 self.entries = Dictionary(uniqueKeysWithValues: open.map { ($0.id, Entry(stretch: $0)) })
