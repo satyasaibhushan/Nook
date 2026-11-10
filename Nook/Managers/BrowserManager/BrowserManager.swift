@@ -644,8 +644,8 @@ class BrowserManager: ObservableObject {
         windowState.savedSidebarWidth = width
         windowState.sidebarContentWidth = max(width - 16, 0)
         if windowRegistry?.activeWindow?.id == windowState.id {
-                savedSidebarWidth = width
-            }
+            savedSidebarWidth = width
+        }
     }
 
     func saveSidebarWidthToDefaults() {
@@ -843,7 +843,6 @@ class BrowserManager: ObservableObject {
         if savedWidth > 0 {
             // A width saved under an older, smaller minimum would hide the history buttons.
             savedSidebarWidth = min(min(max(savedWidth, SidebarWidth.min), SidebarWidth.max), SidebarWidth.max)
-            // Kept while hidden: showing the sidebar does not restore it, and the hover overlay uses it.
         } else {
             // First launch: ensure sidebar is visible with default width
             savedSidebarWidth = SidebarWidth.standard

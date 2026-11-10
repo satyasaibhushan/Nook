@@ -337,6 +337,11 @@ struct WebsiteView: View {
                 AgentFrame(shape: webViewClipShape, busy: browserManager.tabs.agentCallsInFlight > 0)
             }
         }
+        .onChange(of: windowState.selectedItemID) { _, selectedID in
+            if linkHover.session?.itemID != selectedID { linkHover.session = nil }
+            linkHover.hoveredLink = nil
+            linkHover.isCommandPressed = false
+        }
     }
 
 }
@@ -883,9 +888,20 @@ private struct TabCompositorWrapper: NSViewRepresentable {
     }
 
     private func setupHoverCallbacks(for session: PageSession) {
+        guard !browserManager.tabs.isPageShownElsewhere(session.itemID, from: windowState) else {
+            if linkHover.session != nil {
+                linkHover.session = nil
+                DispatchQueue.main.async {
+                    linkHover.hoveredLink = nil
+                    linkHover.isCommandPressed = false
+                }
+            }
+            return
+        }
         if linkHover.session !== session {
             linkHover.session = session
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak session] in
+                guard let session, linkHover.session === session else { return }
                 linkHover.hoveredLink = nil
                 linkHover.isCommandPressed = false
             }
