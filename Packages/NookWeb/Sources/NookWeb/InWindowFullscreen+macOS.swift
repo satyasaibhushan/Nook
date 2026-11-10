@@ -65,26 +65,29 @@ private enum InWindowFullscreen {
     // goes. WebKit only waits for the two steps that carry a listener.
     private static let willEnter: WillEnter = { _, listener, _ in completeListener?(listener, nil) }
     private static let beganEnter: BeganEnter = { _, _, _, _ in }
-    private static let exit: Exit = { _, _ in }
-    // The page stays fullscreen until this step is completed, and the app gives the view its
-    // smaller frame only after that. A busy page takes many frames to draw at the new size,
-    // showing its fullscreen picture cropped meanwhile, so that picture is held over the view
-    // first, as WebKit's own presenter holds one over its window.
+    // The page stays fullscreen until the second step is completed, and the app puts its
+    // chrome back when the exit starts. Holding the step until the view has drawn at its
+    // smaller frame lets the page leave fullscreen at the size it ends up with. Otherwise it
+    // leaves at the old size and resizes while busy with its own exit, which shows its
+    // fullscreen picture cropped for as long as that takes.
+    private static let exit: Exit = { _, info in
+        guard let info else { return }
+        MainActor.assumeIsolated { webViewRef(info).watchFrame() }
+    }
     private static let beganExit: BeganExit = { _, _, _, listener, info in
         guard let info, let retain, let release, retain(listener) != nil else {
             completeListener?(listener, nil)
             return
         }
         let step = HeldStep(listener: listener, release: release)
-        MainActor.assumeIsolated {
-            guard let webView = Unmanaged<WebViewRef>.fromOpaque(info).takeUnretainedValue().webView else {
-                return step.finish()
-            }
-            FullscreenExitCover.hold(over: webView) { step.finish() }
-        }
+        MainActor.assumeIsolated { webViewRef(info).afterRedraw { step.finish() } }
     }
 
-    /// A step WebKit waits on, kept alive until the cover is up.
+    private static func webViewRef(_ info: UnsafeRawPointer) -> WebViewRef {
+        Unmanaged<WebViewRef>.fromOpaque(info).takeUnretainedValue()
+    }
+
+    /// A step WebKit waits on, kept alive until the view has redrawn.
     private struct HeldStep: @unchecked Sendable {
         let listener: UnsafeRawPointer
         let release: Release
@@ -97,9 +100,62 @@ private enum InWindowFullscreen {
 
     /// What the callbacks get as their client info. The web view owns it, so it lives as long
     /// as the page that calls back.
+    @MainActor
     private final class WebViewRef {
-        weak var webView: WKWebView?
-        init(_ webView: WKWebView) { self.webView = webView }
+        private weak var webView: WKWebView?
+        private var frameObserver: NSObjectProtocol?
+        private var frameChanged = false
+        private var proceed: (@MainActor () -> Void)?
+
+        nonisolated init(_ webView: WKWebView) { self.webView = webView }
+
+        /// From the start of an exit, since the app may resize the view before WebKit reaches
+        /// the step that waits.
+        func watchFrame() {
+            stopWatching()
+            frameChanged = false
+            frameObserver = NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification, object: webView, queue: .main
+            ) { [weak self] _ in MainActor.assumeIsolated { self?.frameDidChange() } }
+        }
+
+        func afterRedraw(_ proceed: @escaping @MainActor () -> Void) {
+            self.proceed = proceed
+            if frameChanged { return afterNextDraw() }
+            // A view whose frame is the same either way never changes it, and nothing may
+            // keep the page waiting for long.
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(80))
+                self?.afterNextDraw()
+                try? await Task.sleep(for: .milliseconds(250))
+                self?.finish()
+            }
+        }
+
+        private func frameDidChange() {
+            frameChanged = true
+            if proceed != nil { afterNextDraw() }
+        }
+
+        private func afterNextDraw() {
+            stopWatching()
+            let selector = NSSelectorFromString("_doAfterNextPresentationUpdate:")
+            guard proceed != nil, let webView, webView.responds(to: selector) else { return finish() }
+            let done: @convention(block) () -> Void = { [weak self] in MainActor.assumeIsolated { self?.finish() } }
+            webView.perform(selector, with: done)
+        }
+
+        private func finish() {
+            stopWatching()
+            let proceed = self.proceed
+            self.proceed = nil
+            proceed?()
+        }
+
+        private func stopWatching() {
+            if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
+            frameObserver = nil
+        }
     }
 
     nonisolated(unsafe) private static var refKey: UInt8 = 0
@@ -142,63 +198,6 @@ private enum InWindowFullscreen {
             setClient(page, nil)
         }
         return true
-    }
-}
-
-/// The page's last fullscreen picture, laid over it from the moment it leaves fullscreen until
-/// it has drawn at the frame the app gives it back.
-@MainActor
-private final class FullscreenExitCover {
-    private let view: NSImageView
-    private weak var webView: WKWebView?
-    private var frameObserver: NSObjectProtocol?
-    private var removed = false
-
-    static func hold(over webView: WKWebView, then proceed: @escaping @MainActor () -> Void) {
-        guard let host = webView.window?.contentView else { return proceed() }
-        webView.takeSnapshot(with: nil) { [weak webView] image, _ in
-            defer { proceed() }
-            guard let image, let webView, webView.window?.contentView === host else { return }
-            FullscreenExitCover(image, over: webView, in: host).waitForRedraw()
-        }
-    }
-
-    private init(_ image: NSImage, over webView: WKWebView, in host: NSView) {
-        view = NSImageView(image: image)
-        view.imageScaling = .scaleAxesIndependently
-        view.frame = host.convert(webView.bounds, from: webView)
-        self.webView = webView
-        host.addSubview(view)
-    }
-
-    private func waitForRedraw() {
-        // The frame change is the app putting its chrome back. A page whose frame is the same
-        // either way never sends one, and no page may keep the cover for long.
-        frameObserver = NotificationCenter.default.addObserver(
-            forName: NSView.frameDidChangeNotification, object: webView, queue: .main
-        ) { [self] _ in MainActor.assumeIsolated { removeAfterNextDraw() } }
-        Task { [self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            removeAfterNextDraw()
-            try? await Task.sleep(for: .milliseconds(500))
-            remove()
-        }
-    }
-
-    private func removeAfterNextDraw() {
-        if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
-        frameObserver = nil
-        let selector = NSSelectorFromString("_doAfterNextPresentationUpdate:")
-        guard let webView, webView.responds(to: selector) else { return remove() }
-        let done: @convention(block) () -> Void = { [self] in MainActor.assumeIsolated { remove() } }
-        webView.perform(selector, with: done)
-    }
-
-    private func remove() {
-        guard !removed else { return }
-        removed = true
-        if let frameObserver { NotificationCenter.default.removeObserver(frameObserver) }
-        view.removeFromSuperview()
     }
 }
 #endif
