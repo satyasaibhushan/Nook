@@ -738,6 +738,13 @@ def scenario(browser, name, index, record):
     raw["window_frame"] = bounds
     raw["pointer_park"] = pointer
     if name == "activate":
+        observed = raw["events"][0].get("pointer_before")
+        raw["pointer_park_verified"] = bool(observed and abs(observed[0]-pointer["x"]) < 2 and abs(observed[1]-pointer["y"]) < 2)
+        if not raw["pointer_park_verified"]:
+            if record:
+                (record/"unverified-pointer.json").write_text(json.dumps(raw)+"\n")
+            raise Invalid(f"activation pointer was not parked: {observed}")
+    if name == "activate":
         for frame in raw["frames"]:
             if "window_changed_fraction" in frame:
                 frame["display_changed_fraction"] = frame["changed"]
