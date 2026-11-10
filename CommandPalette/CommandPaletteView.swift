@@ -60,10 +60,12 @@ struct CommandPaletteView: View {
         return [primary] + rest.prefix(4)
     }
 
-    /// Async completion is accepted explicitly so it cannot change a displayed Return target.
+    /// What Return does with what was typed: the completed host, the address, or a search. The
+    /// completion is known within the keystroke, so this row does not change once shown.
     private var primarySuggestion: SearchManager.SearchSuggestion? {
         let typed = userTypedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty else { return nil }
+        if let host = completionHost { return SearchManager.SearchSuggestion(text: host, type: .url) }
         return SearchManager.SearchSuggestion(text: typed, type: activeSiteSearch == nil && isLikelyURL(typed) ? .url : .search)
     }
 
@@ -505,10 +507,11 @@ struct CommandPaletteView: View {
         }
     }
 
-    /// The leading icon describes the displayed Return row.
+    /// Globe once Return would navigate, which includes the case where only the inline
+    /// completion makes it a URL.
     private var leadingIconName: String {
         guard activeSiteSearch == nil else { return "magnifyingglass" }
-        return isLikelyURL(text) ? "globe" : "magnifyingglass"
+        return isLikelyURL(text) || autofillTarget != nil ? "globe" : "magnifyingglass"
     }
 
     /// Host that what was typed completes to, while it still prefixes it.
