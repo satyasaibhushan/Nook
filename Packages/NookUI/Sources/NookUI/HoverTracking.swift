@@ -108,19 +108,9 @@ final class HoverTrackingNSView: NSView {
     }
 }
 
-/// Rows that slide under a resting pointer get no enter event (`.inVisibleRect` areas move
-/// without `updateTrackingAreas`), so a close asks every hover view to check the pointer again.
+/// Posted when closing rows have reached their final geometry under a resting pointer.
 public enum HoverResync {
     static let notification = Notification.Name("NookHoverResync")
-
-    @MainActor public static func request(after delay: TimeInterval) {
-        // Once when the slide should be done, once more for a frame that landed late.
-        for extra in [0, 0.1] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay + extra) {
-                NotificationCenter.default.post(name: notification, object: nil)
-            }
-        }
-    }
 }
 
 // MARK: - View Modifier
@@ -137,11 +127,6 @@ struct HoverTrackingModifier: ViewModifier {
 }
 
 #else
-
-public enum HoverResync {
-    @MainActor public static func request(after delay: TimeInterval) {}
-}
-
 
 /// Hover is a pointer notion; on iOS SwiftUI's own `.onHover` is cheap and only fires
 /// with a connected pointer.

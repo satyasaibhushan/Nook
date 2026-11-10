@@ -150,42 +150,41 @@ public struct SpaceTab: View {
                 }
             }
             .overlay(alignment: .trailing) {
-                if isHovering {
-                    HStack(spacing: 0) {
-                        // Resets a pinned tab whose page left its pinned URL; sits left of close and fades in with it.
-                        if showsReset {
-                            Button { tabs.resetToHome(item.id) } label: {
-                                Image(systemName: "arrow.uturn.backward")
-                                    .font(NookDesign.Font.secondary)
-                                    .foregroundStyle(.primary)
-                                    .frame(width: NookDesign.Size.rowButton, height: NookDesign.Size.rowButton)
-                                    .background(isResetHovering ? NookDesign.Surface.fillPressed : Color.clear)
-                                    .clipShape(NookDesign.Radius.shape(NookDesign.Radius.sm))
-                            }
-                            .buttonStyle(.plain)
-                            .help("Reset to Pinned URL")
-                            .onHoverTracking { isResetHovering = $0 }
-                        }
-                        // Synced loaded tabs: "-" unloads the page; unloaded synced tabs: "x" removes the item;
-                        // tabs section: "x" closes.
-                        let useUnload = tabs.isSynced(item.id) && !isUnloaded
-                        Button(action: {
-                            if useUnload { tabs.unload(item.id) } else { tabs.remove(item.id) }
-                            // The next row slides under the pointer; let it show its close button.
-                            HoverResync.request(after: NookDesign.Motion.tabCloseDuration)
-                        }) {
-                            Image(systemName: useUnload ? "minus" : "xmark")
+                HStack(spacing: 0) {
+                    // Resets a pinned tab whose page left its pinned URL; sits left of close and fades in with it.
+                    if isHovering && showsReset {
+                        Button { tabs.resetToHome(item.id) } label: {
+                            Image(systemName: "arrow.uturn.backward")
                                 .font(NookDesign.Font.secondary)
-                                .foregroundColor(.primary)
+                                .foregroundStyle(.primary)
                                 .frame(width: NookDesign.Size.rowButton, height: NookDesign.Size.rowButton)
-                                .background(isCloseHovering ? NookDesign.Surface.fillPressed : Color.clear)
+                                .background(isResetHovering ? NookDesign.Surface.fillPressed : Color.clear)
                                 .clipShape(NookDesign.Radius.shape(NookDesign.Radius.sm))
                         }
-                        .buttonStyle(PlainButtonStyle())
-                        .help(useUnload ? "Unload" : "Close")
-                        .onHoverTracking { hovering in
-                            isCloseHovering = hovering
+                        .buttonStyle(.plain)
+                        .help("Reset to Pinned URL")
+                        .onHoverTracking { isResetHovering = $0 }
+                    }
+                    // Synced loaded tabs: "-" unloads the page; unloaded synced tabs: "x" removes the item;
+                    // tabs section: "x" closes.
+                    let useUnload = tabs.isSynced(item.id) && !isUnloaded
+                    TabCloseButton(title: useUnload ? "Unload" : "Close", isVisible: isHovering, action: {
+                        guard tabs.item(item.id) != nil else { return }
+                        if useUnload { tabs.unload(item.id) } else {
+                            TabCloseResync.request()
+                            tabs.remove(item.id)
                         }
+                    }) {
+                        Image(systemName: useUnload ? "minus" : "xmark")
+                            .font(NookDesign.Font.secondary)
+                            .foregroundColor(.primary)
+                            .frame(width: NookDesign.Size.rowButton, height: NookDesign.Size.rowButton)
+                            .background(isCloseHovering ? NookDesign.Surface.fillPressed : Color.clear)
+                            .clipShape(NookDesign.Radius.shape(NookDesign.Radius.sm))
+                    }
+                    .help(useUnload ? "Unload" : "Close")
+                    .onHoverTracking { hovering in
+                        isCloseHovering = hovering
                     }
                 }
             }
