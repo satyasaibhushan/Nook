@@ -98,12 +98,16 @@ import Foundation
         try FileManager.default.createDirectory(at: replayLogs, withIntermediateDirectories: true)
         let firstStretch = engine.checkpoint[0]
         let nextStretch = ActivityAccounting.Stretch(id: UUID(), fileName: firstStretch.fileName, record: firstStretch.record)
-        var rowData = try JSONEncoder().encode(firstStretch.record)
-        rowData.append(0x0a)
+        let rowEncoder = JSONEncoder()
+        rowEncoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        // Leading whitespace makes these valid row bytes differ from a fresh JSONEncoder's output.
+        let rowData = Data(" ".utf8) + (try rowEncoder.encode(firstStretch.record)) + Data("\n".utf8)
+        let freshRow = try JSONEncoder().encode(firstStretch.record) + Data("\n".utf8)
+        precondition(rowData != freshRow)
         let replayLog = replayLogs.appendingPathComponent(firstStretch.fileName)
         try rowData.prefix(rowData.count / 2).write(to: replayLog)
         let journal: [[String: Any]] = [
-            ["stretch": try JSONSerialization.jsonObject(with: JSONEncoder().encode(firstStretch)), "offset": 0],
+            ["stretch": try JSONSerialization.jsonObject(with: JSONEncoder().encode(firstStretch)), "offset": 0, "row": rowData.base64EncodedString()],
             ["stretch": try JSONSerialization.jsonObject(with: JSONEncoder().encode(nextStretch))]
         ]
         let journalURL = replayDirectory.appendingPathComponent("checkpoint.json")
@@ -111,13 +115,91 @@ import Foundation
         let repair = ActivityLogWriter(directory: replayDirectory)
         repair.drain { drained.signal() }; drained.wait()
         let repairedLog = try Data(contentsOf: replayLog)
-        precondition(repairedLog == rowData + rowData)
+        precondition(repairedLog.starts(with: rowData))
+        let repairedRows = try repairedLog.split(separator: 0x0a).map { try JSONDecoder().decode(ActivityRecord.self, from: Data($0)) }
+        precondition(repairedRows == [firstStretch.record, nextStretch.record])
         // Simulate death after append but before its journal entry was removed.
         try JSONSerialization.data(withJSONObject: [journal[0]]).write(to: journalURL)
         let repeated = ActivityLogWriter(directory: replayDirectory)
         repeated.drain { drained.signal() }; drained.wait()
         let repeatedLog = try Data(contentsOf: replayLog)
         precondition(repeatedLog == repairedLog)
+        // Old checkpoints have no row bytes, including an interrupted or completed append.
+        let oldEntry: [String: Any] = ["stretch": journal[0]["stretch"]!, "offset": rowData.count]
+        try (rowData + rowData.prefix(rowData.count / 2)).write(to: replayLog)
+        try JSONSerialization.data(withJSONObject: [oldEntry]).write(to: journalURL)
+        let oldRepair = ActivityLogWriter(directory: replayDirectory)
+        oldRepair.drain { drained.signal() }; drained.wait()
+        let oldLog = try Data(contentsOf: replayLog)
+        let oldRows = try oldLog.split(separator: 0x0a).map { try JSONDecoder().decode(ActivityRecord.self, from: Data($0)) }
+        precondition(oldLog.starts(with: rowData) && oldRows == [firstStretch.record, firstStretch.record])
+        try JSONSerialization.data(withJSONObject: [oldEntry]).write(to: journalURL)
+        let oldRepeated = ActivityLogWriter(directory: replayDirectory)
+        oldRepeated.drain { drained.signal() }; drained.wait()
+        let oldRepeatedLog = try Data(contentsOf: replayLog)
+        precondition(oldRepeatedLog == oldLog)
+        try JSONSerialization.data(withJSONObject: [["stretch": journal[0]["stretch"]!, "offset": 0]]).write(to: journalURL)
+        let oldDifferentEncoding = ActivityLogWriter(directory: replayDirectory)
+        oldDifferentEncoding.drain { drained.signal() }; drained.wait()
+        let oldPreservedLog = try Data(contentsOf: replayLog)
+        precondition(oldPreservedLog == oldLog)
+        let oldOpen: [String: Any] = ["stretch": journal[1]["stretch"]!]
+        try JSONSerialization.data(withJSONObject: [oldOpen]).write(to: journalURL)
+        let oldCheckpoint = ActivityLogWriter(directory: replayDirectory)
+        oldCheckpoint.drain { drained.signal() }; drained.wait()
+        let oldCheckpointLog = try Data(contentsOf: replayLog)
+        precondition(oldCheckpointLog.split(separator: 0x0a).count == 3)
+
+        // Bad journals preserve every complete line, discard only an incomplete tail and allow new writes.
+        var badPartial = journal[0]
+        badPartial["offset"] = rowData.count
+        var badOffset = journal[0]
+        badOffset["offset"] = 1
+        for (name, badJournal, contents, complete) in [
+            ("mismatch", try JSONSerialization.data(withJSONObject: [badPartial]), rowData + Data("broken row".utf8), rowData),
+            ("complete", try JSONSerialization.data(withJSONObject: [journal[0]]), freshRow, freshRow),
+            ("offset", try JSONSerialization.data(withJSONObject: [badOffset]), rowData, rowData),
+            ("corrupt", Data("not JSON".utf8), Data("broken row".utf8), Data()),
+            ("duplicate", try JSONSerialization.data(withJSONObject: [journal[0], journal[0]]), Data(), Data())
+        ] {
+            let badDirectory = directory.appendingPathComponent(name)
+            let badLogs = badDirectory.appendingPathComponent("Log")
+            try FileManager.default.createDirectory(at: badLogs, withIntermediateDirectories: true)
+            let badLog = badLogs.appendingPathComponent(firstStretch.fileName)
+            try contents.write(to: badLog)
+            try badJournal.write(to: badDirectory.appendingPathComponent("checkpoint.json"))
+            let continuing = ActivityLogWriter(directory: badDirectory)
+            continuing.write(closed: [nextStretch], open: [])
+            continuing.drain { drained.signal() }; drained.wait()
+            let continuedLog = try Data(contentsOf: badLog)
+            let continuedRows = try continuedLog.split(separator: 0x0a).map { try JSONDecoder().decode(ActivityRecord.self, from: Data($0)) }
+            precondition(continuedLog.starts(with: complete))
+            precondition(continuedRows.count == (complete.isEmpty ? 1 : 2))
+            let aside = try FileManager.default.contentsOfDirectory(at: badDirectory, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent.hasPrefix("checkpoint-") }
+            precondition(aside.count == 1)
+            let savedBadJournal = try Data(contentsOf: aside[0])
+            precondition(savedBadJournal == badJournal)
+            let restart = ActivityLogWriter(directory: badDirectory)
+            restart.drain { drained.signal() }; drained.wait()
+            let restartedLog = try Data(contentsOf: badLog)
+            precondition(restartedLog == continuedLog)
+        }
+        // A transient append failure retries the pending row on the next write in the same launch.
+        let retryDirectory = directory.appendingPathComponent("retry")
+        let retry = ActivityLogWriter(directory: retryDirectory)
+        retry.drain { drained.signal() }; drained.wait()
+        try FileManager.default.createDirectory(at: retryDirectory, withIntermediateDirectories: true)
+        let blockedLogs = retryDirectory.appendingPathComponent("Log")
+        try Data().write(to: blockedLogs)
+        retry.write(closed: [firstStretch], open: [])
+        retry.drain { drained.signal() }; drained.wait()
+        try FileManager.default.removeItem(at: blockedLogs)
+        retry.write(closed: [nextStretch], open: [])
+        retry.drain { drained.signal() }; drained.wait()
+        let retriedLog = try Data(contentsOf: blockedLogs.appendingPathComponent(firstStretch.fileName))
+        let retriedRows = try retriedLog.split(separator: 0x0a).map { try JSONDecoder().decode(ActivityRecord.self, from: Data($0)) }
+        precondition(retriedRows == [firstStretch.record, nextStretch.record])
         let stateData = try Data(contentsOf: store.url)
         try Data("not JSON".utf8).write(to: store.url)
         do {
