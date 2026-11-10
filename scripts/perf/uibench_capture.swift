@@ -115,6 +115,13 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     let queue = DispatchQueue(label: "window.capture")
     var frames: [[String: Any]] = []
     var last: [UInt8]?
+    var lastFull: [UInt8]?
+    var crop = CGRect.zero
+    var captureRect = CGRect.zero
+    var windowRect = CGRect.zero
+    var regionRects: [(String, CGRect)] = []
+    var windowID: CGWindowID?
+    var attribute = false
     var strips: [CGImage] = []
     var lastStrip = -Double.infinity
     var streamError: String?
@@ -140,9 +147,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
-        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        let fullWidth = CVPixelBufferGetWidth(buffer), fullHeight = CVPixelBufferGetHeight(buffer)
+        let width = Int(crop.width), height = Int(crop.height)
         let stride = CVPixelBufferGetBytesPerRow(buffer)
-        let ptr = base.assumingMemoryBound(to: UInt8.self)
+        let ptr = base.assumingMemoryBound(to: UInt8.self).advanced(by: Int(crop.minY) * stride + Int(crop.minX) * 4)
         var pixels: [UInt8] = []
         var red = 0, blue = 0, green = 0, changed = 0
         for y in 0..<100 {
@@ -161,15 +169,53 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
         var frame: [String: Any] = ["t": t, "changed": Double(changed)/16000, "red": Double(red)/16000,
                                   "blue": Double(blue)/16000, "green": Double(green)/16000,
                                   "delivery_lag_ms": (now()-t)*1000]
+        if attribute {
+            let scaleX = Double(width) / captureRect.width, scaleY = Double(height) / captureRect.height
+            let regions = regionRects.map { name, rect in
+                (name, rect.offsetBy(dx: -captureRect.minX, dy: -captureRect.minY).applying(CGAffineTransform(scaleX: scaleX, y: scaleY)))
+            }
+            var current = [UInt8](repeating: 0, count: width * height * 3)
+            var counts = [Int](repeating: 0, count: regions.count + 1)
+            var boxes = [CGRect?](repeating: nil, count: counts.count)
+            var windowChanged = 0
+            for y in 0..<height { for x in 0..<width {
+                let src = y * stride + x * 4, dst = (y * width + x) * 3
+                current[dst] = ptr[src + 2]; current[dst+1] = ptr[src+1]; current[dst+2] = ptr[src]
+                guard let previous = lastFull,
+                      abs(Int(current[dst])-Int(previous[dst])) + abs(Int(current[dst+1])-Int(previous[dst+1])) + abs(Int(current[dst+2])-Int(previous[dst+2])) > 30 else { continue }
+                let point = CGPoint(x: Double(x), y: Double(y))
+                let region = regions.firstIndex(where: { $0.1.contains(point) }) ?? regions.count
+                counts[region] += 1
+                let pixel = CGRect(x: x, y: y, width: 1, height: 1)
+                boxes[region] = boxes[region].map { $0.union(pixel) } ?? pixel
+                let screenPoint = CGPoint(x: captureRect.minX + Double(x)/scaleX, y: captureRect.minY + Double(y)/scaleY)
+                if windowRect.contains(screenPoint) { windowChanged += 1 }
+            }}
+            let windowPixels = windowRect.width * scaleX * windowRect.height * scaleY
+            frame["window_changed_fraction"] = Double(windowChanged) / windowPixels
+            frame["regions"] = counts.indices.compactMap { i -> [String: Any]? in
+                guard let box = boxes[i] else { return nil }
+                return ["region": i < regions.count ? regions[i].0 : "outside", "pixels": counts[i],
+                        "window_pixel_fraction": Double(counts[i])/windowPixels,
+                        "rect": [captureRect.minX + box.minX/scaleX, captureRect.minY + box.minY/scaleY, box.width/scaleX, box.height/scaleY]]
+            }
+            lastFull = current
+            if let windowID, let rows = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+               let bounds = rows.first?[kCGWindowBounds as String] {
+                frame["window_frame"] = bounds
+            }
+            frame["analysis_ms"] = (now()-t)*1000 - (frame["delivery_lag_ms"] as! Double)
+        }
         if signatures { frame["pixels"] = Data(pixels).base64EncodedString() }
         frames.append(frame)
         last = pixels
         if directory != nil || needle != nil,
-           let provider = CGDataProvider(data: Data(bytes: base, count: stride*height) as CFData),
-           let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+           let provider = CGDataProvider(data: Data(bytes: base, count: stride*fullHeight) as CFData),
+           let fullImage = CGImage(width: fullWidth, height: fullHeight, bitsPerComponent: 8, bitsPerPixel: 32,
                                bytesPerRow: stride, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
-                               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) {
+                               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+           let image = fullImage.cropping(to: crop) {
             finalImage = image
             if needle != nil && changed > 0 && textFrames.count < 150 { textFrames.append((t,image)) }
             guard let directory else { return }
@@ -382,10 +428,11 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let config = SCStreamConfiguration()
             let rect = frame?.intersection(display.frame) ?? display.frame
-            config.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+            // Capture the whole display and crop the delivered buffer explicitly. This avoids
+            // sourceRect point/pixel ambiguity on Retina displays and preserves CG top-left coordinates.
             let backing = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.displayID })?.backingScaleFactor ?? 1
             let scale = (spec["native_resolution"] as? Bool ?? false) ? backing : 1
-            config.width = Int(rect.width*scale); config.height = Int(rect.height*scale)
+            config.width = Int(display.frame.width*scale); config.height = Int(display.frame.height*scale)
             config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
             config.queueDepth = 8
             config.showsCursor = false
@@ -394,6 +441,17 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             let directory = spec["record_dir"] as? String
             if let directory { try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true) }
             let capture = Capture(directory, signatures: spec["signatures"] as? Bool ?? false, needle: spec["ocr_needle"] as? String)
+            capture.crop = CGRect(x: (rect.minX-display.frame.minX)*scale, y: (rect.minY-display.frame.minY)*scale,
+                                  width: rect.width*scale, height: rect.height*scale).integral
+            capture.captureRect = rect
+            capture.windowID = requestedWindow
+            let wr = (spec["window_rect"] as? [Double]) ?? [rect.minX, rect.minY, rect.width, rect.height]
+            capture.windowRect = CGRect(x: wr[0], y: wr[1], width: wr[2], height: wr[3])
+            capture.attribute = spec["attribute"] as? Bool ?? false
+            capture.regionRects = (spec["regions"] as? [[String: Any]] ?? []).compactMap { item in
+                guard let name = item["name"] as? String, let r = item["rect"] as? [Double], r.count == 4 else { return nil }
+                return (name, CGRect(x:r[0],y:r[1],width:r[2],height:r[3]))
+            }
             let stream = SCStream(filter: filter, configuration: config, delegate: capture)
             try stream.addStreamOutput(capture, type: .screen, sampleHandlerQueue: capture.queue)
             try await stream.startCapture()
@@ -414,7 +472,14 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             capture.saveStrip()
             let firstInput = events.first?["t"] as? Double ?? start
             let echo = capture.firstTextFrame(after: firstInput)
-            emit(["start": start, "end": endStamp, "events": events, "frames": capture.frames,
+            var timebase = mach_timebase_info_data_t()
+            mach_timebase_info(&timebase)
+            emit(["clock": ["host_seconds": now(), "wall_seconds": Date().timeIntervalSince1970,
+                             "mach_timebase_numer": timebase.numer, "mach_timebase_denom": timebase.denom],
+                  "window_rect": wr, "window_id": requestedWindow as Any? ?? NSNull(),
+                  "display_rect": [display.frame.minX,display.frame.minY,display.frame.width,display.frame.height],
+                  "buffer_crop": [capture.crop.minX,capture.crop.minY,capture.crop.width,capture.crop.height],
+                  "start": start, "end": endStamp, "events": events, "frames": capture.frames,
                   "capture_end": endStamp, "first_text_frame": echo as Any? ?? NSNull(),
                   "rect": [rect.minX, rect.minY, rect.width, rect.height], "error": capture.streamError as Any? ?? NSNull()])
         } catch {

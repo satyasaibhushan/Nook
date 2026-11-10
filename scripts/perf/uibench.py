@@ -28,8 +28,8 @@ import bench
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("uibench_capture.swift")
 HELPER = ROOT / "build/hillclimb/bin/uibench-capture"
-SCENARIOS = ["keyboard", "click", "command", "navigate", "close", "sidebar", "activate", "link", "scroll"]
-ALIASES = dict(zip("abcdefghi", SCENARIOS))
+SCENARIOS = ["keyboard", "click", "command", "navigate", "close", "sidebar_hide", "sidebar_show", "activate", "link", "scroll"]
+ALIASES = dict(zip("abcdefghi", ["keyboard","click","command","navigate","close","sidebar_hide","activate","link","scroll"]))
 COLORS = {"red": "#bd3645", "blue": "#285ea8", "green": "#269454"}
 KEYS = {"t": 17, "w": 13, "l": 37, "s": 1, "f": 3, "j": 38, "a": 0,
         "return": 36, "escape": 53, "tab": 48, "home": 115, "backspace":51, ",": 43}
@@ -147,12 +147,12 @@ def leave_arc_running(path):
     raise Invalid("Arc did not relaunch")
 
 
-def capture(pid, actions=(), duration=2, record=None, ocr=None, signatures=False, native=False, region=None):
+def capture(pid, actions=(), duration=2, record=None, ocr=None, signatures=False, native=False, region=None, attribution=None):
     visible = window(pid)
     result = spec_call("capture", {"pid": pid, "window_id": visible["kCGWindowNumber"] if visible else None,
                                    "actions": list(actions), "duration": duration, "ocr_needle":ocr,"signatures":signatures,
                                    "region":region,
-                                   "native_resolution":native,
+                                   "native_resolution":native, **(attribution or {}),
                                    **({"record_dir": str(record)} if record else {})})
     if len([f for f in result["frames"] if "changed" in f]) < (2 if actions else 1):
         raise Invalid("capture delivered too few complete frames")
@@ -161,7 +161,7 @@ def capture(pid, actions=(), duration=2, record=None, ocr=None, signatures=False
 
 
 def summary(values):
-    values = sorted(v for v in values if v is not None)
+    values = sorted(v for v in values if isinstance(v, (int, float)))
     if not values:
         return None
     return {"median": round(statistics.median(values), 2),
@@ -199,7 +199,11 @@ def analyze(raw, target=None, scroll=False):
             "transition_ms": None if scroll else (last-changed[0]["t"])*1000,
             "dropped_frames": repeats, "worst_frame_gap_ms": max(gaps, default=0),
             "changed_frames": len(moving), "observed_fps": len(moving)/3 if scroll else None,
-            "capture_complete_frames": len(complete)}
+            "capture_complete_frames": len(complete),
+            "frame_interval_median_ms": statistics.median(gaps) if gaps else None,
+            "frame_interval_p95_ms": summary(gaps)["p95"] if gaps else None,
+            "frame_interval_max_ms": max(gaps, default=0),
+            "frame_intervals_over_20ms": sum(g > 20 for g in gaps)}
 
 
 class Handler(bench.Handler):
@@ -628,7 +632,7 @@ def scenario(browser, name, index, record):
         act(key("l", "cmd")); time.sleep(.15)
         act(key("a", "cmd"), text(url)); time.sleep(.3)
         actions, target = [key("return")], "blue"
-    elif name == "sidebar":
+    elif name in ("sidebar_hide", "sidebar_show"):
         if browser.name == "chrome":
             raise Invalid("no comparable tab sidebar toggle")
         browser.page()
@@ -659,14 +663,58 @@ def scenario(browser, name, index, record):
         act({"kind":"move","x":bounds["X"]+bounds["Width"]*.7,"y":bounds["Y"]+bounds["Height"]*.7})
         actions = [{"kind": "scroll", "dy": -24, "at": .5+i/60} for i in range(180)]
         duration = 4.1
+    if name in ("sidebar_hide", "sidebar_show"):
+        def sidebar_visible(rows):
+            labels = [r.get("AXTitle", "").lower().replace(" ", "") for r in rows if r.get("AXRole") == "AXMenuItem"]
+            if "hidesidebar" in labels: return True
+            if "showsidebar" in labels: return False
+            pages = [r["rect"] for r in rows if r.get("AXRole") == "AXWebArea" and browser.session in str(r.get("AXURL","")) and "rect" in r]
+            bounds = window(browser.pid)["kCGWindowBounds"]
+            if pages: return bounds["Width"]-pages[0][2] > 100
+            raise Invalid("cannot establish sidebar direction from menu state or viewport")
+        bounds = window(browser.pid)["kCGWindowBounds"]
+        act({"kind":"move","x":bounds["X"]+bounds["Width"]*.85,"y":bounds["Y"]+bounds["Height"]*.75})
+        time.sleep(.3)
+        want_visible = name == "sidebar_hide"
+        if sidebar_visible(sidebar_before) != want_visible:
+            act(actions[0]); time.sleep(.5)
+            sidebar_before = browser.ax()
+        if sidebar_visible(sidebar_before) != want_visible:
+            raise Invalid("sidebar precondition did not match requested direction")
+    bounds = window(browser.pid)["kCGWindowBounds"] if name != "activate" else bounds
+    window_rect = [bounds[k] for k in ("X","Y","Width","Height")]
+    attribution = None
+    pointer = None
+    if name == "activate":
+        # The lower-right blank page contains no fixture links or browser controls.
+        pointer = {"kind":"move","x":bounds["X"]+bounds["Width"]*.85,"y":bounds["Y"]+bounds["Height"]*.75}
+        act(pointer); time.sleep(.3)
+        x,y,w,h = window_rect
+        page = [r["rect"] for r in browser.ax() if r.get("AXRole") == "AXWebArea" and "rect" in r]
+        page = page[0] if page else [x+256,y+40,w-264,h-48]
+        px,py,pw,ph = page
+        attribution = {"attribute":True,"window_rect":window_rect,"regions":[
+            {"name":"traffic_lights","rect":[x,y,90,38]},
+            {"name":"link_pill","rect":[px,y+h-44,min(500,pw),44]},
+            {"name":"page","rect":page},
+            {"name":"chrome_title","rect":[x,y,w,max(40,py-y)]},
+            {"name":"sidebar","rect":[x,y,max(0,px-x),h]},
+            {"name":"chrome_title","rect":window_rect}]}
+        region = [x-20,y-20,w+40,h+40]
+    sampler = None
+    if getattr(browser,"sample_main",False) and record:
+        record.mkdir(parents=True,exist_ok=True)
+        sampler = subprocess.Popen(["/usr/bin/sample",str(browser.pid),str(math.ceil(duration+1)),"1","-file",str(record/"main-thread.sample.txt")],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     start = browser.resources() if name == "scroll" else None
     t0 = time.monotonic()
     try:
-        raw = capture(browser.pid, actions, duration, record, signatures=name == "activate",region=region)
+        raw = capture(browser.pid, actions, duration, record, signatures=name == "activate",region=region,attribution=attribution)
     finally:
+        if sampler:
+            sampler.wait(timeout=20)
         if occluder:
             occluder.terminate(); occluder.wait(timeout=5)
-    if name == "sidebar":
+    if name in ("sidebar_hide", "sidebar_show"):
         sidebar_after = browser.ax()
         act(actions[0]); time.sleep(.3)
         def viewport(rows):
@@ -678,14 +726,20 @@ def scenario(browser, name, index, record):
         if not resized and labels(sidebar_before) == labels(sidebar_after):
             raise Invalid("shortcut did not change the page viewport or sidebar menu state")
         raw["sidebar_validation"] = {"before":before,"after":after,"menu_before":sorted(labels(sidebar_before)),"menu_after":sorted(labels(sidebar_after))}
+    raw["window_frame"] = bounds
+    raw["pointer_park"] = pointer
     metrics = analyze(raw, target, name == "scroll")
     if name == "activate":
         frames = [f for f in raw["frames"] if "pixels" in f]
         reference = base64.b64decode(frames[-1]["pixels"])
         matches = []
+        x0,y0,cw,ch = raw["rect"]
+        cells = [(y*160+x)*3 for y in range(100) for x in range(160)
+                 if bounds["X"] <= x0+x*cw/160 < bounds["X"]+bounds["Width"]
+                 and bounds["Y"] <= y0+y*ch/100 < bounds["Y"]+bounds["Height"]]
         for frame in frames:
             pixels = base64.b64decode(frame.pop("pixels"))
-            similarity = sum(sum(abs(pixels[i+c]-reference[i+c]) for c in range(3)) <= 30 for i in range(0,len(pixels),3))/16000
+            similarity = sum(sum(abs(pixels[i+c]-reference[i+c]) for c in range(3)) <= 30 for i in cells)/len(cells)
             frame["final_window_similarity"] = similarity
             if similarity >= .97:
                 matches.append(frame["t"])
@@ -693,8 +747,15 @@ def scenario(browser, name, index, record):
         if not matches or matches[0] < t0:
             raise Invalid("activation did not expose a newly visible full browser frame")
         metrics["first_full_frame_ms"] = (matches[0]-t0)*1000
+        significant = [f["t"] for f in frames if f["t"] >= t0 and f.get("window_changed_fraction",0) > .005]
+        metrics["visually_complete_ms"] = (max(significant)-t0)*1000 if significant else None
+        raw["tail_after_97"] = [{"t":f["t"],"ms":(f["t"]-t0)*1000,"window_changed_fraction":f["window_changed_fraction"],"regions":f["regions"]}
+                                for f in frames if f["t"] > matches[0] and f.get("regions")]
+        raw["region_definitions"] = attribution["regions"]
     if name == "scroll":
         end = browser.resources()
+        moving = [f["t"] for f in raw["frames"] if raw["events"][0]["t"] <= f["t"] <= raw["events"][0]["t"]+3 and f.get("changed",0) >= .0015]
+        raw["frame_intervals"] = [{"start":a,"end":b,"ms":(b-a)*1000} for a,b in zip(moving,moving[1:])]
         metrics["cpu_percent"] = (end["cpu_s"]-start["cpu_s"])/(time.monotonic()-t0)*100
     if name == "command":
         act(text("uibench-check")); time.sleep(.1)
@@ -910,6 +971,14 @@ def markdown(result):
         scroll_cpu_text = f"{scroll_cpu['median']:.2f}" if scroll_cpu else "-"
         fps_text = f"{fps['median']:.1f}/{fps['min']:.1f}" if fps else "-"
         lines.append(f"| {name} | {cold} | {memory('rss_mb')} | {memory('physical_mb')} | {cpu('idle_10_tabs')} | {cpu('background_video')} | {scroll_cpu_text} | {fps_text} |")
+    lines += ["", "| Browser | Scenario | Visually complete ms med/p95 | Frame interval ms median/p95/max | Intervals over 20 ms med |",
+              "|---|---|---:|---:|---:|"]
+    for browser,data in result["browsers"].items():
+        for name,entry in data.get("scenarios",{}).items():
+            s = entry.get("summary",{})
+            if not s: continue
+            interval = "/".join(f"{s[k]['median']:.1f}" for k in ("frame_interval_median_ms","frame_interval_p95_ms","frame_interval_max_ms") if s.get(k))
+            lines.append(f"| {browser} | {name} | {fmt(s.get('visually_complete_ms'))} | {interval} | {s['frame_intervals_over_20ms']['median']:.0f} |")
     return "\n".join(lines)+"\n"
 
 
@@ -924,6 +993,8 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--wait-build", type=int, default=1800)
+    parser.add_argument("--signposts", type=Path, help="stream Nook.Perf events as ndjson during this invocation")
+    parser.add_argument("--sample-main", action="store_true", help="collect a 1 ms process stack sample alongside each recorded trial")
     parser.add_argument("--allow-arc-quit",action="store_true",help="explicitly allow graceful Arc restarts for cold launch and resource measurements; leave it running afterward")
     args = parser.parse_args()
     if args.runs < 10:
@@ -932,6 +1003,8 @@ def main():
     if set(names)-{"nook", "arc", "zen", "chrome"}:
         parser.error("unknown browser")
     only = {ALIASES.get(n, n) for n in args.only.split(",")}
+    if "sidebar" in only:
+        only.remove("sidebar"); only.update(("sidebar_show","sidebar_hide"))
     if only-set(SCENARIOS+["cold", "resources", "shots"]):
         parser.error("unknown scenario")
     HELPER.parent.mkdir(parents=True, exist_ok=True)
@@ -965,6 +1038,18 @@ def main():
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     paths = {"nook": args.nook_app, "arc": "/Applications/Arc.app", "zen": "/Applications/Zen.app", "chrome": "/Applications/Google Chrome.app"}
+    trace = None
+    trace_file = None
+    if args.signposts:
+        args.signposts.parent.mkdir(parents=True,exist_ok=True)
+        trace_file = args.signposts.open("w")
+        trace = subprocess.Popen(["/usr/bin/log","stream","--signpost","--level","debug","--style","ndjson","--predicate",'subsystem == "Nook.Perf"'],stdout=trace_file,stderr=subprocess.STDOUT)
+        time.sleep(.5)
+        if trace.poll() is not None:
+            trace_file.close()
+            raise Invalid("signpost stream exited before launch")
+    result["desktop_settings"] = {domain:subprocess.run(["defaults","read",domain],capture_output=True,text=True).stdout
+                                  for domain in ("com.apple.WindowManager","NSGlobalDomain")}
     calibrated = False
     try:
         for name in names:
@@ -979,6 +1064,7 @@ def main():
                     if not exe.exists():
                         raise Invalid("baseline build did not appear before wait deadline")
                 browser = Browser(name, paths[name])
+                browser.sample_main = args.sample_main
                 if "cold" in only:
                     log(f"{name}: {args.runs} cold launches with pre-launch capture")
                     try:
@@ -1066,6 +1152,8 @@ def main():
                     data["left_running_pid"] = leave_arc_running(paths[name])
                 save()
     finally:
+        if trace:
+            trace.terminate(); trace.wait(timeout=5); trace_file.close()
         server.shutdown()
         bench.forget_favicons([bench.PORT])
     print(markdown(result))
