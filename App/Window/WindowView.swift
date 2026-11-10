@@ -44,7 +44,9 @@ struct WindowView: View {
             // In its own view, so a swipe re-renders the push and not this whole window.
             // The window buttons sit in the sidebar's header, so they come and go with it, and
             // with the library while it is out (the container knows how far that is).
-            LibraryPushContainer(lightsVisible: windowState.isSidebarVisible || hoverSidebarManager.isOverlayVisible) {
+            // A page fullscreen in the window has the window to itself: no buttons, no chrome.
+            LibraryPushContainer(lightsVisible: !windowState.showsFullscreenPage
+                && (windowState.isSidebarVisible || hoverSidebarManager.isOverlayVisible)) {
                 SidebarWebViewStack()
             }
             .environmentObject(browserManager)
@@ -280,12 +282,15 @@ struct WindowView: View {
 
     @ViewBuilder
     private func SidebarWebViewStack() -> some View {
-        let aiVisible = windowState.isSidebarAIChatVisible
+        // The sidebars step aside for a fullscreen page without being toggled, so they are
+        // back as they were when it ends.
+        let fullscreen = windowState.showsFullscreenPage
+        let aiVisible = windowState.isSidebarAIChatVisible && !fullscreen
         let aiAppearsOnTrailingEdge = nookSettings.sidebarPosition == .left
-        let sidebarVisible = windowState.isSidebarVisible
+        let sidebarVisible = windowState.isSidebarVisible && !fullscreen
         let sidebarOnRight = nookSettings.sidebarPosition == .right
         let sidebarOnLeft = nookSettings.sidebarPosition == .left
-        let bordered = !nookSettings.hideWebContentBorder
+        let bordered = !nookSettings.hideWebContentBorder && !fullscreen
 
         HStack(spacing: 0) {
             if aiAppearsOnTrailingEdge {
@@ -312,7 +317,7 @@ struct WindowView: View {
 
     @ViewBuilder
     private func SpacesSidebar() -> some View {
-        if windowState.isSidebarVisible {
+        if windowState.isSidebarVisible, !windowState.showsFullscreenPage {
             SpacesSideBarView()
                 .environment(\.nookBaseColorScheme, systemColorScheme)
                 .spaceThemeAppearance(spaceTheme)
@@ -340,8 +345,9 @@ struct WindowView: View {
     @ViewBuilder
     private func WebContent() -> some View {
         let cornerRadius = NookDesign.Radius.page
-        let hasTopBar = nookSettings.topBarAddressView
-        let bordered = !nookSettings.hideWebContentBorder
+        let fullscreen = windowState.showsFullscreenPage
+        let hasTopBar = nookSettings.topBarAddressView && !fullscreen
+        let bordered = !nookSettings.hideWebContentBorder && !fullscreen
 
         ZStack(alignment: .top) {
             VStack(spacing: 0) {
@@ -359,7 +365,7 @@ struct WindowView: View {
                 }
 
                 // Developer Mode on this site: Arc's address and tools bar over the page.
-                if browserManager.showsDeveloperBar(in: windowState),
+                if !fullscreen, browserManager.showsDeveloperBar(in: windowState),
                    let session = browserManager.tabs.selectedSession(in: windowState) {
                     DeveloperBar(session: session)
                         .environmentObject(browserManager)
@@ -390,7 +396,7 @@ struct WindowView: View {
             }
 
             // No inset to sit in, so it floats over the page's top edge.
-            if !bordered {
+            if !bordered, !fullscreen {
                 WebsiteLoadingIndicator()
                     .allowsHitTesting(false)
             }

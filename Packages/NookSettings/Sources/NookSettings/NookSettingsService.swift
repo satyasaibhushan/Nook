@@ -53,6 +53,7 @@ public final class NookSettingsService {
     private let themeTranslucencyKey = "settings.themeTranslucency"
     private let searchPageTextInHistoryKey = "settings.searchPageTextInHistory"
     private let hideWebContentBorderKey = "settings.hideWebContentBorder"
+    private let fullscreenInWindowKey = "settings.fullscreenInWindow"
     private let siteSearchEntriesKey = "settings.siteSearchEntries"
     private let didFinishOnboardingKey = "settings.didFinishOnboarding"
     private let tabLayoutKey = "settings.tabLayout"
@@ -447,6 +448,14 @@ public final class NookSettingsService {
             userDefaults.set(hideWebContentBorder, forKey: hideWebContentBorderKey)
         }
     }
+
+    /// A page's fullscreen fills the browser window, as in Chrome, in place of WebKit's own
+    /// window on a new Space.
+    public var fullscreenInWindow: Bool {
+        didSet {
+            userDefaults.set(fullscreenInWindow, forKey: fullscreenInWindowKey)
+        }
+    }
     
     public var siteSearchEntries: [SiteSearchEntry] {
         didSet {
@@ -626,6 +635,7 @@ public final class NookSettingsService {
             themeTranslucencyKey: false,
             searchPageTextInHistoryKey: true,
             hideWebContentBorderKey: false,
+            fullscreenInWindowKey: false,
             didFinishOnboardingKey: false,
             tabLayoutKey: TabLayout.sidebar.rawValue,
             appearanceModeKey: AppearanceMode.system.rawValue,
@@ -758,6 +768,7 @@ public final class NookSettingsService {
         self.themeTranslucency = userDefaults.bool(forKey: themeTranslucencyKey)
         self.searchPageTextInHistory = userDefaults.bool(forKey: searchPageTextInHistoryKey)
         self.hideWebContentBorder = userDefaults.bool(forKey: hideWebContentBorderKey)
+        self.fullscreenInWindow = userDefaults.bool(forKey: fullscreenInWindowKey)
         self.tabLayout = TabLayout(rawValue: userDefaults.string(forKey: tabLayoutKey) ?? TabLayout.sidebar.rawValue) ?? .sidebar
         self.appearanceMode = AppearanceMode(rawValue: userDefaults.string(forKey: appearanceModeKey) ?? AppearanceMode.system.rawValue) ?? .system
         self.didFinishOnboarding = userDefaults.bool(forKey: didFinishOnboardingKey)
