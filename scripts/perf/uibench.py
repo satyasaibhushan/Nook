@@ -649,9 +649,6 @@ def scenario(browser, name, index, record):
         browser.page()
         bounds = window(browser.pid)["kCGWindowBounds"]
         region = [bounds[k] for k in ("X","Y","Width","Height")]
-        occluder = subprocess.Popen([str(HELPER), "occlude", *[str(bounds[k]) for k in ("X","Y","Width","Height")]],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(.35)
         actions, target = [{"kind": "activate", "pid": browser.pid, "at": .5}], "red"
     elif name == "link":
         browser.page()
@@ -703,6 +700,11 @@ def scenario(browser, name, index, record):
             {"name":"sidebar","rect":[x,y,max(0,px-x),h]},
             {"name":"chrome_title","rect":window_rect}]}
         region = [x-20,y-20,w+40,h+40]
+    if name == "activate":
+        attribution["window_id"] = window(browser.pid)["kCGWindowNumber"]
+        occluder = subprocess.Popen([str(HELPER), "occlude", *map(str,window_rect)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(.35)
     sampler = None
     if getattr(browser,"sample_main",False) and record:
         record.mkdir(parents=True,exist_ok=True)
@@ -713,7 +715,10 @@ def scenario(browser, name, index, record):
         raw = capture(browser.pid, actions, duration, record, signatures=name == "activate",region=region,attribution=attribution)
     finally:
         if sampler:
-            sampler.wait(timeout=20)
+            try:
+                sampler.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                sampler.terminate(); sampler.wait(timeout=5)
         if occluder:
             occluder.terminate(); occluder.wait(timeout=5)
     if name in ("sidebar_hide", "sidebar_show"):

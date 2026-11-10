@@ -434,8 +434,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let config = SCStreamConfiguration()
             let rect = (spec["full_display"] as? Bool ?? false) ? display.frame : (frame?.intersection(display.frame) ?? display.frame)
-            // Capture the whole display and crop the delivered buffer explicitly. This avoids
-            // sourceRect point/pixel ambiguity on Retina displays and preserves CG top-left coordinates.
+            // Use a full-display buffer so the crop is explicit in pixel coordinates.
             let backing = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.displayID })?.backingScaleFactor ?? 1
             let scale = (spec["native_resolution"] as? Bool ?? false) ? backing : 1
             config.width = Int(display.frame.width*scale); config.height = Int(display.frame.height*scale)
