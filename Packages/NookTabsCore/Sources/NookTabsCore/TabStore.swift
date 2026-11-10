@@ -154,7 +154,8 @@ public final class TabStore: @unchecked Sendable {
         lock.withLock {
             writtenSyncedIDs = Set(result.tree.items.keys.filter { result.tree.scope(of: $0) == .synced })
         }
-        if backup { makeBackup(now: now) }
+        // Enqueue before returning so subsequent saves cannot overtake the launch backup.
+        if backup { queue.async { self.makeBackup(now: now) } }
         return result
     }
 
