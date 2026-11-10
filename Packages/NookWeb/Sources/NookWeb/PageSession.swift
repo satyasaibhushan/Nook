@@ -817,7 +817,10 @@ public final class PageSession: NSObject, Identifiable {
         guard let image else {
             // A failed refresh keeps the cached icon; otherwise hasFavicon stays false so
             // ensureFaviconLoaded() can retry once the failure has aged out.
-            Self.faviconFailures[fetchKey] = Date()
+            let now = Date()
+            // Aged-out entries no longer suppress anything; without this every failing host stays for the session.
+            Self.faviconFailures = Self.faviconFailures.filter { now.timeIntervalSince($0.value) < Self.faviconFailureTTL }
+            Self.faviconFailures[fetchKey] = now
             if cached == nil { favicon = defaultFavicon }
             return
         }
