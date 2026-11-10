@@ -599,14 +599,18 @@ public final class TabsController {
     /// A page entered or left element fullscreen. `inWindow` is whether it fills its browser
     /// window, which then gives it the whole window; WebKit's own fullscreen window needs nothing.
     func pageFullscreenChanged(itemID: UUID, inWindow: Bool) {
+        var changed = false
         for window in allWindows {
             if inWindow, pageOwnerWindow(of: itemID)?.id == window.id {
+                guard window.fullscreenPageID != itemID else { continue }
                 window.fullscreenPageID = itemID
+                changed = true
             } else if window.fullscreenPageID == itemID {
                 window.fullscreenPageID = nil
+                changed = true
             }
         }
-        refreshWindows(showing: itemID)
+        if changed { refreshWindows(showing: itemID) }
     }
 
     public func refreshWindows(showing itemID: UUID) {
