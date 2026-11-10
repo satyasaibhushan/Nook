@@ -1,112 +1,109 @@
 // Licensed under GPL-3.0. See LICENSE.
-//
-//  PageLoadingProgressBar.swift
-//  Nook
-//
-//  Thin progress bar shown on the URL bar during page loads.
-//  Observes WKWebView.estimatedProgress + isLoading via KVO.
-//
-
 import SwiftUI
 import WebKit
 import NookDesign
 import NookWeb
+import NookUI
 
 struct PageLoadingProgressBar: View {
     let session: PageSession?
+    var inPageInset = false
 
+    @Environment(BrowserWindowState.self) private var windowState
+    @Environment(\.nookSettings) private var settings
     @StateObject private var observer = WebViewLoadingObserver()
 
-    var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                // Track background
-                Rectangle()
-                    .fill(NookDesign.Surface.fillPressed)
-                    .opacity(observer.isLoading ? 1 : 0)
+    private var usesPageInset: Bool { !windowState.isSidebarVisible || settings.topBarAddressView }
 
-                // Progress fill
-                Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [.blue.opacity(0.7), .cyan.opacity(0.5)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(width: geo.size.width * observer.progress)
-                    .animation(NookDesign.Motion.quick, value: observer.progress)
-                    .opacity(observer.isLoading ? 1 : 0)
+    var body: some View {
+        Group {
+            if inPageInset == usesPageInset {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(NookDesign.Surface.fillPressed)
+                        Rectangle()
+                            .fill(LinearGradient(
+                                colors: [.blue.opacity(0.7), .cyan.opacity(0.5)],
+                                startPoint: .leading, endPoint: .trailing))
+                            .frame(width: geo.size.width * observer.state.progress)
+                    }
+                    .opacity(observer.state.isVisible ? 1 : 0)
+                }
+                .onChange(of: session?.webView) { _, _ in observer.attach(to: session) }
+                .onChange(of: session?.loadingNavigationID) { _, _ in observer.refresh() }
+                .onChange(of: session.map(ObjectIdentifier.init)) { _, _ in observer.attach(to: session) }
+                .onAppear { observer.attach(to: session) }
+                .onDisappear { observer.attach(to: nil) }
             }
         }
         .frame(height: 2.5)
-        .animation(NookDesign.Motion.quick, value: observer.isLoading)
-        // Observation tracks the session's web view, so a view created later attaches too.
-        .onChange(of: session?.webView) { _, webView in
-            observer.attach(to: webView)
-        }
-        .onAppear {
-            observer.attach(to: session?.webView)
-        }
         .allowsHitTesting(false)
     }
 }
 
 @MainActor
-private class WebViewLoadingObserver: ObservableObject {
-    @Published var progress: CGFloat = 0
-    @Published var isLoading: Bool = false
-
-    private(set) weak var webView: WKWebView?
+private final class WebViewLoadingObserver: ObservableObject {
+    @Published private(set) var state = LoadingProgressState()
+    private weak var session: PageSession?
+    private weak var webView: WKWebView?
     private var progressObservation: NSKeyValueObservation?
     private var loadingObservation: NSKeyValueObservation?
-    private var hideTask: Task<Void, Never>?
+    private var showTask: Task<Void, Never>?
 
-    func attach(to webView: WKWebView?) {
-        guard webView !== self.webView else { return }
-
+    func attach(to session: PageSession?) {
+        guard session !== self.session || session?.webView !== webView else { return }
+        showTask?.cancel()
+        showTask = nil
         progressObservation?.invalidate()
         loadingObservation?.invalidate()
-        self.webView = webView
+        self.session = session
+        webView = session?.webView
+        state = LoadingProgressState()
+        guard let webView else { return }
 
-        guard let webView else {
-            progress = 0
-            isLoading = false
-            return
-        }
-
-        progress = webView.estimatedProgress
-        isLoading = webView.isLoading
-
-        progressObservation = webView.observe(\.estimatedProgress, options: [.new]) { [weak self] wv, _ in
-            // KVO for WKWebView properties fires on the main thread
+        progressObservation = webView.observe(\.estimatedProgress, options: [.new]) { [weak self] view, _ in
             MainActor.assumeIsolated {
-                self?.progress = wv.estimatedProgress
+                guard self?.webView === view else { return }
+                self?.refresh()
             }
         }
-
-        loadingObservation = webView.observe(\.isLoading, options: [.new]) { [weak self] wv, _ in
-            // KVO for WKWebView properties fires on the main thread
+        loadingObservation = webView.observe(\.isLoading, options: [.new]) { [weak self] view, _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                if wv.isLoading {
-                    self.hideTask?.cancel()
-                    self.isLoading = true
-                } else {
-                    // Brief delay to show completed state before hiding
-                    self.progress = 1.0
-                    self.hideTask = Task {
-                        try? await Task.sleep(nanoseconds: 300_000_000)
-                        guard !Task.isCancelled else { return }
-                        self.isLoading = false
-                        self.progress = 0
-                    }
-                }
+                guard self?.webView === view else { return }
+                self?.refresh()
             }
+        }
+        refresh()
+    }
+
+    func refresh() {
+        guard let session, let webView else { return }
+        let navigationID = session.loadingNavigationID
+        let newNavigation = state.navigationID != navigationID
+        if newNavigation || !webView.isLoading {
+            showTask?.cancel()
+            showTask = nil
+        }
+        var next = state
+        next.update(navigationID: navigationID, progress: webView.estimatedProgress,
+                    isLoading: webView.isLoading, now: ProcessInfo.processInfo.systemUptime)
+        // A new navigation resets immediately. Only forward progress in a visible load animates.
+        withAnimation(!newNavigation && state.isVisible && next.isVisible ? NookDesign.Motion.quick : nil) {
+            state = next
+        }
+        guard webView.isLoading, !state.isVisible, showTask == nil else { return }
+        showTask = Task { [weak self, weak session, weak webView] in
+            try? await Task.sleep(for: .seconds(LoadingProgressState.showDelay))
+            guard !Task.isCancelled, let self, let session, let webView,
+                  self.session === session, self.webView === webView,
+                  session.loadingNavigationID == navigationID else { return }
+            self.showTask = nil
+            self.refresh()
         }
     }
 
     deinit {
+        showTask?.cancel()
         progressObservation?.invalidate()
         loadingObservation?.invalidate()
     }
