@@ -1048,8 +1048,12 @@ def main():
         if trace.poll() is not None:
             trace_file.close()
             raise Invalid("signpost stream exited before launch")
-    result["desktop_settings"] = {domain:subprocess.run(["defaults","read",domain],capture_output=True,text=True).stdout
-                                  for domain in ("com.apple.WindowManager","NSGlobalDomain")}
+    result["desktop_settings"] = {f"{domain}.{key}":subprocess.run(["defaults","read",domain,key],capture_output=True,text=True).stdout.strip()
+                                  for domain,key in (("com.apple.WindowManager","GloballyEnabled"),
+                                                     ("NSGlobalDomain","NSAutomaticWindowAnimationsEnabled"),
+                                                     ("com.apple.universalaccess","reduceMotion"),
+                                                     ("com.apple.universalaccess","reduceTransparency"))}
+    result["os_version"] = run(["sw_vers"]).strip()
     calibrated = False
     try:
         for name in names:
