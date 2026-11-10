@@ -7,6 +7,7 @@ build's own bundle id, so an installed Nook is never touched.
 
   scripts/perf/bench.py --app build/Build/Products/Release/Nook.app --label base --out out.json
 """
+import random, socketserver
 import argparse, json, os, plistlib, shutil, socket, statistics, subprocess, sys, tempfile, threading, time
 import struct, urllib.parse, urllib.request, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,9 +53,30 @@ def png(size=32, rgb=(40, 120, 220)):
 FAVICON = png()
 favicon_hits = [0]
 
+# The app keys its favicon cache by host and port, so every extra port is a site it has never seen.
+NEW_PORTS = []
+SERVE_FAVICON = [True]
+
 def host(n=None):
-    """The known host, or a host the app has never seen (any name under localhost is loopback)."""
-    return HOST if n is None else f"http://{n}.localhost:{PORT}"
+    """The known host, or (for any n) a host and port the app has never seen."""
+    return HOST if n is None else f"http://127.0.0.1:{NEW_PORTS.pop()}"
+
+def start_new_sites(count=80):
+    first = random.randrange(20000, 60000)
+    ports = list(range(first, first + count))
+    for port in ports:
+        extra = DualStackServer(("::", port), Handler)
+        extra.daemon_threads = True
+        threading.Thread(target=extra.serve_forever, daemon=True).start()
+    NEW_PORTS.extend(ports)
+    return ports
+
+def forget_favicons(ports):
+    """The favicon cache folder is shared by every copy of the app; drop only what these runs added."""
+    folder = os.path.expanduser("~/Library/Caches/FaviconCache")
+    for port in ports:
+        try: os.remove(os.path.join(folder, f"127.0.0.1_{port}.png"))
+        except OSError: pass
 
 def words(n, seed=0):
     base = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt".split()
@@ -127,7 +149,9 @@ class DualStackServer(ThreadingHTTPServer):
     address_family = socket.AF_INET6
     def server_bind(self):
         self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        super().server_bind()
+        # HTTPServer.server_bind looks up the machine's full name, which can take seconds per port.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "localhost", self.server_address[1]
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -157,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(ctype, body) if body else self.reply("text/plain", "no", 404)
         if url.path == "/favicon.ico":
             favicon_hits[0] += 1
-            return self.reply("image/png", FAVICON)
+            return self.reply("image/png", FAVICON) if SERVE_FAVICON[0] else self.reply("text/plain", "no", 404)
         self.reply("text/plain", "no", 404)
     def do_POST(self):
         now = time.time()
@@ -332,6 +356,7 @@ def scenario_single(app, runs, kinds, new_hosts=False):
     mine = [n for i, n in list(doc_requests.items()) if i.rstrip("0123456789-") in kinds]
     res["doc_requests_per_load"] = round(sum(mine) / max(1, len(mine)), 2)
     doc_requests.clear()
+    res["favicon_requests"], favicon_hits[0] = favicon_hits[0], 0
     app.quit(graceful=False)
     shutil.rmtree(state, ignore_errors=True)
     return res
@@ -382,7 +407,10 @@ def main():
     ap.add_argument("--runs", type=int, default=6)
     ap.add_argument("--burst", type=int, default=30)
     ap.add_argument("--only", default="cold,single,newhost,burst")
+    ap.add_argument("--no-favicon", action="store_true", help="sites answer 404 for their icon")
     a = ap.parse_args()
+    SERVE_FAVICON[0] = not a.no_favicon
+    ports = start_new_sites()
 
     server = DualStackServer(("::", PORT), Handler)
     server.daemon_threads = True
@@ -400,6 +428,7 @@ def main():
         if "burst" in a.only: result["burst"] = scenario_burst(app, a.burst, kinds)
     finally:
         app.quit(graceful=False)
+        forget_favicons(ports + [PORT])
     text = json.dumps(result, indent=1)
     if a.out:
         with open(a.out, "w") as f: f.write(text)
