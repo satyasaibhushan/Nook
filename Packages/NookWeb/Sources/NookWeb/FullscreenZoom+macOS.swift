@@ -32,6 +32,9 @@ final class FullscreenZoom {
     private struct Origin {
         let picture: CGImage
         let element: CGRect
+        /// How round the element's corners were, which the fullscreen picture takes on as
+        /// it shrinks back into them.
+        let corner: CGFloat
         let size: CGSize
     }
 
@@ -41,8 +44,9 @@ final class FullscreenZoom {
         let page: CGRect
         var element: CGRect?
         var video: CGRect?
+        var videoCorner: CGFloat = 0
 
-        /// Where the zoom should land. A site such as YouTube sends its whole page
+        /// Where the zoom should land. A video site often sends its whole page
         /// fullscreen and resizes the player inside it, so for an element that is the
         /// page the video in it is what the eye follows.
         var target: CGRect {
@@ -52,6 +56,8 @@ final class FullscreenZoom {
             else { return element }
             return video
         }
+
+        var corner: CGFloat { video == target ? videoCorner : 0 }
     }
 
     private final class CoverView: NSView {
@@ -67,6 +73,8 @@ final class FullscreenZoom {
     /// WebKit announces one exit more than once when the page asked for it.
     private var leaving = false
     private var zoomEnds = Date.distantPast
+    /// Whether the zoom has set off; see `afterResize`.
+    private var moving = false
     /// Counts covers, so a step scheduled for an earlier one does nothing.
     private var run = 0
 
@@ -85,18 +93,22 @@ final class FullscreenZoom {
         else { return removeCover() }
         let page = cover.convert(webView.bounds, from: webView)
         entering = Entering(picture: picture, page: page)
-        aim()
+        afterResize { [weak self] in
+            self?.moving = true
+            self?.aim()
+        }
 
         let run = run
         let scale = webView.pageZoom * webView.magnification
         webView.evaluateJavaScript(Self.largestVideo, in: nil, in: .defaultClient) { [weak self] result in
             guard let self, self.run == run, case .success(let value) = result,
-                  let box = value as? [Double], box.count == 4, box[2] >= 1, box[3] >= 1
+                  let box = value as? [Double], box.count == 5, box[2] >= 1, box[3] >= 1
             else { return }
             // The page measures down from its top left, the cover up from its bottom left.
             self.entering?.video = CGRect(
                 x: page.minX + box[0] * scale, y: page.maxY - (box[1] + box[3]) * scale,
                 width: box[2] * scale, height: box[3] * scale)
+            self.entering?.videoCorner = box[4] * scale
             self.aim()
         }
     }
@@ -112,20 +124,29 @@ final class FullscreenZoom {
     }
 
     private func aim() {
-        guard let cover, let entering else { return }
+        guard moving, let cover, let entering else { return }
         zoomIn(on: entering.target, in: cover)
         guard entering.element != nil else { return }
-        origin = Origin(picture: entering.picture, element: entering.target, size: cover.bounds.size)
+        origin = Origin(
+            picture: entering.picture, element: entering.target, corner: entering.corner, size: cover.bounds.size)
     }
 
     private static let largestVideo = """
         (() => {
-            let best = null
+            let best = null, largest = null
             for (const video of document.querySelectorAll('video')) {
                 const box = video.getBoundingClientRect()
-                if (box.width * box.height > (best ? best.width * best.height : 0)) best = box
+                if (box.width * box.height > (best ? best.width * best.height : 0)) [best, largest] = [box, video]
             }
-            return best ? [best.x, best.y, best.width, best.height] : null
+            if (!best) return null
+            // The rounding usually sits on a wrapper about the size of the video.
+            let corner = 0
+            for (let node = largest; node; node = node.parentElement) {
+                const box = node.getBoundingClientRect()
+                if (box.width > best.width * 1.05 || box.height > best.height * 1.05) break
+                corner = Math.max(corner, parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0)
+            }
+            return [best.x, best.y, best.width, best.height, corner]
         })()
         """
 
@@ -162,9 +183,14 @@ final class FullscreenZoom {
         cover.scene.contents = origin.picture
         cover.scene.addSublayer(shot)
         cover.scene.transform = zoom
-        animate(shot, "bounds", to: CGRect(origin: .zero, size: origin.element.size))
-        animate(cover.scene, "transform", to: CATransform3DIdentity)
         zoomEnds = Date(timeIntervalSinceNow: Self.duration)
+        afterResize { [weak self] in
+            guard let self else { return }
+            self.animate(shot, "bounds", to: CGRect(origin: .zero, size: origin.element.size))
+            if origin.corner > 0 { self.animate(shot, "cornerRadius", to: origin.corner) }
+            self.animate(cover.scene, "transform", to: CATransform3DIdentity)
+            self.zoomEnds = Date(timeIntervalSinceNow: Self.duration)
+        }
     }
 
     /// WebKit has let the page leave fullscreen.
@@ -195,6 +221,7 @@ final class FullscreenZoom {
         host.addSubview(cover, positioned: .above, relativeTo: nil)
         self.cover = cover
         zoomEnds = .distantPast
+        moving = false
 
         run += 1
         let run = run
@@ -203,6 +230,52 @@ final class FullscreenZoom {
             self.uncover()
         }
         return cover
+    }
+
+    /// Runs `body` once the main thread has finished what it is doing now and drawn it.
+    /// A zoom already running would lose its first frames to the redraw of the chrome,
+    /// so the cover holds still for it.
+    private func afterThisTurn(_ body: @escaping @MainActor () -> Void) {
+        let run = run
+        // Ordered after Core Animation's own commit, which watches the same moment.
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, false, .max) {
+            [weak self] _, _ in
+            MainActor.assumeIsolated {
+                guard let self, self.run == run else { return }
+                body()
+                CATransaction.flush()
+            }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+    }
+
+    /// Runs `body` once the app has flipped its chrome for the step just announced, which
+    /// shows as the web view changing size. A view that keeps its size is not waited on
+    /// for long.
+    private func afterResize(_ body: @escaping @MainActor () -> Void) {
+        let run = run
+        let wait = ResizeWait()
+        let proceed: @MainActor () -> Void = { [weak self] in
+            guard wait.end(), let self, self.run == run else { return }
+            self.afterThisTurn(body)
+        }
+        wait.observer = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification, object: webView, queue: nil
+        ) { _ in MainActor.assumeIsolated { proceed() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { proceed() }
+    }
+
+    private final class ResizeWait {
+        var observer: NSObjectProtocol?
+        private var ended = false
+
+        /// True the first time only.
+        func end() -> Bool {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            defer { ended = true }
+            return !ended
+        }
     }
 
     private func uncoverAfterNextDraw(settle: TimeInterval) {
@@ -245,7 +318,16 @@ final class FullscreenZoom {
 
     private func animate(_ layer: CALayer, _ keyPath: String, to value: Any) {
         let animation = CABasicAnimation(keyPath: keyPath)
-        animation.fromValue = (layer.presentation() ?? layer).value(forKeyPath: keyPath)
+        let model = layer.value(forKeyPath: keyPath)
+        let shown = (layer.presentation() ?? layer).value(forKeyPath: keyPath)
+        // An animation that has not reached the screen yet reports where it ends, so one
+        // replaced that early would jump there. It starts over from where the last began.
+        if let pending = layer.animation(forKey: keyPath) as? CABasicAnimation,
+           let model = model as? NSValue, let shown = shown as? NSValue, model == shown {
+            animation.fromValue = pending.fromValue
+        } else {
+            animation.fromValue = shown
+        }
         animation.toValue = value
         animation.duration = Self.duration
         animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
