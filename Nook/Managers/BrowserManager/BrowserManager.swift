@@ -366,10 +366,10 @@ class BrowserManager: ObservableObject {
         currentProfileSubject.eraseToAnyPublisher()
     }
 
-    /// True for the length of a space change, so views do not animate content from the old space
-    /// into the new one.
+    /// Ends each window's `isSwitchingSpace`, which keeps views from animating content from the
+    /// old space into the new one.
     private var transitionEndTasks: [UUID: Task<Void, Never>] = [:]
-    private var transitionSpaces: [UUID: UUID] = [:]
+    private var transitionProfiles: [UUID: UUID] = [:]
     // Tab closure undo notification
     @Published var showTabClosureToast: Bool = false
     @Published var tabClosureToastCount: Int = 0
@@ -610,9 +610,10 @@ class BrowserManager: ObservableObject {
     /// follow it. Only the active window's space sets the app-wide managers.
     func windowSpaceChanged(_ windowState: BrowserWindowState) {
         guard !windowState.isIncognito else { return }
-        if let spaceID = windowState.spaceID {
-            let previous = transitionSpaces.updateValue(spaceID, forKey: windowState.id)
-            if let previous, previous != spaceID {
+        // Only a profile change counts, as before this state moved into the window.
+        if let spaceID = windowState.spaceID, let profileID = tabs.profile(forSpace: spaceID)?.id {
+            let previous = transitionProfiles.updateValue(profileID, forKey: windowState.id)
+            if let previous, previous != profileID {
                 windowState.isSwitchingSpace = true
                 transitionEndTasks[windowState.id]?.cancel()
                 transitionEndTasks[windowState.id] = Task { [weak windowState] in
