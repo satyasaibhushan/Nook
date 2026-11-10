@@ -324,9 +324,9 @@ struct BackgroundWindowModifier: NSViewRepresentable {
     }
 }
 
-/// Fullscreen keeps the empty toolbar as a white band, on screen or on hover at the top, so it is
-/// hidden for the stay. AppKit ignores a re-show until the exit has finished. The traffic lights
-/// across that exit are `TrafficLightsView`'s job in WindowView.swift.
+/// Hide the empty toolbar once full-screen entry finishes, including lock-screen restoration.
+/// AppKit owns the toolbar's companion window during the transition. The traffic lights across
+/// the exit are `TrafficLightsView`'s job in WindowView.swift.
 private final class FullScreenToolbarView: NSView {
     private var observers: [any NSObjectProtocol] = []
 
@@ -337,11 +337,12 @@ private final class FullScreenToolbarView: NSView {
         guard let window else { return }
         let center = NotificationCenter.default
         observers = [
-            // Before entry, so the band AppKit builds for the hover reveal is the bare title bar.
+            // Changing visibility during willEnter can invalidate AppKit's companion layout.
             // Weak: NotificationCenter holds these blocks, and a strong window here would keep
             // every closed window alive.
-            center.addObserver(forName: NSWindow.willEnterFullScreenNotification, object: window, queue: .main) { [weak window] _ in
-                window?.toolbar?.isVisible = false
+            center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak window] _ in
+                guard let toolbar = window?.toolbar, toolbar.isVisible else { return }
+                toolbar.isVisible = false
             },
             center.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { [weak window] _ in
                 window?.toolbar?.isVisible = true
