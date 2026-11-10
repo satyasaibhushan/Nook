@@ -490,6 +490,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             var timebase = mach_timebase_info_data_t()
             mach_timebase_info(&timebase)
             emit(["clock": ["host_seconds": now(), "wall_seconds": Date().timeIntervalSince1970,
+                             "mach_absolute_ticks": mach_absolute_time(), "mach_continuous_ticks": mach_continuous_time(),
                              "mach_timebase_numer": timebase.numer, "mach_timebase_denom": timebase.denom],
                   "window_rect": wr, "window_id": requestedWindow as Any? ?? NSNull(),
                   "display_rect": [display.frame.minX,display.frame.minY,display.frame.width,display.frame.height],
