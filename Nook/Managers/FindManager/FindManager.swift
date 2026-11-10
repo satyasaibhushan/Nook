@@ -1,26 +1,30 @@
 // Licensed under GPL-3.0. See LICENSE.
-//
-//  FindManager.swift
-//  Nook
-//
-//  Created by Jonathan Caudill on 28/12/2024.
-//
-
 import Foundation
 import SwiftUI
 import NookWeb
 
 @MainActor
 class FindManager: ObservableObject {
-    @Published var isFindBarVisible: Bool = false
-    @Published var searchText: String = ""
-    @Published var matchCount: Int = 0
-    @Published var currentMatchIndex: Int = 0
-    @Published var isSearching: Bool = false
-    
-    var currentSession: PageSession?
-    
+    @Published var isFindBarVisible = false
+    @Published var searchText = ""
+    @Published var matchCount = 0
+    @Published var currentMatchIndex = 0
+    @Published var isSearching = false
+
+    private(set) var currentSession: PageSession?
+    private var generation = UUID()
+    private var cleanupTask: Task<Void, Never>?
+
+    private func invalidateRequests() {
+        generation = UUID()
+        cleanupTask?.cancel()
+        cleanupTask = nil
+        isSearching = false
+    }
+
     func showFindBar(for session: PageSession? = nil) {
+        invalidateRequests()
+        currentSession?.clearFindInPage()
         currentSession = session
         isFindBarVisible = true
         searchText = ""
@@ -29,60 +33,68 @@ class FindManager: ObservableObject {
     }
 
     func hideFindBar() {
-        // Clear highlights from current tab before hiding
-        if let session = currentSession {
-            session.clearFindInPage()
-        }
-
+        invalidateRequests()
+        currentSession?.clearFindInPage()
         isFindBarVisible = false
-        // Delay clearing text until animation completes (0.25s)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.searchText = ""
-            self?.matchCount = 0
-            self?.currentMatchIndex = 0
-            self?.currentSession = nil
+        let generation = generation
+        // Preserve the outgoing text during the exit animation, unless another presentation starts.
+        cleanupTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(0.25))
+            guard !Task.isCancelled, let self, self.generation == generation,
+                  !self.isFindBarVisible else { return }
+            self.searchText = ""
+            self.matchCount = 0
+            self.currentMatchIndex = 0
+            self.currentSession = nil
+            self.cleanupTask = nil
         }
     }
-    
-    func search(for text: String, in session: PageSession?) {
-        guard let session else {
-            clearSearch()
-            return
-        }
 
+    func search(for text: String, in session: PageSession?) {
+        guard isFindBarVisible else { return }
+        invalidateRequests()
+        if currentSession !== session { currentSession?.clearFindInPage() }
         currentSession = session
         searchText = text
-        isSearching = true
-
-        if text.isEmpty {
-            clearSearch()
+        matchCount = 0
+        currentMatchIndex = 0
+        guard let session, !text.isEmpty else {
+            currentSession?.clearFindInPage()
             return
         }
-
-        // Use JavaScript-based find functionality
-        session.findInPage(text) { [weak self] result in
-            DispatchQueue.main.async {
-                self?.isSearching = false
-                switch result {
-                case .success(let (matchCount, currentIndex)):
-                    self?.matchCount = matchCount
-                    self?.currentMatchIndex = currentIndex
-                case .failure:
-                    self?.matchCount = 0
-                    self?.currentMatchIndex = 0
-                }
-            }
-        }
+        isSearching = true
+        session.findInPage(text, completion: completion(for: session))
     }
 
     func findNext() {
-        guard let session = currentSession, !searchText.isEmpty else { return }
-        session.findNextInPage { [weak self] result in
+        guard isFindBarVisible, let session = currentSession, !searchText.isEmpty else { return }
+        invalidateRequests()
+        session.findNextInPage(completion: completion(for: session))
+    }
+
+    func findPrevious() {
+        guard isFindBarVisible, let session = currentSession, !searchText.isEmpty else { return }
+        invalidateRequests()
+        session.findPreviousInPage(completion: completion(for: session))
+    }
+
+    private func completion(for session: PageSession) -> PageSession.FindCompletion {
+        let generation = generation
+        let query = searchText
+        let navigationID = session.loadingNavigationID
+        let webViewID = session.webView.map(ObjectIdentifier.init)
+        return { [weak self, weak session] result in
             DispatchQueue.main.async {
+                guard let self, let session, self.generation == generation,
+                      self.currentSession === session, self.searchText == query,
+                      session.loadingNavigationID == navigationID,
+                      session.webView.map(ObjectIdentifier.init) == webViewID,
+                      self.isFindBarVisible else { return }
+                self.isSearching = false
                 switch result {
-                case .success(let (matchCount, currentIndex)):
-                    self?.matchCount = matchCount
-                    self?.currentMatchIndex = currentIndex
+                case .success(let (count, index)):
+                    self.matchCount = count
+                    self.currentMatchIndex = index
                 case .failure:
                     break
                 }
@@ -90,34 +102,25 @@ class FindManager: ObservableObject {
         }
     }
 
-    func findPrevious() {
-        guard let session = currentSession, !searchText.isEmpty else { return }
-        session.findPreviousInPage { [weak self] result in
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let (matchCount, currentIndex)):
-                    self?.matchCount = matchCount
-                    self?.currentMatchIndex = currentIndex
-                case .failure:
-                    break
-                }
-            }
-        }
-    }
-    
     func clearSearch() {
-        guard let session = currentSession else { return }
-        session.clearFindInPage()
+        invalidateRequests()
+        currentSession?.clearFindInPage()
         searchText = ""
         matchCount = 0
         currentMatchIndex = 0
     }
-    
+
     func updateCurrentSession(_ session: PageSession?) {
+        guard currentSession !== session else { return }
+        invalidateRequests()
+        currentSession?.clearFindInPage()
         currentSession = session
+        matchCount = 0
+        currentMatchIndex = 0
         if isFindBarVisible && !searchText.isEmpty {
-            // Re-search in the new tab
             search(for: searchText, in: session)
         }
     }
+
+    deinit { cleanupTask?.cancel() }
 }

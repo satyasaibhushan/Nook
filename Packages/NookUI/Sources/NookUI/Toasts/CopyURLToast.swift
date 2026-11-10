@@ -40,12 +40,6 @@ public struct CopyURLToast: View {
             }
         }
         .transition(.toast)
-        .onAppear {
-            // Auto-dismiss after 2 seconds
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                windowState?.isShowingCopyURLToast = false
-            }
-        }
         .onTapGesture {
             windowState?.isShowingCopyURLToast = false
         }

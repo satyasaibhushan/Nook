@@ -33,8 +33,7 @@ struct MiniBrowserWindowView: View {
         .animation(.smooth(duration: 0.25), value: showCopyToast)
         .onReceive(NotificationCenter.default.publisher(for: .miniWindowCopiedURL, object: page)) { _ in
             showCopyToast = true
-            Task {
-                try? await Task.sleep(for: .seconds(2))
+            ToastLifetime.restart(for: page, after: 2) {
                 showCopyToast = false
             }
         }

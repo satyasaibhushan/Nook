@@ -26,11 +26,6 @@ extension BrowserManager {
     func showWindowToast(_ text: String, in windowState: BrowserWindowState) {
         windowState.copyToastText = text
         windowState.isShowingCopyURLToast = true
-        Task { [weak windowState] in
-            try? await Task.sleep(for: .seconds(2))
-            windowState?.isShowingCopyURLToast = false
-            windowState?.copyToastText = nil
-        }
     }
 }
 
