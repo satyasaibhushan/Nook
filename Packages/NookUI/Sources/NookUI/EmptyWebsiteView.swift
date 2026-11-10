@@ -13,7 +13,6 @@ import NookWeb
 public struct EmptyWebsiteView: View {
     @Environment(\.colorScheme) var colorScheme
     @Environment(BrowserWindowState.self) private var windowState
-    @Environment(WindowRegistry.self) var windowRegistry
     @Environment(TabsController.self) private var tabs
     @Environment(\.tabActions) private var actions
 
@@ -24,7 +23,7 @@ public struct EmptyWebsiteView: View {
             ZStack {
                 // Match the container background so this reads as chrome, not webview content.
                 let accent = windowState.isIncognito ? NookDesign.Surface.incognitoAccent : (actions?.accentColor ?? .accentColor)
-                let isActive = windowRegistry.activeWindowId == windowState.id
+                let isActive = windowState.isActive
 
                 let theme = windowState.isIncognito ? nil : windowState.spaceDraftTheme ?? windowState.spaceID.flatMap { tabs.space($0)?.theme }
                 SpaceChromeBackground(theme: theme, accent: accent, isActive: isActive)

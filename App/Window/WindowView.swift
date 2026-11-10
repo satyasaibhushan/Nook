@@ -90,7 +90,7 @@ struct WindowView: View {
         // A download opened in place, in the window that is in front.
         .overlay {
             if let download = browserManager.downloadManager.previewing,
-               windowRegistry.activeWindowId == windowState.id {
+               windowState.isActive {
                 DownloadPreviewOverlay(downloads: browserManager.downloadManager, download: download)
                     .zIndex(9600)
             }
@@ -110,7 +110,7 @@ struct WindowView: View {
 
                 // Tidy Downloads rename, in the window it started from
                 if let tidied = browserManager.downloadManager.lastTidied,
-                   windowRegistry.activeWindowId == windowState.id {
+                   windowState.isActive {
                     TidyDownloadToast(download: tidied, downloads: browserManager.downloadManager)
                         .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
                 }
@@ -183,7 +183,7 @@ struct WindowView: View {
         .onDisappear {
             hoverSidebarManager.stop()
         }
-        .onChange(of: windowRegistry.activeWindowId) { _, _ in
+        .onChange(of: windowState.isActive) { _, _ in
             hoverSidebarManager.updateMonitoring(for: windowState)
         }
         .onChange(of: windowState.isSidebarVisible) { _, _ in
@@ -223,10 +223,10 @@ struct WindowView: View {
         // The app-wide accent follows the active window's space.
         // Keep the shared accent available to controls outside this window.
         .onChange(of: spaceAccentHex) { _, hex in applyAccent(hex) }
-        .onChange(of: windowRegistry.activeWindowId) { _, _ in applyAccent(spaceAccentHex) }
+        .onChange(of: windowState.isActive) { _, _ in applyAccent(spaceAccentHex) }
         // Handle organize tabs notification from keyboard shortcut manager
         .onReceive(NotificationCenter.default.publisher(for: .organizeTabsRequested)) { _ in
-            guard windowRegistry.activeWindow?.id == windowState.id,
+            guard windowState.isActive,
                   let spaceID = windowState.spaceID else { return }
             Task {
                 await tabOrganizerManager.organizeTabs(in: spaceID, using: tabs)
@@ -255,7 +255,7 @@ struct WindowView: View {
     }
 
     private func applyAccent(_ hex: String?) {
-        guard let hex, windowRegistry.activeWindowId == windowState.id else { return }
+        guard let hex, windowState.isActive else { return }
         browserManager.gradientColorManager.setImmediate(SpaceGradient.accent(hex: hex))
     }
 
@@ -279,7 +279,7 @@ struct WindowView: View {
         let accent = windowState.isIncognito
             ? SpaceGradient.incognito.primaryColor
             : spaceAccentHex.map { SpaceGradient.accent(hex: $0).primaryColor } ?? SpaceGradient.default.primaryColor
-        let isActive = windowRegistry.activeWindowId == windowState.id
+        let isActive = windowState.isActive
 
         SpaceChromeBackground(theme: spaceTheme, accent: accent, isActive: isActive)
             .spaceThemeAppearance(spaceTheme)
