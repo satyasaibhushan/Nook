@@ -81,6 +81,14 @@ public class BrowserConfiguration {
         )
         config.userContentController.addUserScript(passkeySuppress)
 
+        // Keyboard clicking: f labels what is clickable in view. See Resources/link-hints.js.
+        if let url = Bundle.module.url(forResource: "link-hints", withExtension: "js", subdirectory: "Resources"),
+           let source = try? String(contentsOf: url, encoding: .utf8) {
+            config.userContentController.addUserScript(
+                WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+            )
+        }
+
         return config
     }()
 
