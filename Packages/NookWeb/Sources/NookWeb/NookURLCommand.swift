@@ -6,12 +6,19 @@
 
 import Foundation
 
-/// A parsed nook:// link: open, search or space. Anything else is rejected.
+/// A parsed nook:// link: open, search, space, or one of the commands on a sidebar item by id
+/// (close, pin, unpin, reload, move, select). Anything else is rejected.
 public struct NookURLCommand: Equatable, Sendable {
     public enum Action: Equatable, Sendable {
         case open(URL, reuse: Bool)
         case search(String)
         case switchSpace
+        case close(UUID)
+        case pin(UUID)
+        case unpin(UUID)
+        case reload(UUID)
+        case move(UUID, folder: UUID)
+        case select(UUID)
     }
 
     public var action: Action
@@ -39,7 +46,8 @@ public struct NookURLCommand: Equatable, Sendable {
         if params["space"] != nil, !hasSpace(params["space"]) { return nil }
         let action: Action
         var space: String?
-        switch parts.host?.lowercased() {
+        let host = parts.host?.lowercased()
+        switch host {
         case "open":
             guard let raw = take("url"), let url = webURL(raw) else { return nil }
             action = .open(url, reuse: take("reuse") == "1")
@@ -52,6 +60,18 @@ public struct NookURLCommand: Equatable, Sendable {
             guard let name = take("name") else { return nil }
             action = .switchSpace
             space = name
+        case "close", "pin", "unpin", "reload", "move", "select":
+            guard let id = take("id").flatMap(UUID.init(uuidString:)) else { return nil }
+            switch host {
+            case "close": action = .close(id)
+            case "pin": action = .pin(id)
+            case "unpin": action = .unpin(id)
+            case "reload": action = .reload(id)
+            case "select": action = .select(id)
+            default:
+                guard let folder = take("folder").flatMap(UUID.init(uuidString:)) else { return nil }
+                action = .move(id, folder: folder)
+            }
         default:
             return nil
         }
