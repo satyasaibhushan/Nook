@@ -690,10 +690,12 @@ def scenario(browser, name, index, record):
         pointer = {"kind":"move","x":bounds["X"]+bounds["Width"]*.85,"y":bounds["Y"]+bounds["Height"]*.75}
         act(pointer); time.sleep(.3)
         x,y,w,h = window_rect
-        page = [r["rect"] for r in browser.ax() if r.get("AXRole") == "AXWebArea" and "rect" in r]
-        page = page[0] if page else [x+256,y+40,w-264,h-48]
+        page = [r["rect"] for r in browser.ax() if r.get("AXRole") == "AXWebArea" and browser.session in str(r.get("AXURL","")) and "rect" in r]
+        if not page:
+            raise Invalid("cannot identify the benchmark page rectangle")
+        page = page[0]
         px,py,pw,ph = page
-        attribution = {"attribute":True,"window_rect":window_rect,"regions":[
+        attribution = {"attribute":True,"full_display":True,"window_rect":window_rect,"regions":[
             {"name":"traffic_lights","rect":[x,y,90,38]},
             {"name":"link_pill","rect":[px,y+h-44,min(500,pw),44]},
             {"name":"page","rect":page},
@@ -728,6 +730,11 @@ def scenario(browser, name, index, record):
         raw["sidebar_validation"] = {"before":before,"after":after,"menu_before":sorted(labels(sidebar_before)),"menu_after":sorted(labels(sidebar_after))}
     raw["window_frame"] = bounds
     raw["pointer_park"] = pointer
+    if name == "activate":
+        for frame in raw["frames"]:
+            if "window_changed_fraction" in frame:
+                frame["display_changed_fraction"] = frame["changed"]
+                frame["changed"] = frame["window_changed_fraction"]
     metrics = analyze(raw, target, name == "scroll")
     if name == "activate":
         frames = [f for f in raw["frames"] if "pixels" in f]
