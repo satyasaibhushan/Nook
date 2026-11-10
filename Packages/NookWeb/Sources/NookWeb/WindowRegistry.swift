@@ -26,8 +26,14 @@ public class WindowRegistry {
 
     public init() {}
 
-    /// ID of the currently focused window (the only thing we actually observe)
-    public var activeWindowId: UUID?
+    /// ID of the currently focused window, for command routing.
+    public var activeWindowId: UUID? {
+        didSet {
+            guard oldValue != activeWindowId else { return }
+            if let oldValue { windows[oldValue]?.isActive = false }
+            if let activeWindowId { windows[activeWindowId]?.isActive = true }
+        }
+    }
 
     /// The currently focused window state (computed, not observed)
     public var activeWindow: BrowserWindowState? {
@@ -74,6 +80,7 @@ public class WindowRegistry {
         // Call cleanup callback if set
         onWindowClose?(id)
 
+        windows[id]?.isActive = false
         windows.removeValue(forKey: id)
         activationOrder.removeAll { $0 == id }
 

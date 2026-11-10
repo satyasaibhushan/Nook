@@ -350,8 +350,8 @@ class BrowserManager: ObservableObject {
     // Legacy global state - kept for backward compatibility during transition
     /// Tracks which pinned tab tile is hovered (for middle-click → reset to pinned URL)
     var hoveredPinnedTabId: UUID? = nil
-    @Published var isSidebarVisible: Bool = true
-    @Published var isCommandPaletteVisible: Bool = false
+    // Preference/bootstrap mirror; window state drives the visible sidebar.
+    var isSidebarVisible: Bool = true
     @Published var shouldShowZoomPopup: Bool = false
     /// The website data store of the active window's space. Not @Published: a switch must not
     /// redraw every view observing BrowserManager.
@@ -1003,7 +1003,6 @@ class BrowserManager: ObservableObject {
         if windowState.isIncognito {
             gradientColorManager.setImmediate(.incognito)
         }
-        isCommandPaletteVisible = windowState.isCommandPaletteVisible
         // The newly active window's space is the app's login context.
         windowSpaceChanged(windowState)
         moveSidebarPiP(to: windowState)

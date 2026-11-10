@@ -19,7 +19,6 @@ struct PinnedGrid: View {
 
     @EnvironmentObject var browserManager: BrowserManager
     @Environment(BrowserWindowState.self) private var windowState
-    @Environment(WindowRegistry.self) private var windowRegistry
     @ObservedObject private var dragSession = NookDragSessionManager.shared
     private let maxColumns = 4
 
@@ -48,7 +47,7 @@ struct PinnedGrid: View {
         let items: [Item] = effectiveSpaceID.map { tabs.favorites(of: $0) } ?? []
         let colsCount: Int = columnCount(for: width, itemCount: items.count)
 
-        let shouldAnimate = (windowRegistry.activeWindow?.id == windowState.id) && !windowState.isSwitchingSpace
+        let shouldAnimate = windowState.isActive && !windowState.isSwitchingSpace
 
         if let spaceID = effectiveSpaceID {
             let zone = DropZoneID.favorites(spaceID: spaceID)
@@ -167,7 +166,6 @@ private struct PinnedTile: View {
 
     @EnvironmentObject var browserManager: BrowserManager
     @Environment(BrowserWindowState.self) private var windowState
-    @Environment(WindowRegistry.self) private var windowRegistry
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.nookSettings) private var settings
@@ -179,7 +177,7 @@ private struct PinnedTile: View {
     /// gradient top, blended toward the window background as the chrome blends it.
     private var tileColors: SpaceTheme.TileColors? {
         guard !windowState.isIncognito, let space = tabs.space(spaceID), !space.isAgent else { return nil }
-        let isActive = windowRegistry.activeWindowId == windowState.id
+        let isActive = windowState.isActive
         let scheme = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
         func blend(_ base: NSColor, toward amount: Double) -> ThemeRGB? {
             var out: NSColor?
@@ -220,7 +218,7 @@ private struct PinnedTile: View {
                 onResetToPinnedURL: { tabs.resetToHome(item.id) },
                 colors: tileColors,
                 glowHost: tileColors == nil ? nil : item.url.flatMap(FaviconCache.key),
-                isDimmed: windowRegistry.activeWindowId != windowState.id,
+                isDimmed: !windowState.isActive,
                 action: {
                     FavoritePreview.shared.dismiss()
                     tabs.select(item.id, in: windowState)

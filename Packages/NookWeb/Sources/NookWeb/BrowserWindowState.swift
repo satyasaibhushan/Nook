@@ -27,6 +27,9 @@ public class BrowserWindowState {
     /// Unique identifier for this window instance
     public let id: UUID
 
+    /// Only the old and new active windows invalidate their chrome when focus moves.
+    public internal(set) var isActive = false
+
     /// Sidebar width for this window
     public var sidebarWidth: CGFloat = SidebarWidth.standard
     public var isSwitchingSpace = false
