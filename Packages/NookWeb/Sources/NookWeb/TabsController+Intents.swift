@@ -356,28 +356,16 @@ extension TabsController {
 
     // MARK: - Close
 
-    /// A pinned or favorite tab ends its page and keeps the item. Anything in the tabs section,
-    /// and any folder, is removed into the reopen history.
+    /// A pinned or favorite tab ends its page and keeps the item, leaving nothing in the reopen
+    /// history: the item is still in the sidebar, so there is nothing to bring back. Anything in
+    /// the tabs section, and any folder, is removed into the reopen history.
     public func close(_ itemID: UUID, archive: Bool = true) {
         guard let owner = owner(ofItem: itemID) else { return }
         let source = tree(owner)
         guard let item = source.item(itemID) else { return }
         if !item.isFolder, source.scope(of: itemID) == .synced {
-            // The page it showed, so Reopen Closed Tab can bring it back in place.
-            var page = session(for: itemID).map { OpenPage(url: $0.url, title: $0.title) }
-            if page == nil, case .main = owner { page = device.openPages[itemID] }
             moveSelectionOff([itemID])
             endSession(itemID)
-            if let page, let section = source.section(of: itemID) {
-                let entry = ClosedEntry(items: [item], section: section, closedAt: Date(), endedPage: page)
-                switch owner {
-                case .main:
-                    recordClosed(entry)
-                case .privateWindow(let window):
-                    window.privateClosed.append(entry)
-                    if window.privateClosed.count > DeviceState.closedLimit { window.privateClosed.removeFirst() }
-                }
-            }
             save()
             return
         }
