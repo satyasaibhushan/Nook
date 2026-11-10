@@ -19,6 +19,8 @@ public struct NookURLCommand: Equatable, Sendable {
         case open(URL, reuse: Bool)
         case search(String)
         case recording(RecordingState)
+        /// A mode name as typed, matched case-insensitively later; nil ends the running mode.
+        case focus(String?)
         case switchSpace
         case close(UUID)
         case pin(UUID)
@@ -69,6 +71,9 @@ public struct NookURLCommand: Equatable, Sendable {
         case "recording":
             guard let state = take("state").flatMap(RecordingState.init(rawValue:)) else { return nil }
             action = .recording(state)
+        case "focus":
+            guard let mode = take("mode") else { return nil }
+            action = .focus(mode.lowercased() == "off" ? nil : mode)
         case "open":
             guard let raw = take("url"), let url = webURL(raw) else { return nil }
             action = .open(url, reuse: take("reuse") == "1")
