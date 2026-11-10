@@ -18,7 +18,12 @@ import NookUI
 /// beyond the window's left boundary.
 final class HoverSidebarManager: ObservableObject {
     // MARK: - Published State
-    @Published var isOverlayVisible: Bool = false
+    @Published var isOverlayVisible: Bool = false {
+        willSet {
+            os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite",
+                        "old=%{public}d new=%{public}d", isOverlayVisible ? 1 : 0, newValue ? 1 : 0)
+        }
+    }
 
     // MARK: - Configuration
     /// Width inside the window that triggers reveal when hovered.
@@ -112,7 +117,6 @@ final class HoverSidebarManager: ObservableObject {
             await HoverResync.waitForMenuTracking()
             // An unchanged write still redraws every view observing the manager.
             guard let self, !self.isActive, self.isOverlayVisible else { return }
-            os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", 0)
             self.isOverlayVisible = false
         }
     }
@@ -142,7 +146,6 @@ final class HoverSidebarManager: ObservableObject {
         // Never show overlay while the real sidebar is visible, or over a fullscreen page
         if activeState.isSidebarVisible || activeState.showsFullscreenPage {
             if isOverlayVisible {
-                os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", 0)
                 isOverlayVisible = false
             }
             return
@@ -150,7 +153,6 @@ final class HoverSidebarManager: ObservableObject {
 
         guard let window = NSApp.keyWindow else {
             if isOverlayVisible {
-                os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", 0)
                 isOverlayVisible = false
             }
             return
@@ -168,7 +170,6 @@ final class HoverSidebarManager: ObservableObject {
         let verticalOK = mouse.y >= frame.minY - verticalSlack && mouse.y <= frame.maxY + verticalSlack
         if !verticalOK {
             if isOverlayVisible {
-                os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", 0)
                 isOverlayVisible = false
             }
             return
@@ -202,7 +203,6 @@ final class HoverSidebarManager: ObservableObject {
         let shouldShow = inTriggerZone || (isOverlayVisible && (inKeepOpenZone || inSidebarContentZone))
         if shouldShow != isOverlayVisible {
             withAnimation(.easeInOut(duration: 0.15)) {
-                os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", shouldShow ? 1 : 0)
                 isOverlayVisible = shouldShow
             }
         }
