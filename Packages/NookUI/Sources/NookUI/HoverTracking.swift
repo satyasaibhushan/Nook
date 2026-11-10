@@ -37,7 +37,7 @@ final class HoverTrackingNSView: NSView {
     /// Tracks in a window that is not key, and while another app is in front.
     var always = false
     private var trackingArea: NSTrackingArea?
-    private var isHovered = false
+    fileprivate var isHovered = false
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -60,14 +60,9 @@ final class HoverTrackingNSView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         NotificationCenter.default.removeObserver(self, name: HoverResync.notification, object: nil)
-        NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
         if let window {
             NotificationCenter.default.addObserver(self, selector: #selector(resyncRequested), name: HoverResync.notification, object: nil)
-            // No exit arrives while the window is not key, so the pointer may have left meanwhile.
-            if !always {
-                NotificationCenter.default.addObserver(
-                    self, selector: #selector(resyncRequested), name: NSWindow.didBecomeKeyNotification, object: window)
-            }
+            HoverActivationRegistry.shared.register(self)
         }
         resyncHover()
     }
@@ -75,7 +70,7 @@ final class HoverTrackingNSView: NSView {
     @objc private func resyncRequested() { resyncHover() }
 
     /// Derives hover from where the pointer actually is, for the cases no enter/exit arrives.
-    private func resyncHover() {
+    fileprivate func resyncHover() {
         guard let window, always || window.isKeyWindow else {
             setHover(false, deferred: true)
             return
@@ -106,6 +101,27 @@ final class HoverTrackingNSView: NSView {
     override func mouseExited(with event: NSEvent) {
         setHover(false)
     }
+}
+
+@MainActor
+private final class HoverActivationRegistry {
+    static let shared = HoverActivationRegistry()
+    private let views = NSHashTable<HoverTrackingNSView>.weakObjects()
+    private var observer: NSObjectProtocol?
+
+    private init() {
+        observer = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self, let window = notification.object as? NSWindow else { return }
+                for view in self.views.allObjects where view.window === window && !view.always {
+                    let point = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+                    if view.isHovered || view.visibleRect.contains(point) { view.resyncHover() }
+                }
+            }
+        }
+    }
+
+    func register(_ view: HoverTrackingNSView) { views.add(view) }
 }
 
 /// Rows that slide under a resting pointer get no enter event (`.inVisibleRect` areas move
