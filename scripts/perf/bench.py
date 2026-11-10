@@ -144,7 +144,9 @@ setInterval(function(){
   if (list.children.length > 200) list.removeChild(list.firstChild);
 }, 100);
 setInterval(function(){ history.replaceState(null, '', location.pathname + location.search + '#' + n); }, 1000);
-(function frame(){ out.textContent = performance.now().toFixed(0); requestAnimationFrame(frame); })();
+var frames = 0, pid = new URLSearchParams(location.search).get('id');
+(function frame(){ frames++; out.textContent = performance.now().toFixed(0); requestAnimationFrame(frame); })();
+setInterval(function(){ navigator.sendBeacon('/frames', JSON.stringify({id: pid, frames: frames})); }, 1000);
 </script>"""
         return head + f"</head><body><h1>Busy</h1>{script}<p>{words(200)}</p>{BEACON}</body></html>"
     if kind == "frame":
@@ -205,6 +207,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         now = time.time()
         data = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path == "/frames":
+            try:
+                b = json.loads(data); frame_counts[b["id"]] = (now, b["frames"])
+            except Exception: pass
+            return self.reply("text/plain", "ok")
         if self.path == "/shown":
             try:
                 b = json.loads(data)
@@ -222,6 +229,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply("text/plain", "ok")
 
 shown = []
+frame_counts = {}
 
 def wait_shown(pid, after, timeout):
     """When the page `pid` next became visible after `after`, by its own clock; None on timeout."""
@@ -459,11 +467,11 @@ def scenario_burst(app, count, kinds):
     loaded = sum(1 for i in ids if i in beacons)
     time.sleep(4)
     mem = app.memory()
-    c0 = app.cpu(); time.sleep(10); idle = app.cpu() - c0
+    c0, w0 = app.cpu(), app.web_cpu(); time.sleep(10); idle, idle_web = app.cpu() - c0, app.web_cpu() - w0
     # Switch back through tabs is not scriptable without ids; the restore scenario covers reuse.
     res = {"tabs": count, "loaded": loaded, "all_loaded_ms": round((done - t0) * 1000) if ok else None,
            "open_calls_ms": round((opened - t0) * 1000), "app_cpu_s": round(cpu1 - cpu0, 2),
-           "idle_cpu_10s": round(idle, 2), **mem}
+           "idle_cpu_10s": round(idle, 2), "idle_web_cpu_10s": round(idle_web, 2), **mem}
     app.quit(graceful=True)
     # Relaunch on the same state: session restore with `count` saved tabs.
     t0, ready = app.launch(state)
@@ -526,8 +534,10 @@ def scenario_busy(app, count):
     tabs = app.tab_ids(state, {ids[0]})
     if tabs:
         app.command("select", tabs[ids[0]]); time.sleep(3)
-        a0, w0 = app.cpu(), app.web_cpu(); time.sleep(20)
-        res.update({"front_app_cpu_20s": round(app.cpu() - a0, 2), "front_web_cpu_20s": round(app.web_cpu() - w0, 2)})
+        a0, w0, f0 = app.cpu(), app.web_cpu(), frame_counts.get(ids[0]); time.sleep(20)
+        f1 = frame_counts.get(ids[0])
+        res.update({"front_app_cpu_20s": round(app.cpu() - a0, 2), "front_web_cpu_20s": round(app.web_cpu() - w0, 2),
+                    "front_frames_per_s": round((f1[1] - f0[1]) / (f1[0] - f0[0]), 1) if f0 and f1 and f1[0] > f0[0] else None})
     res.update(app.memory())
     app.quit(graceful=False)
     shutil.rmtree(state, ignore_errors=True)
