@@ -477,7 +477,12 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 let due = start + (action["at"] as? Double ?? 0.5)
                 let delay = max(0, due - now())
                 try await Task.sleep(nanoseconds: UInt64(delay * 1e9))
-                events.append(["t": perform(action), "action": action])
+                var event: [String: Any] = ["action": action]
+                if action["kind"] as? String == "activate", let pointer = CGEvent(source: nil)?.location {
+                    event["pointer_before"] = [pointer.x,pointer.y]
+                }
+                event["t"] = perform(action)
+                events.append(event)
             }
             let end = start + (spec["duration"] as? Double ?? 2.0)
             try await Task.sleep(nanoseconds: UInt64(max(0, end - now()) * 1e9))
