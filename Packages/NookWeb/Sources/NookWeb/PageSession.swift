@@ -801,7 +801,7 @@ public final class PageSession: NSObject, Identifiable {
         // Pages of one host that load together share a single fetch.
         let fetch = Self.faviconFetches[fetchKey] ?? {
             let task = Task { @MainActor () -> PlatformImage? in
-                for link in await Self.iconLinks(in: page).prefix(3) {
+                for link in await Self.iconLinks(in: page, cacheKey: cacheKey).prefix(3) {
                     if let image = await Self.downloadImage(from: link, isPrivate: isPrivate) { return image }
                 }
                 // Last resort: the root /favicon.ico (for sites with no <link>, or whose targets return 403).
@@ -840,13 +840,19 @@ public final class PageSession: NSObject, Identifiable {
 
     /// The page's icon links, best first: the smallest one of at least 64 px, then the rest by
     /// size. An icon with no declared size counts as 48 px, a bare apple-touch-icon as 180.
-    private static func iconLinks(in page: WKWebView) async -> [URL] {
+    /// Empty when the document is no longer on `cacheKey`'s host: the fetch starts at commit and
+    /// awaits the cache first, so a redirect (Google's sign-in hop) can swap the document in
+    /// between, and its icon would be stored under the host that redirected.
+    private static func iconLinks(in page: WKWebView, cacheKey: String) async -> [URL] {
         let script = """
-        return Array.from(document.querySelectorAll('link[rel~="icon" i],link[rel^="apple-touch-icon" i]'))
-            .slice(0, 16).map(l => [l.href, l.getAttribute('sizes') || '', l.rel || '']);
+        return [location.href].concat(Array.from(document.querySelectorAll('link[rel~="icon" i],link[rel^="apple-touch-icon" i]'))
+            .slice(0, 16).map(l => [l.href, l.getAttribute('sizes') || '', l.rel || '']));
         """
-        guard let rows = try? await page.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .defaultClient) as? [[String]]
+        guard let result = try? await page.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .defaultClient) as? [Any],
+              let location = (result.first as? String).flatMap(URL.init(string:)),
+              FaviconCache.key(for: location) == cacheKey
         else { return [] }
+        let rows = result.dropFirst().compactMap { $0 as? [String] }
         let sized: [(url: URL, size: Int)] = rows.compactMap { row in
             guard row.count == 3, let link = URL(string: row[0]), link.scheme == "http" || link.scheme == "https" else { return nil }
             let declared = row[1].lowercased().split(separator: " ").compactMap { Int($0.split(separator: "x").first ?? "") }.max()
