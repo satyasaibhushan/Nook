@@ -34,6 +34,9 @@ BEACON = """
       hidden:document.hidden}, extra||{});
     navigator.sendBeacon('/beacon', JSON.stringify(body));
   }
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden) navigator.sendBeacon('/shown', JSON.stringify({id:id, at:Date.now()}));
+  });
   window.addEventListener('load', function(){
     setTimeout(function(){
       if (!window.__after) return send();
@@ -128,6 +131,22 @@ window.__after = function(){
 };
 </script>"""
         return head + f"</head><body><h1>Dynamic</h1>{frames}<div id=root></div><p>{words(300)}</p>{script}{BEACON}</body></html>"
+    if kind == "busy":
+        # A page that never settles: ticking title, animation frames, timers, address changes.
+        script = """
+<style>@keyframes spin{to{transform:rotate(360deg)}} .spin{width:60px;height:60px;background:#48c;animation:spin 1s linear infinite}</style>
+<div class=spin></div><div id=out></div><ul id=list></ul>
+<script>
+var n = 0, out = document.getElementById('out'), list = document.getElementById('list');
+setInterval(function(){ n++; document.title = '(' + n + ') busy'; }, 250);
+setInterval(function(){
+  var li = document.createElement('li'); li.textContent = 'event ' + n + ' ' + Math.random(); list.appendChild(li);
+  if (list.children.length > 200) list.removeChild(list.firstChild);
+}, 100);
+setInterval(function(){ history.replaceState(null, '', location.pathname + location.search + '#' + n); }, 1000);
+(function frame(){ out.textContent = performance.now().toFixed(0); requestAnimationFrame(frame); })();
+</script>"""
+        return head + f"</head><body><h1>Busy</h1>{script}<p>{words(200)}</p>{BEACON}</body></html>"
     if kind == "frame":
         return head + f"</head><body><p>{words(40)}</p><script>setInterval(function(){{document.body.appendChild(document.createElement('i'))}},50)</script></body></html>"
     return None
@@ -186,6 +205,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         now = time.time()
         data = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path == "/shown":
+            try:
+                b = json.loads(data)
+                with arrived:
+                    shown.append((b["id"], b["at"] / 1000))
+                    arrived.notify_all()
+            except Exception: pass
+            return self.reply("text/plain", "ok")
         try:
             b = json.loads(data); b["received"] = now
             with arrived:
@@ -193,6 +220,19 @@ class Handler(BaseHTTPRequestHandler):
                 arrived.notify_all()
         except Exception: pass
         self.reply("text/plain", "ok")
+
+shown = []
+
+def wait_shown(pid, after, timeout):
+    """When the page `pid` next became visible after `after`, by its own clock; None on timeout."""
+    deadline = time.time() + timeout
+    with arrived:
+        while True:
+            hit = [at for i, at in shown if i == pid and at >= after]
+            if hit: return hit[0]
+            left = deadline - time.time()
+            if left <= 0: return None
+            arrived.wait(left)
 
 def wait_beacons(ids, timeout):
     deadline = time.time() + timeout
@@ -271,6 +311,42 @@ class App:
             return sorted({p["pid"] for p in json.loads(txt[start:end]) if p.get("pid", 0) > 0}), txt
         except Exception as e:
             return [], str(e)
+
+    def command(self, name, item):
+        t0 = time.time()
+        subprocess.run(["open", "-a", self.path, f"nook://{name}?id={item}"], check=False)
+        return t0
+
+    def tab_ids(self, state_dir, wanted):
+        """Tab ids by page id, read from the tab files the app saves in its state folder."""
+        found = {}
+        def walk(node, owner):
+            if isinstance(node, dict):
+                if isinstance(node.get("id"), str) and len(node["id"]) == 36: owner = node["id"]
+                for v in node.values(): walk(v, owner)
+            elif isinstance(node, list):
+                for v in node: walk(v, owner)
+            elif isinstance(node, str) and owner and "id=" in node:
+                pid = urllib.parse.parse_qs(urllib.parse.urlparse(node).query).get("id", [None])[0]
+                if pid in wanted: found[pid] = owner
+        for _ in range(40):
+            for root, _, files in os.walk(state_dir):
+                for name in files:
+                    if name in ("device.json", "structure.json"):
+                        try: walk(json.load(open(os.path.join(root, name))), None)
+                        except Exception: pass
+            if len(found) == len(wanted): break
+            time.sleep(0.5)
+        return found
+
+    def web_cpu(self):
+        total = 0.0
+        for pid in self.web_pids()[0]:
+            out = subprocess.run(["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+            if out:
+                m, sec = out.split(":")[-2:]
+                total += int(m) * 60 + float(sec)
+        return total
 
     def memory(self):
         """Physical footprint in MB: the app, and the WebContent processes of its live pages."""
@@ -399,6 +475,88 @@ def scenario_burst(app, count, kinds):
     shutil.rmtree(state, ignore_errors=True)
     return res
 
+def start(app):
+    state = tempfile.mkdtemp(prefix="nookperf-")
+    app.launch(state)
+    time.sleep(3)
+    warm = "warm" + str(int(time.time()))
+    app.open(f"{HOST}/p/light?id={warm}"); wait_beacons([warm], 20)
+    assert warm in app.web_pids()[1], "the link opened in another copy of the app"
+    time.sleep(1)
+    return state
+
+def scenario_lifecycle(app, count, kinds, cycles=3):
+    """Open tabs, close them all, repeat: what stays behind after each round is a leak."""
+    state = start(app)
+    time.sleep(3)
+    res = {"start": app.memory(), "rounds": []}
+    for c in range(cycles):
+        stamp = int(time.time())
+        ids = [f"l{c}x{i}-{stamp}" for i in range(count)]
+        for i, pid in enumerate(ids):
+            app.open(f"{host(pid) if i % 2 else host()}/p/{kinds[i % len(kinds)]}?id={pid}")
+        wait_beacons(ids, 90)
+        time.sleep(4)
+        opened = app.memory()
+        tabs = app.tab_ids(state, set(ids))
+        cpu0 = app.cpu(); t0 = time.time()
+        for item in tabs.values(): app.command("close", item)
+        close_ms = round((time.time() - t0) * 1000)
+        time.sleep(6)
+        res["rounds"].append({"found": len(tabs), "open": opened, "closed": app.memory(),
+                              "close_ms": close_ms, "close_cpu_s": round(app.cpu() - cpu0, 2)})
+    res["app_mb_growth"] = round(res["rounds"][-1]["closed"]["app_mb"] - res["rounds"][0]["closed"]["app_mb"], 1)
+    app.quit(graceful=False)
+    shutil.rmtree(state, ignore_errors=True)
+    return res
+
+def scenario_busy(app, count):
+    """Pages that keep working in background tabs: what they cost the app and the page processes."""
+    state = start(app)
+    stamp = int(time.time())
+    ids = [f"busy{i}-{stamp}" for i in range(count)]
+    for pid in ids: app.open(f"{host()}/p/busy?id={pid}")
+    wait_beacons(ids, 60)
+    front = f"front-{stamp}"
+    app.open(f"{host()}/p/light?id={front}"); wait_beacons([front], 20)
+    time.sleep(5)
+    a0, w0 = app.cpu(), app.web_cpu(); time.sleep(20)
+    res = {"tabs": count, "background_app_cpu_20s": round(app.cpu() - a0, 2),
+           "background_web_cpu_20s": round(app.web_cpu() - w0, 2)}
+    tabs = app.tab_ids(state, {ids[0]})
+    if tabs:
+        app.command("select", tabs[ids[0]]); time.sleep(3)
+        a0, w0 = app.cpu(), app.web_cpu(); time.sleep(20)
+        res.update({"front_app_cpu_20s": round(app.cpu() - a0, 2), "front_web_cpu_20s": round(app.web_cpu() - w0, 2)})
+    res.update(app.memory())
+    app.quit(graceful=False)
+    shutil.rmtree(state, ignore_errors=True)
+    return res
+
+def scenario_switch(app, count, kinds, rounds=2):
+    """Select each loaded tab in turn: time until the page reports itself visible."""
+    state = start(app)
+    stamp = int(time.time())
+    ids = [f"sw{i}-{stamp}" for i in range(count)]
+    for i, pid in enumerate(ids): app.open(f"{host()}/p/{kinds[i % len(kinds)]}?id={pid}")
+    wait_beacons(ids, 90)
+    time.sleep(4)
+    tabs = app.tab_ids(state, set(ids))
+    cpu0 = app.cpu(); times = []
+    for _ in range(rounds):
+        for pid in ids[:-1] + ids[-1:]:
+            if pid not in tabs: continue
+            t0 = app.command("select", tabs[pid])
+            at = wait_shown(pid, t0 - 0.05, 5)
+            if at: times.append(round((at - t0) * 1000, 1))
+            time.sleep(0.3)
+    res = {"tabs": count, "found": len(tabs), "switches": len(times), "shown_ms": med(times),
+           "shown_p90_ms": round(sorted(times)[int(len(times) * 0.9)], 1) if times else None,
+           "app_cpu_s": round(app.cpu() - cpu0, 2)}
+    app.quit(graceful=False)
+    shutil.rmtree(state, ignore_errors=True)
+    return res
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--app", required=True)
@@ -426,6 +584,9 @@ def main():
         if "single" in a.only: result["single"] = scenario_single(app, a.runs, kinds)
         if "newhost" in a.only: result["newhost"] = scenario_single(app, a.runs, kinds, new_hosts=True)
         if "burst" in a.only: result["burst"] = scenario_burst(app, a.burst, kinds)
+        if "lifecycle" in a.only: result["lifecycle"] = scenario_lifecycle(app, 20, kinds)
+        if "busy" in a.only: result["busy"] = scenario_busy(app, 10)
+        if "switch" in a.only: result["switch"] = scenario_switch(app, 12, ["light", "dom", "res"])
     finally:
         app.quit(graceful=False)
         forget_favicons(ports + [PORT])
