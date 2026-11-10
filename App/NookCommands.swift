@@ -129,9 +129,9 @@ struct NookCommands: Commands {
             .modifier(dynamicShortcut(.undoCloseTab))
 
             Button("Reopen Closed Tab") {
-                shortcutManager.executeMenuAction(.undoCloseTab)
+                if let window = windowRegistry.activeWindow { browserManager.tabs.reopenLastClosed(in: window) }
             }
-            .modifier(dynamicShortcut(.undoCloseTab))
+            .keyboardShortcut("t", modifiers: [.command, .shift])
         }
 
         // File Section
