@@ -109,7 +109,7 @@ private struct WindowFocusBridge: NSViewRepresentable {
                 windowState.window = window
             }
 
-            BrowserPerformance.observeMainRunLoop()
+            MainActor.assumeIsolated { BrowserPerformance.observeMainRunLoop() }
             window.setUpAsPageWindow()
 
             keyObserver = NotificationCenter.default.addObserver(
