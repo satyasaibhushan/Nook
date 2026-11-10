@@ -19,6 +19,7 @@ extension PageSession: WKNavigationDelegate {
         _ webView: WKWebView,
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
+        loadingNavigationID = UUID()
         loadingState = .didStartProvisionalNavigation
         blockedURL = nil
         controller?.tabEvents?.tabPropertiesChanged(self, properties: [.loading])

@@ -16,6 +16,7 @@ let package = Package(
         .package(url: "https://github.com/will-lumley/FaviconFinder.git", from: "5.1.5"),
     ],
     targets: [
+        .testTarget(name: "NookWebTests", dependencies: ["NookWeb"]),
         .target(name: "MuteableWKWebView", path: "Sources/MuteableWKWebView", publicHeadersPath: "include"),
         .target(
             name: "NookWeb",
