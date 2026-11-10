@@ -32,7 +32,7 @@ SCENARIOS = ["keyboard", "click", "command", "navigate", "close", "sidebar", "ac
 ALIASES = dict(zip("abcdefghi", SCENARIOS))
 COLORS = {"red": "#bd3645", "blue": "#285ea8", "green": "#269454"}
 KEYS = {"t": 17, "w": 13, "l": 37, "s": 1, "f": 3, "j": 38, "a": 0,
-        "return": 36, "escape": 53, "tab": 48, "home": 115, ",": 43}
+        "return": 36, "escape": 53, "tab": 48, "home": 115, "backspace":51, ",": 43}
 
 
 class Invalid(RuntimeError):
@@ -147,10 +147,11 @@ def leave_arc_running(path):
     raise Invalid("Arc did not relaunch")
 
 
-def capture(pid, actions=(), duration=2, record=None, ocr=None, signatures=False, native=False):
+def capture(pid, actions=(), duration=2, record=None, ocr=None, signatures=False, native=False, region=None):
     visible = window(pid)
     result = spec_call("capture", {"pid": pid, "window_id": visible["kCGWindowNumber"] if visible else None,
                                    "actions": list(actions), "duration": duration, "ocr_needle":ocr,"signatures":signatures,
+                                   "region":region,
                                    "native_resolution":native,
                                    **({"record_dir": str(record)} if record else {})})
     if len([f for f in result["frames"] if "changed" in f]) < (2 if actions else 1):
@@ -352,18 +353,55 @@ class Browser:
             self.owned_tabs += 1
         act(key("a", "cmd"), text(url), key("return"))
         ident = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("id", [None])[0]
-        end = time.monotonic()+15
-        while ident and (ident, "load") not in Handler.events and time.monotonic() < end:
-            time.sleep(.05)
+        for attempt in range(1 if self.name == "arc" else 2):
+            if attempt:
+                # Retry setup in the current throwaway tab if focus swallowed input.
+                act(key("l", "cmd"), key("a", "cmd"), text(url), key("return"))
+            end = time.monotonic()+5
+            while ident and (ident, "load") not in Handler.events and time.monotonic() < end:
+                time.sleep(.05)
+            if not ident or (ident, "load") in Handler.events:
+                break
         if ident and (ident, "load") not in Handler.events:
-            raise Invalid("typed local URL did not load within 15 seconds")
+            raise Invalid("typed local URL did not load during bounded setup attempts")
         time.sleep(.35)
         return ident
 
     def page(self, color="red", kind="page", new=False):
+        if self.name == "arc" and not new and not self.owns_current_tab():
+            new = True
         url, ident = self.url(color, kind)
         self.navigate(url, new)
         return ident
+
+    def owns_current_tab(self, ident=None):
+        rows = helper("ax-focused", self.pid)
+        for row in rows:
+            url = str(row.get("AXURL", ""))
+            ids = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("id", [])
+            if row.get("AXRole") == "AXWebArea" and url.startswith(bench.HOST+"/ui/") and ids:
+                return ids == [ident] if ident else ids[0].startswith(self.session+"-")
+        return False
+
+    def select_owned_tab(self, row):
+        title = row.get("AXTitle", "")
+        if not title.startswith(f"UIBENCH {self.session}-"):
+            raise Invalid("tab identity is not owned by this benchmark")
+        ident = title.split()[1]
+        try:
+            helper("press",self.pid,",".join(map(str,row["path"])))
+        except Invalid:
+            act(self.click(row))
+        time.sleep(.1)
+        if helper("front")["pid"] != self.pid or not self.owns_current_tab(ident):
+            raise Invalid("selected tab identity could not be verified; refusing to close it")
+
+    def close_tab(self):
+        if self.name == "arc" and not self.owns_current_tab():
+            self.select_owned_tab(self.locate(f"UIBENCH {self.session}-", {"AXButton", "AXTab", "AXRadioButton"}))
+        if helper("front")["pid"] != self.pid:
+            raise Invalid("browser is not foreground; refusing to close a tab")
+        act(key("w","cmd"))
 
     def nodes(self, needle, roles=None):
         found = []
@@ -452,7 +490,12 @@ class Browser:
                 tabs = [r for r in tabs if r.get("rect", [0,0,9999])[2] < 500]
                 if not tabs:
                     break
-                act(self.click(tabs[0])); time.sleep(.1); act(key("w", "cmd")); time.sleep(.15)
+                try:
+                    self.select_owned_tab(tabs[0]); self.close_tab(); time.sleep(.15)
+                except Invalid as error:
+                    self.cleanup_error = str(error)
+                    log(f"Arc cleanup stopped: {error}")
+                    break
             if self.original_bounds:
                 helper("resize", self.pid, *[self.original_bounds[k] for k in ("X","Y","Width","Height")])
         if self.proc and self.proc.poll() is None:
@@ -564,6 +607,7 @@ def scenario(browser, name, index, record):
     browser.activate()
     actions, target, duration = [], None, 2.2
     occluder = None
+    region = None
     if name in ("keyboard", "click", "close"):
         source = browser.page("red")
         destination = browser.page("blue", new=True)
@@ -600,6 +644,7 @@ def scenario(browser, name, index, record):
     elif name == "activate":
         browser.page()
         bounds = window(browser.pid)["kCGWindowBounds"]
+        region = [bounds[k] for k in ("X","Y","Width","Height")]
         occluder = subprocess.Popen([str(HELPER), "occlude", *[str(bounds[k]) for k in ("X","Y","Width","Height")]],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(.35)
@@ -617,7 +662,7 @@ def scenario(browser, name, index, record):
     start = browser.resources() if name == "scroll" else None
     t0 = time.monotonic()
     try:
-        raw = capture(browser.pid, actions, duration, record, signatures=name == "activate")
+        raw = capture(browser.pid, actions, duration, record, signatures=name == "activate",region=region)
     finally:
         if occluder:
             occluder.terminate(); occluder.wait(timeout=5)
@@ -657,7 +702,7 @@ def scenario(browser, name, index, record):
         if not focused:
             raise Invalid("Cmd+T did not expose a focused text field accepting input")
         act(key("escape"))
-        if browser.name in {"chrome","zen"}:
+        if browser.name == "chrome":
             act(key("w","cmd"))
         probes = [{"kind":"text", "text":"READY ", "at":.55+i*.05} for i in range(10)]
         ready = capture(browser.pid, [key("t","cmd"), *probes], 1.6,
@@ -667,13 +712,17 @@ def scenario(browser, name, index, record):
         metrics["input_ready_ms"] = (ready["first_text_frame"]-ready["events"][0]["t"])*1000
         metrics["readiness_probe_interval_ms"] = 50
         act(key("escape"))
-        if browser.name in {"chrome","zen"}:
+        if browser.name == "chrome":
             act(key("w","cmd"))
         raw["readiness"] = ready
     if name in ("keyboard", "click"):
         # The inactive blue tab is ours; select it and close it.
-        act(browser.click(browser.locate(destination, {"AXRadioButton", "AXTab", "AXButton"})))
-        time.sleep(.15); act(key("w", "cmd")); browser.owned_tabs -= 1
+        row = browser.locate(destination, {"AXRadioButton", "AXTab", "AXButton"})
+        if browser.name == "arc":
+            browser.select_owned_tab(row)
+        else:
+            act(browser.click(row)); time.sleep(.15)
+        browser.close_tab(); browser.owned_tabs -= 1
     if name == "close":
         browser.owned_tabs -= 1
     return {"status": "valid", **metrics, "raw": raw}
@@ -685,6 +734,10 @@ def resource_scenarios(browser, allow_arc_quit=False):
     result = {"memory": {}}
     if browser.name == "arc":
         result["context"] = "Persistent Arc profile after a fresh launch; pre-existing tabs preserved; counts are added local tabs"
+        old = [r for r in browser.nodes("UIBENCH ", {"AXButton", "AXTab", "AXRadioButton"})
+               if r.get("AXTitle", "").startswith("UIBENCH ") and not r.get("AXTitle", "").startswith(f"UIBENCH {browser.session}-")]
+        if old:
+            raise Invalid(f"Arc retains {len(old)} local benchmark tabs from earlier sessions; 1/10/30 local-tab resources cannot be validated")
     browser.page()
     count = 1
     for wanted in (1, 10, 30):
@@ -699,7 +752,7 @@ def resource_scenarios(browser, allow_arc_quit=False):
             except Invalid as error:
                 result["idle_10_tabs"] = {"status":"discarded","reason":str(error)}
     for _ in range(20):
-        act(key("w", "cmd")); time.sleep(.08)
+        browser.close_tab(); time.sleep(.08)
     video = ROOT / "build/hillclimb/bin/loop.mp4"
     if video.exists():
         ident = browser.page(kind="video", new=True)
@@ -734,10 +787,10 @@ def screenshots(browser, folder):
         if any(w["kCGWindowNumber"] == target["kCGWindowNumber"] for w in helper("windows")):
             raise Invalid("created UI window remained open after its close button was pressed")
         return True
-    def shot(name, verify=None):
+    def shot(name, verify=None, region=None):
         if verify and not verify():
             raise Invalid(f"{name} surface did not appear")
-        raw = capture(browser.pid, duration=.6, record=folder/f".{name}",native=True)
+        raw = capture(browser.pid, duration=.6, record=folder/f".{name}",native=True,region=region)
         shutil.copyfile(folder/f".{name}"/"last.png", folder/f"{name}.png")
         shutil.rmtree(folder/f".{name}")
         result[name] = str(folder/f"{name}.png")
@@ -747,14 +800,16 @@ def screenshots(browser, folder):
         browser.page(new=True)
     shot("eight-tabs")
     for name, action in [("command", key("t", "cmd")), ("find", key("f", "cmd"))]:
+        bounds = window(browser.pid)["kCGWindowBounds"]
+        region = [bounds[k] for k in ("X","Y","Width","Height")]
         act(action); time.sleep(.3)
         act(text("UIBENCH")); time.sleep(.8)
         try:
-            shot(name, lambda: any("UIBENCH" in str(r.get("AXValue", "")) and r.get("AXRole") in {"AXTextField", "AXComboBox", "AXSearchField"} for r in browser.ax()))
+            shot(name, lambda: any("UIBENCH" in str(r.get("AXValue", "")) and r.get("AXRole") in {"AXTextField", "AXComboBox", "AXSearchField"} for r in browser.ax()),region=region)
         except Invalid as e:
             result[name] = {"status": "discarded", "reason": str(e)}
         act(key("escape")); time.sleep(.3)
-        if name == "command" and browser.name in {"chrome","zen"}:
+        if name == "command" and browser.name == "chrome":
             act(key("w","cmd")); time.sleep(.2)
         if name == "find":
             if browser.name == "nook":
@@ -808,7 +863,8 @@ def screenshots(browser, folder):
         act(key("escape"))
     browser.activate()
     browser.page()
-    act(key("t", "cmd")); time.sleep(.5); shot("new-tab")
+    act(key("t", "cmd")); time.sleep(.3)
+    act(key("a", "cmd"),key("backspace")); time.sleep(.3); shot("new-tab")
     act(key("escape"))
     return result
 
@@ -832,6 +888,7 @@ def markdown(result):
               "Settle means the last changed frame followed by at least 250 ms of stability. "
               "Repeated frames between visible changes are a dropped-frame proxy, not GPU telemetry. "
               "Ready/full is captured typed-text echo for Cmd+T, or a 97% match to the final full window for activation. "
+              "Cmd+T text probes run every 50 ms, so readiness is an upper-bound estimate. "
               "n is accepted/attempted trials. Percentiles use accepted trials. "
               "Raw samples, min/max, standard deviation, validation evidence and rejection reasons are in the JSON.", ""]
     lines += ["| Browser | Cold full window ms med/p95 | RSS MB 1/10/30 tabs | Physical MB 1/10/30 tabs | Idle CPU % | Background video CPU % | Scroll CPU % med | Scroll fps med/min |",
@@ -1000,6 +1057,9 @@ def main():
             finally:
                 if browser:
                     browser.cleanup()
+                    if getattr(browser,"cleanup_error",None):
+                        data["cleanup_error"] = browser.cleanup_error
+                        blockers.append(f"{name} cleanup: {browser.cleanup_error}")
                 save()
     finally:
         server.shutdown()
