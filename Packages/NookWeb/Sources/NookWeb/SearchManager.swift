@@ -34,7 +34,11 @@ public class SearchManager {
     private var historyTask: Task<Void, Never>?
     private var autofillTask: Task<Void, Never>?
     /// Each leg belongs to one query. Rows from an older query must never remain selectable.
+    private var tabRows: [SearchSuggestion] = []
     private var historyRows: [SearchSuggestion] = []
+    @ObservationIgnored private var currentQuery: String?
+    @ObservationIgnored private var observingTabs = false
+    @ObservationIgnored private var shownTabCandidates: [TabSearchCandidate] = []
     private var webRows: [SearchSuggestion] = []
     private var textRows: [SearchSuggestion] = []
     private var searchGeneration = UUID()
@@ -48,13 +52,14 @@ public class SearchManager {
         public let itemID: UUID
         public let title: String
         public let url: URL
-        public let favicon: SwiftUI.Image
+        private let resolveFavicon: @MainActor () -> SwiftUI.Image
+        @MainActor public var favicon: SwiftUI.Image { resolveFavicon() }
 
-        public init(itemID: UUID, title: String, url: URL, favicon: SwiftUI.Image) {
+        public init(itemID: UUID, title: String, url: URL, resolveFavicon: @escaping @MainActor () -> SwiftUI.Image) {
             self.itemID = itemID
             self.title = title
             self.url = url
-            self.favicon = favicon
+            self.resolveFavicon = resolveFavicon
         }
     }
 
@@ -144,9 +149,10 @@ public class SearchManager {
             self.updateResults(coalescing: true) { $0.autofillHost = host }
         }
 
-        let tabs = Array(searchTabs(for: query).prefix(2))
+        currentQuery = query
+        refreshTabs(for: query)
         // The typed Return row and local tabs do not wait for history or the network.
-        compose(tabs: tabs, loading: includeWebSuggestions)
+        compose(loading: includeWebSuggestions)
 
         // History is a local lookup, so it runs on this keystroke rather than waiting for a pause
         // in typing. Only the network request is debounced.
@@ -158,13 +164,13 @@ public class SearchManager {
             guard !Task.isCancelled, self.searchGeneration == generation,
                   self.window?.spaceID == space else { return }
             self.historyRows = history
-            self.compose(tabs: tabs, coalescing: true)
+            self.compose(coalescing: true)
             // Page text second, so title and URL matches paint without waiting on it.
             let text = await self.searchPageText(for: query)
             guard !Task.isCancelled, self.searchGeneration == generation,
                   self.window?.spaceID == space else { return }
             self.textRows = text
-            self.compose(tabs: tabs, coalescing: true)
+            self.compose(coalescing: true)
         }
 
         // Inline editing stays local, and complete addresses never reach the provider.
@@ -176,14 +182,14 @@ public class SearchManager {
             guard !Task.isCancelled, self.searchGeneration == generation,
                   self.window?.spaceID == space else { return }
             self.webRows = webSuggestions
-            self.compose(tabs: tabs, coalescing: true, loading: false)
+            self.compose(coalescing: true, loading: false)
         }
     }
 
     /// Rebuilds the visible list from the query's local rows plus whatever each leg last returned.
-    @MainActor private func compose(tabs: [SearchSuggestion], coalescing: Bool = false, loading: Bool? = nil) {
+    @MainActor private func compose(coalescing: Bool = false, loading: Bool? = nil) {
         // A page that is already an open tab shows once, as the tab.
-        let open = Set(tabs.compactMap { row -> String? in
+        let open = Set(tabRows.compactMap { row -> String? in
             if case .tab(let match) = row.type { return Self.pageKey(match.url) }
             return nil
         })
@@ -201,7 +207,7 @@ public class SearchManager {
             return false
         }
         updateResults(coalescing: coalescing) {
-            let candidates = tabs + history + Array(text.prefix(3)) + webRows
+            let candidates = tabRows + history + Array(text.prefix(3)) + webRows
             $0.suggestions = SearchResultPolicy.retainingShownRows(
                 coalescing ? $0.suggestions : [], candidates: candidates, limit: 5
             )
@@ -233,37 +239,53 @@ public class SearchManager {
         query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
     }
 
-    @MainActor private func searchTabs(for query: String) -> [SearchSuggestion] {
+    /// One observation covers the edit session. Re-read current metadata after an observed change.
+    private func refreshTabs(for query: String, keepingShownRows: Bool = false) {
+        if observingTabs {
+            tabRows = searchTabs(for: query, keepingShownRows: keepingShownRows)
+            return
+        }
+        observingTabs = true
+        tabRows = withObservationTracking {
+            searchTabs(for: query, keepingShownRows: keepingShownRows)
+        } onChange: { [weak self] in
+            // Observation fires before the write. Read the new title, URL or tree on the next turn.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.observingTabs = false
+                guard let query = self.currentQuery else { return }
+                self.refreshTabs(for: query, keepingShownRows: true)
+                self.compose(coalescing: true)
+            }
+        }
+    }
+
+    @MainActor private func searchTabs(for query: String, keepingShownRows: Bool) -> [SearchSuggestion] {
         guard let tabs, let window, let spaceID = window.spaceID else { return [] }
         let words = Self.words(of: query)
-        // This space's tabs first, then the other spaces'. The page being looked at is not a
-        // tab to switch to.
+        // This space's tabs first, then the other spaces'. The active page and agent tabs stay out.
         let spaces = [spaceID] + tabs.spaces(visibleIn: window).map(\.id).filter { $0 != spaceID }
-        // The agent's tabs are not the person's to switch to.
         let items = spaces.filter { $0 != tabs.agentSpaceID }.flatMap { tabs.items(inSpace: $0) }
             .filter { $0.id != window.selectedItemID }
         let here = Set(tabs.items(inSpace: spaceID).map(\.id))
-        let matches: [TabMatch] = items.compactMap { item in
+        let candidates: [TabSearchCandidate] = items.compactMap { item in
             let session = tabs.session(for: item.id)
             guard let url = session?.url ?? tabs.device.openPages[item.id]?.url ?? item.url else { return nil }
             let title = item.customTitle.flatMap { $0.isEmpty ? nil : $0 } ?? session?.title ?? item.displayTitle
-            let haystack = title.lowercased() + " " + url.absoluteString.lowercased()
-            guard words.allSatisfy(haystack.contains) else { return nil }
-            let favicon = session?.favicon
-                ?? FaviconCache.key(for: url).flatMap { FaviconCache.shared.swiftUIImage(for: $0) }
-                ?? SwiftUI.Image(systemName: "globe")
-            return TabMatch(itemID: item.id, title: title, url: url, favicon: favicon)
+            return TabSearchCandidate(id: item.id, title: title, url: url, isCurrentSpace: here.contains(item.id))
         }
-        // Title matches first, then shorter titles.
-        let sorted = matches.sorted { lhs, rhs in
-            let lhsTitle = words.allSatisfy(lhs.title.lowercased().contains)
-            let rhsTitle = words.allSatisfy(rhs.title.lowercased().contains)
-            if lhsTitle != rhsTitle { return lhsTitle }
-            let lhsHere = here.contains(lhs.itemID), rhsHere = here.contains(rhs.itemID)
-            if lhsHere != rhsHere { return lhsHere }
-            return lhs.title.count < rhs.title.count
+        let ranked = TabSearchRanking.matches(in: candidates, words: words, limit: keepingShownRows ? candidates.count : 2)
+        shownTabCandidates = SearchResultPolicy.retainingShownRows(
+            keepingShownRows ? shownTabCandidates : [], candidates: ranked, limit: 2
+        )
+        return shownTabCandidates.map { item in
+            let match = TabMatch(itemID: item.id, title: item.title, url: item.url, resolveFavicon: { [weak tabs] in
+                tabs?.session(for: item.id)?.favicon
+                    ?? FaviconCache.key(for: item.url).flatMap { FaviconCache.shared.swiftUIImage(for: $0) }
+                    ?? SwiftUI.Image(systemName: "globe")
+            })
+            return SearchSuggestion(text: item.title, type: .tab(match))
         }
-        return sorted.prefix(3).map { SearchSuggestion(text: $0.title, type: .tab($0)) }
     }
 
     @MainActor private func searchHistory(for query: String) async -> [SearchSuggestion] {
@@ -273,36 +295,17 @@ public class SearchManager {
         // Enough matches that the sort below, not recency alone, picks the rows shown.
         let historyEntries = await historyManager.searchHistory(query: query, offset: 0, limit: 100)
         
-        let matchingHistory = historyEntries.entries.map {
-            SearchSuggestion(text: $0.displayTitle, type: .history($0))
+        let matchingHistory = historyEntries.entries.map { entry in
+            (entry: entry, titleMatch: words.allSatisfy(entry.title.lowercased().contains))
         }
-
-        // Sort by relevance (title matches first, then URL matches, then by visit count and recency)
-        let sortedHistory = matchingHistory.sorted { (lhs: SearchSuggestion, rhs: SearchSuggestion) -> Bool in
-            if case .history(let lhsHistory) = lhs.type, case .history(let rhsHistory) = rhs.type {
-                let lhsTitleMatch = words.allSatisfy(lhsHistory.title.lowercased().contains)
-                let rhsTitleMatch = words.allSatisfy(rhsHistory.title.lowercased().contains)
-                
-                // First prioritize title matches
-                if lhsTitleMatch && !rhsTitleMatch {
-                    return true
-                } else if !lhsTitleMatch && rhsTitleMatch {
-                    return false
-                } else {
-                    // Then prioritize by visit count and recency
-                    if lhsHistory.visitCount != rhsHistory.visitCount {
-                        return lhsHistory.visitCount > rhsHistory.visitCount
-                    } else {
-                        return lhsHistory.lastVisited > rhsHistory.lastVisited
-                    }
-                }
-            }
-            return false
+        let sortedHistory = matchingHistory.sorted { lhs, rhs in
+            if lhs.titleMatch != rhs.titleMatch { return lhs.titleMatch }
+            if lhs.entry.visitCount != rhs.entry.visitCount { return lhs.entry.visitCount > rhs.entry.visitCount }
+            return lhs.entry.lastVisited > rhs.entry.lastVisited
         }
-        
-        return sortedHistory
+        return sortedHistory.map { SearchSuggestion(text: $0.entry.displayTitle, type: .history($0.entry)) }
     }
-    
+
     private func fetchWebSuggestions(for query: String) async -> [SearchSuggestion] {
         // Every keystroke goes to the endpoint, so a private window sends none, and Google
         // only hears from people who chose Google. Unknown window or settings: send nothing.
@@ -350,6 +353,9 @@ public class SearchManager {
         searchTask?.cancel()
         historyTask?.cancel()
         autofillTask?.cancel()
+        currentQuery = nil
+        shownTabCandidates = []
+        tabRows = []
         historyRows = []
         textRows = []
         webRows = []

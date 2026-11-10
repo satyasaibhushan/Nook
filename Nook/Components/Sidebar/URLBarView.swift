@@ -340,8 +340,11 @@ struct URLBarView: View {
                 let session = browserManager.tabs.session(for: item.id)
                 guard let url = session?.url ?? item.url, url.absoluteString != prefilledAddress else { return nil }
                 let title = item.customTitle ?? session?.title ?? item.displayTitle
-                let favicon = session?.favicon ?? FaviconCache.key(for: url).flatMap { FaviconCache.shared.swiftUIImage(for: $0) } ?? Image(systemName: "globe")
-                let match = SearchManager.TabMatch(itemID: item.id, title: title, url: url, favicon: favicon)
+                let match = SearchManager.TabMatch(itemID: item.id, title: title, url: url, resolveFavicon: { [weak tabs = browserManager.tabs] in
+                    tabs?.session(for: item.id)?.favicon
+                        ?? FaviconCache.key(for: url).flatMap { FaviconCache.shared.swiftUIImage(for: $0) }
+                        ?? Image(systemName: "globe")
+                })
                 return SearchManager.SearchSuggestion(text: title, type: .tab(match))
             }
     }
