@@ -6,6 +6,7 @@
 //  Created by Jonathan Caudill on 2025-09-13.
 //
 
+import OSLog
 import SwiftUI
 import AppKit
 import NookSettings
@@ -70,6 +71,9 @@ final class HoverSidebarManager: ObservableObject {
 
     @MainActor
     func updateMonitoring(for state: BrowserWindowState) {
+        let perfID = OSSignpostID(log: BrowserPerformance.hover)
+        os_signpost(.begin, log: BrowserPerformance.hover, name: "UpdateMonitoring", signpostID: perfID)
+        defer { os_signpost(.end, log: BrowserPerformance.hover, name: "UpdateMonitoring", signpostID: perfID) }
         _ = Self.resyncObserver
         let eligible = NSApp.isActive && state.isActive
             && !state.isSidebarVisible && !state.showsFullscreenPage
@@ -99,6 +103,7 @@ final class HoverSidebarManager: ObservableObject {
     }
 
     func stop() {
+        os_signpost(.event, log: BrowserPerformance.hover, name: "HoverMonitoringStop")
         isActive = false
         if Self.monitorOwner === self { Self.monitorOwner = nil }
         if let token = localMonitor { NSEvent.removeMonitor(token); localMonitor = nil }
@@ -107,6 +112,7 @@ final class HoverSidebarManager: ObservableObject {
             await HoverResync.waitForMenuTracking()
             // An unchanged write still redraws every view observing the manager.
             guard let self, !self.isActive, self.isOverlayVisible else { return }
+            os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", 0)
             self.isOverlayVisible = false
         }
     }
@@ -126,6 +132,9 @@ final class HoverSidebarManager: ObservableObject {
 
     @MainActor
     private func handleMouseMovementOnMain() {
+        let perfID = OSSignpostID(log: BrowserPerformance.hover)
+        os_signpost(.begin, log: BrowserPerformance.hover, name: "HoverMouseCheck", signpostID: perfID)
+        defer { os_signpost(.end, log: BrowserPerformance.hover, name: "HoverMouseCheck", signpostID: perfID) }
         guard isActive, !HoverResync.isMenuTracking, browserManager != nil,
               let registry = windowRegistry,
               let activeState = registry.activeWindow else { return }
@@ -133,6 +142,7 @@ final class HoverSidebarManager: ObservableObject {
         // Never show overlay while the real sidebar is visible, or over a fullscreen page
         if activeState.isSidebarVisible || activeState.showsFullscreenPage {
             if isOverlayVisible {
+                os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", 0)
                 isOverlayVisible = false
             }
             return
@@ -140,6 +150,7 @@ final class HoverSidebarManager: ObservableObject {
 
         guard let window = NSApp.keyWindow else {
             if isOverlayVisible {
+                os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", 0)
                 isOverlayVisible = false
             }
             return
@@ -157,6 +168,7 @@ final class HoverSidebarManager: ObservableObject {
         let verticalOK = mouse.y >= frame.minY - verticalSlack && mouse.y <= frame.maxY + verticalSlack
         if !verticalOK {
             if isOverlayVisible {
+                os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", 0)
                 isOverlayVisible = false
             }
             return
@@ -190,6 +202,7 @@ final class HoverSidebarManager: ObservableObject {
         let shouldShow = inTriggerZone || (isOverlayVisible && (inKeepOpenZone || inSidebarContentZone))
         if shouldShow != isOverlayVisible {
             withAnimation(.easeInOut(duration: 0.15)) {
+                os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite", "%{public}d", shouldShow ? 1 : 0)
                 isOverlayVisible = shouldShow
             }
         }

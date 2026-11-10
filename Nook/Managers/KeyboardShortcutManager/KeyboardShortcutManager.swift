@@ -6,6 +6,7 @@
 //  Created by Jonathan Caudill on 09/30/2025.
 //
 
+import OSLog
 import Foundation
 import AppKit
 import SwiftUI
@@ -276,6 +277,10 @@ class KeyboardShortcutManager {
         }
         
 
+        if shortcut.action == .toggleSidebar {
+            os_signpost(.event, log: BrowserPerformance.sidebar, name: "ShortcutReceived", "event_seconds=%{public}.9f", event.timestamp)
+        }
+
         // MARK: - Website Shortcut Conflict Resolution
         // Check if this shortcut conflicts with a website shortcut
         // Peek covers the tab the detector would look at, so its keys never yield to the site below.
@@ -525,8 +530,14 @@ class KeyboardShortcutManager {
     private func executeAction(_ action: ShortcutAction) {
         guard let browserManager = browserManager else { return }
 
+        if action == .toggleSidebar {
+            os_signpost(.event, log: BrowserPerformance.sidebar, name: "ActionQueued")
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            if action == .toggleSidebar {
+                os_signpost(.event, log: BrowserPerformance.sidebar, name: "ActionRun")
+            }
             let tabs = browserManager.tabs
             let window = self.windowRegistry?.activeWindow
 

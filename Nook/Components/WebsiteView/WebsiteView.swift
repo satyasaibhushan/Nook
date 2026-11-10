@@ -6,6 +6,7 @@
 //  Created by Maciek Bagiński on 28/07/2025.
 //
 
+import OSLog
 import SwiftUI
 import WebKit
 import AppKit
@@ -617,7 +618,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
             // a compositor rebuild that could interrupt video playback.
             let newSize = cv.bounds.size
             guard coord?.lastSize != newSize else { return }
-            updateCompositor(cv)
+            updateCompositor(cv, reason: 0)
             coord?.lastSize = newSize
         }
 
@@ -647,7 +648,14 @@ struct TabCompositorWrapper: NSViewRepresentable {
 
         if needsRebuild {
             let previousCurrentId = context.coordinator.lastCurrentId
-            updateCompositor(nsView)
+            let sizeOnly = os_signpost_enabled(BrowserPerformance.compositor) &&
+                context.coordinator.lastIsSplit == isSplit &&
+                context.coordinator.lastLeftId == leftId && context.coordinator.lastRightId == rightId &&
+                context.coordinator.lastCurrentId == currentId &&
+                abs(CGFloat(context.coordinator.lastFraction) - CGFloat(splitFraction)) <= 0.0001 &&
+                context.coordinator.lastVersion == compositorVersion &&
+                context.coordinator.lastFullscreenInWindow == fullscreenInWindow
+            updateCompositor(nsView, reason: sizeOnly ? 1 : 2)
             context.coordinator.lastIsSplit = isSplit
             context.coordinator.lastLeftId = leftId
             context.coordinator.lastRightId = rightId
@@ -681,7 +689,10 @@ struct TabCompositorWrapper: NSViewRepresentable {
         // Mark the selected page as accessed (resets its unload timer)
         if let session = browserManager.tabs.selectedSession(in: windowState) {
             browserManager.compositorManager.markTabAccessed(session.itemID)
+            let hoverID = OSSignpostID(log: BrowserPerformance.compositor)
+            os_signpost(.begin, log: BrowserPerformance.compositor, name: "HoverCallbacksReattach", signpostID: hoverID)
             setupHoverCallbacks(for: session)
+            os_signpost(.end, log: BrowserPerformance.compositor, name: "HoverCallbacksReattach", signpostID: hoverID)
         }
     }
 
@@ -689,7 +700,11 @@ struct TabCompositorWrapper: NSViewRepresentable {
         coordinator.browserManager?.webViewCoordinator?.removeCompositorContainerView(for: coordinator.windowState.id)
     }
 
-    private func updateCompositor(_ containerView: NSView) {
+    // Reason: 0 is the size observer, 1 is a size-only SwiftUI update, 2 is other input.
+    private func updateCompositor(_ containerView: NSView, reason: Int) {
+        let perfID = OSSignpostID(log: BrowserPerformance.compositor)
+        os_signpost(.begin, log: BrowserPerformance.compositor, name: "UpdateCompositor", signpostID: perfID, "reason=%{public}d width=%{public}.2f height=%{public}.2f", reason, containerView.bounds.width, containerView.bounds.height)
+        defer { os_signpost(.end, log: BrowserPerformance.compositor, name: "UpdateCompositor", signpostID: perfID) }
         // Non-destructive compositor: avoid removing/re-adding WKWebViews that are
         // already correctly positioned. Removing a WKWebView from its superview
         // disconnects its GPU video surface, causing black flashes during playback.
@@ -830,6 +845,9 @@ struct TabCompositorWrapper: NSViewRepresentable {
             }
         }
 
+        os_signpost(.event, log: BrowserPerformance.compositor, name: "WebViewFrameAssignment",
+                    "web=%{public}d equal=%{public}d width=%{public}.2f height=%{public}.2f", desired is WKWebView ? 1 : 0,
+                    desired.frame == containerView.bounds ? 1 : 0, containerView.bounds.width, containerView.bounds.height)
         desired.frame = containerView.bounds
         desired.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
         desired.isHidden = false

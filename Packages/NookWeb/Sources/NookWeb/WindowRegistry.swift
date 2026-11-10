@@ -6,6 +6,7 @@
 //  Tracks window states for cross-window coordination and command routing
 //
 
+import OSLog
 import Foundation
 import SwiftUI
 import Observation
@@ -93,6 +94,9 @@ public class WindowRegistry {
 
     /// Set the active (focused) window
     public func setActive(_ window: BrowserWindowState) {
+        let perfID = OSSignpostID(log: BrowserPerformance.activation)
+        os_signpost(.begin, log: BrowserPerformance.activation, name: "WindowRegistrySetActive", signpostID: perfID)
+        defer { os_signpost(.end, log: BrowserPerformance.activation, name: "WindowRegistrySetActive", signpostID: perfID) }
         activationOrder.removeAll { $0 == window.id }
         activationOrder.append(window.id)
         activeWindowId = window.id
