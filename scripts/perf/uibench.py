@@ -723,7 +723,9 @@ def scenario(browser, name, index, record):
             occluder.terminate(); occluder.wait(timeout=5)
     if name in ("sidebar_hide", "sidebar_show"):
         sidebar_after = browser.ax()
-        act(actions[0]); time.sleep(.3)
+        # Leave the fixture visible for subsequent activation and scroll scenarios.
+        if name == "sidebar_hide":
+            act(actions[0]); time.sleep(.3)
         def viewport(rows):
             return [r["rect"] for r in rows if r.get("AXRole") == "AXWebArea" and browser.session in str(r.get("AXURL","")) and "rect" in r]
         def labels(rows):
