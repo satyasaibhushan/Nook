@@ -261,6 +261,8 @@ struct CommandPaletteView: View {
         .onChange(of: searchManager.suggestions) { _, _ in
             if let selectedSuggestionID, !visibleSuggestions.contains(where: { $0.id == selectedSuggestionID }) {
                 self.selectedSuggestionID = nil
+                isNavigatingSuggestion = true
+                text = userTypedText
             }
             if let hoveredSuggestionID, !visibleSuggestions.contains(where: { $0.id == hoveredSuggestionID }) {
                 self.hoveredSuggestionID = nil
