@@ -80,13 +80,25 @@ public final class HistoryManager {
         return await storeTask.value.search(query: query, profile: profile, offset: offset, limit: limit)
     }
 
-    /// Bare host for omnibox inline autofill, e.g. `facebo` -> `facebook.com`. Nil when nothing qualifies.
-    /// Skips the pending-write await the other reads take: a keystroke-rate query wants speed, and a
-    /// host that is one visit stale autofills the same either way.
-    public func autofillHost(prefix: String, minVisits: Int = 2) async -> String? {
+    /// The host index as of the last `prepareAutofill`, held here so a completion is known within
+    /// the keystroke that asks for it rather than arriving after the Return row has been shown.
+    @ObservationIgnored private var autofillHosts: (profile: UUID?, hosts: [String: HostStat])?
+
+    /// Call when an address field opens. Skips the pending-write await the other reads take: a
+    /// host that is one visit stale completes the same either way.
+    public func prepareAutofill() {
         let profile = currentProfileId
-        guard !Task.isCancelled else { return nil }
-        return await storeTask.value.autofillHost(prefix: prefix, profile: profile, minVisits: minVisits)
+        Task { [weak self, storeTask] in
+            let hosts = await storeTask.value.autofillHosts(profile: profile)
+            self?.autofillHosts = (profile, hosts)
+        }
+    }
+
+    /// Bare host for omnibox inline autofill, e.g. `facebo` -> `facebook.com`. Nil when nothing
+    /// qualifies, or before the index for this profile has been prepared.
+    public func autofillHost(prefix: String, minVisits: Int = 2) -> String? {
+        guard let index = autofillHosts, index.profile == currentProfileId else { return nil }
+        return AutofillRanking.bestHost(in: index.hosts, prefix: prefix, minVisits: minVisits)
     }
 
     public func clearHistory(olderThan days: Int = 0, profileId: UUID? = nil) {
@@ -255,13 +267,9 @@ actor HistoryStore {
         return (Array(matches.dropFirst(start).prefix(pageSize)), false)
     }
 
-    /// Highest-ranked host whose name, minus `www.`, starts with `prefix`. Ranked by total visits
-    /// across the whole host, then recency, so a popular origin beats a deep page visited once.
-    /// Reads the cached index, so a keystroke costs a prefix scan over hosts rather than a fetch.
-    func autofillHost(prefix: String, profile: UUID?, minVisits: Int) -> String? {
-        guard AutofillRanking.isUsable(prefix: prefix) else { return nil }
-        return AutofillRanking.bestHost(in: autofillIndex(for: profile), prefix: prefix, minVisits: minVisits)
-    }
+    /// Hosts ranked by total visits across the whole host, so a popular origin beats a deep page
+    /// visited once. Handed to the main actor whole: a keystroke then costs a prefix scan there.
+    func autofillHosts(profile: UUID?) -> [String: HostStat] { autofillIndex(for: profile) }
 
     /// Host index for `profile`, built on first use. `addVisits` folds new visits in rather than
     /// dropping it, and the age check bounds how long a delete made elsewhere can leave it wrong.

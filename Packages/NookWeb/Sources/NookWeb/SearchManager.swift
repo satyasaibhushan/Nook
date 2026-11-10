@@ -24,6 +24,7 @@ public class SearchManager {
     public var suggestions: [SearchSuggestion] { results.suggestions }
     public var isLoading: Bool { results.isLoading }
     public var autofillHost: String? { results.autofillHost }
+    @ObservationIgnored private var typedCompletion: String?
     @ObservationIgnored private var pendingResults: Results?
     @ObservationIgnored private var publication: DispatchWorkItem?
 
@@ -32,7 +33,6 @@ public class SearchManager {
     private let session = URLSession.shared
     private var searchTask: Task<Void, Never>?
     private var historyTask: Task<Void, Never>?
-    private var autofillTask: Task<Void, Never>?
     /// Each leg belongs to one query. Rows from an older query must never remain selectable.
     private var tabRows: [SearchSuggestion] = []
     private var historyRows: [SearchSuggestion] = []
@@ -117,6 +117,7 @@ public class SearchManager {
     
     public func setHistoryManager(_ historyManager: HistoryManager?) {
         self.historyManager = historyManager
+        historyManager?.prepareAutofill()
     }
 
     @MainActor public func updateSpaceContext() {
@@ -139,15 +140,8 @@ public class SearchManager {
             return
         }
 
-        // Runs outside searchTask's debounce: the inline completion has to keep pace with typing.
-        autofillTask?.cancel()
-        autofillTask = Task { [weak self] in
-            guard let self, let historyManager = self.historyManager else { return }
-            let host = await historyManager.autofillHost(prefix: query.trimmingCharacters(in: .whitespacesAndNewlines))
-            guard !Task.isCancelled, self.searchGeneration == generation,
-                  self.window?.spaceID == space else { return }
-            self.updateResults(coalescing: true) { $0.autofillHost = host }
-        }
+        // Known within this keystroke, so the Return row never changes under a finger already moving.
+        typedCompletion = historyManager?.autofillHost(prefix: query.trimmingCharacters(in: .whitespacesAndNewlines))
 
         currentQuery = query
         refreshTabs(for: query)
@@ -212,7 +206,7 @@ public class SearchManager {
                 coalescing ? $0.suggestions : [], candidates: candidates, limit: 5
             )
             if let loading { $0.isLoading = loading }
-            if !coalescing { $0.autofillHost = nil }
+            $0.autofillHost = typedCompletion
         }
     }
 
@@ -352,7 +346,7 @@ public class SearchManager {
     public func clearSuggestions() {
         searchTask?.cancel()
         historyTask?.cancel()
-        autofillTask?.cancel()
+        typedCompletion = nil
         currentQuery = nil
         shownTabCandidates = []
         tabRows = []
