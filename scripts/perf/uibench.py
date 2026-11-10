@@ -612,6 +612,7 @@ def scenario(browser, name, index, record):
     actions, target, duration = [], None, 2.2
     occluder = None
     region = None
+    pointer = None
     if name in ("keyboard", "click", "close"):
         source = browser.page("red")
         destination = browser.page("blue", new=True)
@@ -670,7 +671,8 @@ def scenario(browser, name, index, record):
             if pages: return bounds["Width"]-pages[0][2] > 100
             raise Invalid("cannot establish sidebar direction from menu state or viewport")
         bounds = window(browser.pid)["kCGWindowBounds"]
-        act({"kind":"move","x":bounds["X"]+bounds["Width"]*.85,"y":bounds["Y"]+bounds["Height"]*.75})
+        pointer = {"kind":"move","x":bounds["X"]+bounds["Width"]*.85,"y":bounds["Y"]+bounds["Height"]*.75}
+        act(pointer)
         time.sleep(.3)
         want_visible = name == "sidebar_hide"
         if sidebar_visible(sidebar_before) != want_visible:
@@ -681,7 +683,6 @@ def scenario(browser, name, index, record):
     bounds = window(browser.pid)["kCGWindowBounds"] if name != "activate" else bounds
     window_rect = [bounds[k] for k in ("X","Y","Width","Height")]
     attribution = None
-    pointer = None
     if name == "activate":
         # The lower-right blank page contains no fixture links or browser controls.
         pointer = {"kind":"move","x":bounds["X"]+bounds["Width"]*.85,"y":bounds["Y"]+bounds["Height"]*.75}
@@ -737,7 +738,7 @@ def scenario(browser, name, index, record):
         raw["sidebar_validation"] = {"before":before,"after":after,"menu_before":sorted(labels(sidebar_before)),"menu_after":sorted(labels(sidebar_after))}
     raw["window_frame"] = bounds
     raw["pointer_park"] = pointer
-    if name == "activate":
+    if name in ("activate", "sidebar_show", "sidebar_hide"):
         observed = raw["events"][0].get("pointer_before")
         raw["pointer_park_verified"] = bool(observed and abs(observed[0]-pointer["x"]) < 2 and abs(observed[1]-pointer["y"]) < 2)
         if not raw["pointer_park_verified"]:

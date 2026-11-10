@@ -478,7 +478,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 let delay = max(0, due - now())
                 try await Task.sleep(nanoseconds: UInt64(delay * 1e9))
                 var event: [String: Any] = ["action": action]
-                if action["kind"] as? String == "activate", let pointer = CGEvent(source: nil)?.location {
+                if ["activate", "key"].contains(action["kind"] as? String ?? ""), let pointer = CGEvent(source: nil)?.location {
                     event["pointer_before"] = [pointer.x,pointer.y]
                 }
                 event["t"] = perform(action)
