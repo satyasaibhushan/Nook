@@ -122,6 +122,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     var regionRects: [(String, CGRect)] = []
     var windowID: CGWindowID?
     var attribute = false
+    var regionByPixel: [UInt8] = []
     var strips: [CGImage] = []
     var lastStrip = -Double.infinity
     var streamError: String?
@@ -176,25 +177,26 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             }
             var current = [UInt8](repeating: 0, count: width * height * 3)
             var counts = [Int](repeating: 0, count: regions.count + 1)
-            var boxes = [CGRect?](repeating: nil, count: counts.count)
+            var minX = [Int](repeating: width, count: counts.count), minY = [Int](repeating: height, count: counts.count)
+            var maxX = [Int](repeating: -1, count: counts.count), maxY = [Int](repeating: -1, count: counts.count)
             var windowChanged = 0
             for y in 0..<height { for x in 0..<width {
                 let src = y * stride + x * 4, dst = (y * width + x) * 3
                 current[dst] = ptr[src + 2]; current[dst+1] = ptr[src+1]; current[dst+2] = ptr[src]
                 guard let previous = lastFull,
                       abs(Int(current[dst])-Int(previous[dst])) + abs(Int(current[dst+1])-Int(previous[dst+1])) + abs(Int(current[dst+2])-Int(previous[dst+2])) > 30 else { continue }
-                let point = CGPoint(x: Double(x), y: Double(y))
-                let region = regions.firstIndex(where: { $0.1.contains(point) }) ?? regions.count
+                let region = Int(regionByPixel[y*width+x])
                 counts[region] += 1
-                let pixel = CGRect(x: x, y: y, width: 1, height: 1)
-                boxes[region] = boxes[region].map { $0.union(pixel) } ?? pixel
+                minX[region] = min(minX[region],x); minY[region] = min(minY[region],y)
+                maxX[region] = max(maxX[region],x); maxY[region] = max(maxY[region],y)
                 let screenPoint = CGPoint(x: captureRect.minX + Double(x)/scaleX, y: captureRect.minY + Double(y)/scaleY)
                 if windowRect.contains(screenPoint) { windowChanged += 1 }
             }}
             let windowPixels = windowRect.width * scaleX * windowRect.height * scaleY
             frame["window_changed_fraction"] = Double(windowChanged) / windowPixels
             frame["regions"] = counts.indices.compactMap { i -> [String: Any]? in
-                guard let box = boxes[i] else { return nil }
+                guard counts[i] > 0 else { return nil }
+                let box = CGRect(x:minX[i],y:minY[i],width:maxX[i]-minX[i]+1,height:maxY[i]-minY[i]+1)
                 return ["region": i < regions.count ? regions[i].0 : "outside", "pixels": counts[i],
                         "window_pixel_fraction": Double(counts[i])/windowPixels,
                         "rect": [captureRect.minX + box.minX/scaleX, captureRect.minY + box.minY/scaleY, box.width/scaleX, box.height/scaleY]]
@@ -451,6 +453,16 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             capture.regionRects = (spec["regions"] as? [[String: Any]] ?? []).compactMap { item in
                 guard let name = item["name"] as? String, let r = item["rect"] as? [Double], r.count == 4 else { return nil }
                 return (name, CGRect(x:r[0],y:r[1],width:r[2],height:r[3]))
+            }
+            if capture.attribute {
+                let width = Int(capture.crop.width), height = Int(capture.crop.height)
+                capture.regionByPixel = [UInt8](repeating: UInt8(capture.regionRects.count), count: width*height)
+                for y in 0..<height { for x in 0..<width {
+                    let point = CGPoint(x:rect.minX+Double(x)/scale,y:rect.minY+Double(y)/scale)
+                    if let index = capture.regionRects.firstIndex(where: { $0.1.contains(point) }) {
+                        capture.regionByPixel[y*width+x] = UInt8(index)
+                    }
+                }}
             }
             let stream = SCStream(filter: filter, configuration: config, delegate: capture)
             try stream.addStreamOutput(capture, type: .screen, sampleHandlerQueue: capture.queue)
