@@ -154,7 +154,7 @@ extension ExtensionManager {
     /// like autofill detection and badge count updates.
     func wakeBackgroundWorkers() {
         let perfID = OSSignpostID(log: BrowserPerformance.extensions)
-        os_signpost(.begin, log: BrowserPerformance.extensions, name: "WakeBackgroundWorkers", signpostID: perfID)
+        os_signpost(.begin, log: BrowserPerformance.extensions, name: "WakeBackgroundWorkers", signpostID: perfID, "contexts=%{public}d", extensionContexts.count)
         defer { os_signpost(.end, log: BrowserPerformance.extensions, name: "WakeBackgroundWorkers", signpostID: perfID) }
         for ctx in extensionContexts.values where ctx.isLoaded {
             guard ctx.webExtension.hasBackgroundContent else { continue }
