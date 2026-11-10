@@ -76,6 +76,7 @@ public final class TabsController {
     /// Collects the changes of one multi-item intent into a single undo step (`grouped`).
     @ObservationIgnored private var undoGroup: Change?
     @ObservationIgnored private var isTerminating = false
+    @ObservationIgnored private var housekeepingPending = false
 
     private struct HeldReport { var url: URL?; var title: String? }
     private static let reportInterval: Duration = .seconds(1)
@@ -173,10 +174,23 @@ public final class TabsController {
         }
         NotificationCenter.default.addObserver(forName: appDidBecomeActive, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.refreshLiveFolders()
-                self?.archiveIdleTabs()
+                self?.scheduleHousekeeping()
             }
         }
+    }
+
+    private func scheduleHousekeeping() {
+        guard !housekeepingPending else { return }
+        housekeepingPending = true
+        // Do not restart the deadline on another activation or window attach.
+        AfterFrame.run(noLaterThan: 0.1) { [weak self] in self?.finishHousekeeping() }
+    }
+
+    private func finishHousekeeping() {
+        guard housekeepingPending else { return }
+        housekeepingPending = false
+        refreshLiveFolders()
+        archiveIdleTabs()
     }
 
     /// One space per profile left over from before spaces owned their data (same UUID, so each
@@ -205,6 +219,7 @@ public final class TabsController {
     /// Writes now, with every regular window's current frame. Called at quit; windows closing
     /// afterwards keep their records so they all reopen.
     public func flushSync() {
+        finishHousekeeping()
         applyHeldReports()
         isTerminating = true
         for window in regularWindows { mirror(window) }
@@ -792,13 +807,12 @@ public final class TabsController {
         if window.spaceID == nil {
             window.spaceID = tree.orderedSpaces.first?.id
         }
-        refreshLiveFolders()
         if let spaceID = window.spaceID, window.selectedItemBySpace[spaceID] == nil,
            let first = displayOrder(in: window).first {
             window.selectedItemBySpace[spaceID] = first
         }
         mirror(window)
-        archiveIdleTabs()
+        scheduleHousekeeping()
     }
 
     /// A window closed. Private windows end their pages; a regular window's record is dropped
