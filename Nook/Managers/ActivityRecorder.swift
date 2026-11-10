@@ -165,8 +165,12 @@ final class ActivityRecorder {
                 guard !session.isUnloaded, let spaceID = tabs.spaceID(of: session.itemID),
                       let space = spaces[spaceID], tabs.item(session.itemID)?.isFolder == false else { continue }
                 let foreground = NSApp.isActive && keyWindow?.selectedItemID == session.itemID ? keyWindow?.id : nil
+                let playing = session.activityMediaPlaying
+                // Accounting only counts pages in front or playing. Reading another page's URL and
+                // title here would re-run this for every change a background page makes to them.
+                guard foreground != nil || playing else { continue }
                 pages.append(ActivityPage(id: session.itemID, url: session.url, title: session.title,
-                    space: space, foregroundWindow: foreground, playingMedia: session.activityMediaPlaying))
+                    space: space, foregroundWindow: foreground, playingMedia: playing))
             }
         }
         let closed = accounting.update(at: now, pages: pages, lastInput: lastInput, mode: modeProvider())
