@@ -6,9 +6,13 @@
 
 import Foundation
 
-/// A parsed nook:// link: open, search, space, or one of the commands on a sidebar item by id
-/// (close, pin, unpin, reload, move, select). Anything else is rejected.
+/// A parsed nook:// launcher command. Unknown commands and malformed parameters are rejected.
 public struct NookURLCommand: Equatable, Sendable {
+    public enum MoveTarget: Equatable, Sendable {
+        case folder(UUID)
+        case space(UUID)
+    }
+
     public enum Action: Equatable, Sendable {
         case open(URL, reuse: Bool)
         case search(String)
@@ -17,13 +21,19 @@ public struct NookURLCommand: Equatable, Sendable {
         case pin(UUID)
         case unpin(UUID)
         case reload(UUID)
-        case move(UUID, folder: UUID)
+        case move(UUID, to: MoveTarget)
+        case reopen(UUID)
+        case folder(name: String, space: UUID, parent: UUID?)
+        case rename(UUID, title: String)
+        case favorite(UUID)
+        case unfavorite(UUID)
         case select(UUID)
     }
 
     public var action: Action
     /// A space name or UUID as typed; resolve it with `match`.
     public var space: String?
+    public var background: Bool = false
     /// Parameters that were present and not used.
     public var ignored: [String]
 
@@ -46,7 +56,12 @@ public struct NookURLCommand: Equatable, Sendable {
         if params["space"] != nil, !hasSpace(params["space"]) { return nil }
         let action: Action
         var space: String?
+        var background = false
         let host = parts.host?.lowercased()
+        if host == "open" || host == "search", params["background"] != nil {
+            guard let flag = take("background"), flag == "0" || flag == "1" else { return nil }
+            background = flag == "1"
+        }
         switch host {
         case "open":
             guard let raw = take("url"), let url = webURL(raw) else { return nil }
@@ -60,7 +75,15 @@ public struct NookURLCommand: Equatable, Sendable {
             guard let name = take("name") else { return nil }
             action = .switchSpace
             space = name
-        case "close", "pin", "unpin", "reload", "move", "select":
+        case "folder":
+            guard let name = take("name"), let spaceID = take("space").flatMap(UUID.init(uuidString:)) else { return nil }
+            var parent: UUID?
+            if params["parent"] != nil {
+                guard let id = take("parent").flatMap(UUID.init(uuidString:)) else { return nil }
+                parent = id
+            }
+            action = .folder(name: name, space: spaceID, parent: parent)
+        case "close", "pin", "unpin", "reload", "move", "select", "reopen", "rename", "favorite", "unfavorite":
             guard let id = take("id").flatMap(UUID.init(uuidString:)) else { return nil }
             switch host {
             case "close": action = .close(id)
@@ -68,14 +91,26 @@ public struct NookURLCommand: Equatable, Sendable {
             case "unpin": action = .unpin(id)
             case "reload": action = .reload(id)
             case "select": action = .select(id)
+            case "reopen": action = .reopen(id)
+            case "favorite": action = .favorite(id)
+            case "unfavorite": action = .unfavorite(id)
+            case "rename":
+                guard let title = params.removeValue(forKey: "title"), title.count <= maxLength else { return nil }
+                action = .rename(id, title: title)
             default:
-                guard let folder = take("folder").flatMap(UUID.init(uuidString:)) else { return nil }
-                action = .move(id, folder: folder)
+                guard (params["folder"] != nil) != (params["space"] != nil) else { return nil }
+                if params["folder"] != nil {
+                    guard let folder = take("folder").flatMap(UUID.init(uuidString:)) else { return nil }
+                    action = .move(id, to: .folder(folder))
+                } else {
+                    guard let spaceID = take("space").flatMap(UUID.init(uuidString:)) else { return nil }
+                    action = .move(id, to: .space(spaceID))
+                }
             }
         default:
             return nil
         }
-        return NookURLCommand(action: action, space: space, ignored: params.keys.sorted())
+        return NookURLCommand(action: action, space: space, background: background, ignored: params.keys.sorted())
     }
 
     private static func hasSpace(_ v: String?) -> Bool {

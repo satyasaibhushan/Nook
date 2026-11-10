@@ -40,6 +40,17 @@ extension TabsController {
         return id
     }
 
+    /// Creates an unloaded tab without requiring a window or changing any window's selection.
+    @discardableResult
+    public func openInBackground(url: URL, spaceID: UUID) -> UUID? {
+        guard let space = tree.space(spaceID), !space.isAgent else { return nil }
+        let id = UUID()
+        guard perform(.main, "open", {
+            try $0.createTab(id: id, url: url, title: url.host ?? url.absoluteString, in: .tabs(spaceID: spaceID), after: nil)
+        }) != nil else { return nil }
+        return id
+    }
+
     /// Feeds the "Opened in background" toast when the sidebar is hidden; gone after 2 s.
     private func noteBackgroundOpen(_ id: UUID, opener: UUID, in window: BrowserWindowState) {
         guard !window.isSidebarVisible, !isInAgentSpace(opener), !isInAgentSpace(id) else { return }
@@ -433,36 +444,67 @@ extension TabsController {
     /// in-memory history.
     public func reopenLastClosed(in window: BrowserWindowState) {
         let owner = owner(of: window)
-        let isPrivate = window.privateTree != nil
-        guard let entry = isPrivate ? window.privateClosed.last : device.closed.last,
-              let fallbackSpace = window.spaceID ?? tree(owner).orderedSpaces.first?.id else { return }
+        let count = window.privateTree != nil ? window.privateClosed.count : device.closed.count
+        guard count > 0, let fallbackSpace = window.spaceID ?? tree(owner).orderedSpaces.first?.id else { return }
+        reopenClosed(at: count - 1, owner: owner, fallbackSpace: fallbackSpace, selectingIn: window)
+    }
+
+    /// Restores the newest regular closed entry containing `itemID`, leaving selection alone.
+    @discardableResult
+    public func reopenClosed(_ itemID: UUID) -> Bool {
+        guard let index = device.closed.lastIndex(where: { $0.items.contains { $0.id == itemID } }),
+              let originalSpace = device.closed[index].section.spaceID, originalSpace != agentSpaceID,
+              device.closed[index].items.allSatisfy({ item in
+                  !isInAgentSpace(item.id) && !privateWindows.contains { $0.privateTree?.item(item.id) != nil }
+              }) else { return false }
+        let recentSpace = windowRegistry.mostRecentRegularWindow?.spaceID.flatMap { id in
+            tree.space(id).flatMap { $0.isAgent ? nil : id }
+        }
+        guard let fallbackSpace = recentSpace ?? tree.orderedSpaces.first(where: { !$0.isAgent })?.id else { return false }
+        return reopenClosed(at: index, owner: .main, fallbackSpace: fallbackSpace, selectingIn: nil)
+    }
+
+    @discardableResult
+    private func reopenClosed(at index: Int, owner: Owner, fallbackSpace: UUID, selectingIn window: BrowserWindowState?) -> Bool {
+        let privateWindow: BrowserWindowState?
+        switch owner {
+        case .main: privateWindow = nil
+        case .privateWindow(let state): privateWindow = state
+        }
+        var entry = privateWindow?.privateClosed[index] ?? device.closed[index]
+        // A launcher restores to the original section even if the old parent folder moved away.
+        if window == nil, let root = entry.items.first, case .folder(let folderID) = root.parent,
+           tree(owner).section(of: folderID) != entry.section {
+            entry.items[0].parent = entry.section
+        }
+        func consumeEntry() {
+            if let privateWindow {
+                privateWindow.privateClosed.remove(at: index)
+            } else {
+                device.closed.remove(at: index)
+                save()
+            }
+        }
         // A pinned tab or favorite whose page was closed: reopen that page on the same item.
         if let page = entry.endedPage, let root = entry.items.first, tree(owner).item(root.id) != nil {
-            if isPrivate {
-                window.privateClosed.removeLast()
-            } else {
-                dropLastClosed()
-                setOpenPage(root.id, page)
-            }
-            select(root.id, in: window)
+            consumeEntry()
+            if privateWindow == nil { setOpenPage(root.id, page) }
+            if let window { select(root.id, in: window) }
             save()
-            return
+            return true
         }
-        guard perform(owner, "reopen", { try $0.reopen(entry, fallback: .tabs(spaceID: fallbackSpace)) }) != nil else { return }
-        if isPrivate {
-            window.privateClosed.removeLast()
-        } else {
-            dropLastClosed()
-        }
+        guard perform(owner, "reopen", { try $0.reopen(entry, fallback: .tabs(spaceID: fallbackSpace)) }) != nil else { return false }
+        consumeEntry()
         let restored = entry.items.map(\.id)
         // Older entries for the same items (a page close, then a delete) must not restore them twice.
-        if !isPrivate { dropClosed(containing: Set(restored)); dropArchived(containing: Set(restored)) }
+        if privateWindow == nil { dropClosed(containing: Set(restored)); dropArchived(containing: Set(restored)) }
         for host in entry.items where host.isFolder || entry.items.contains(where: { $0.parent == .folder(itemID: host.id) }) {
             openFolder(host.id)
         }
-        if let firstTab = restored.first(where: { tree(owner).item($0)?.isFolder == false }) {
+        if let window, let firstTab = restored.first(where: { tree(owner).item($0)?.isFolder == false }) {
             select(firstTab, in: window)
         }
+        return true
     }
 
     static let recentLimit = 30
