@@ -105,7 +105,8 @@ final class HoverSidebarManager: ObservableObject {
         if let token = globalMonitor { NSEvent.removeMonitor(token); globalMonitor = nil }
         Task { @MainActor [weak self] in
             await HoverResync.waitForMenuTracking()
-            guard let self, !self.isActive else { return }
+            // An unchanged write still redraws every view observing the manager.
+            guard let self, !self.isActive, self.isOverlayVisible else { return }
             self.isOverlayVisible = false
         }
     }
