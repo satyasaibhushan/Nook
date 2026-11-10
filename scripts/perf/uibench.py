@@ -783,7 +783,9 @@ def screenshots(browser, folder):
         target = created[0]
         bounds = target["kCGWindowBounds"]
         helper("close-window",browser.pid,*[bounds[k] for k in ("X","Y","Width","Height")])
-        time.sleep(.3)
+        deadline = time.monotonic()+2
+        while any(w["kCGWindowNumber"] == target["kCGWindowNumber"] for w in helper("windows")) and time.monotonic() < deadline:
+            time.sleep(.1)
         if any(w["kCGWindowNumber"] == target["kCGWindowNumber"] for w in helper("windows")):
             raise Invalid("created UI window remained open after its close button was pressed")
         return True
@@ -1060,6 +1062,8 @@ def main():
                     if getattr(browser,"cleanup_error",None):
                         data["cleanup_error"] = browser.cleanup_error
                         blockers.append(f"{name} cleanup: {browser.cleanup_error}")
+                if name == "arc" and args.allow_arc_quit:
+                    data["left_running_pid"] = leave_arc_running(paths[name])
                 save()
     finally:
         server.shutdown()
