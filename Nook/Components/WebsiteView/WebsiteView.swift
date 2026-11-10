@@ -14,9 +14,15 @@ import NookWeb
 import NookUI
 
 // MARK: - Status Bar View
-struct LinkStatusBar: View {
-    let hoveredLink: String?
-    let isCommandPressed: Bool
+@MainActor
+private final class LinkHoverState: ObservableObject {
+    @Published var hoveredLink: String?
+    @Published var isCommandPressed = false
+    weak var session: PageSession?
+}
+
+private struct LinkStatusBar: View {
+    @ObservedObject var hover: LinkHoverState
     let accentColor: Color
     @Environment(\.colorScheme) var colorScheme
     @State private var shouldShow: Bool = false
@@ -40,11 +46,11 @@ struct LinkStatusBar: View {
                 )
                 .opacity(shouldShow ? 1 : 0)
                 .animation(NookDesign.Motion.standard, value: shouldShow)
-                .onChange(of: hoveredLink) {_,  newLink in
+                .onChange(of: hover.hoveredLink) {_,  newLink in
                     handleHoverChange(newLink: newLink)
                 }
                 .onAppear {
-                    handleHoverChange(newLink: hoveredLink)
+                    handleHoverChange(newLink: hover.hoveredLink)
                 }
                 .onDisappear {
                     hoverTask?.cancel()
@@ -54,7 +60,7 @@ struct LinkStatusBar: View {
                 }
         } else {
             Color.clear
-                .onChange(of: hoveredLink) {_,  newLink in
+                .onChange(of: hover.hoveredLink) {_,  newLink in
                     handleHoverChange(newLink: newLink)
                 }
         }
@@ -62,7 +68,7 @@ struct LinkStatusBar: View {
     
     private func displayText(for link: String) -> String {
         let truncatedLink = truncateLink(link)
-        if isCommandPressed {
+        if hover.isCommandPressed {
             return "Open \(truncatedLink) in a new tab and focus it"
         } else {
             return truncatedLink
@@ -173,8 +179,7 @@ struct WebsiteView: View {
     @Environment(BrowserWindowState.self) private var windowState
     @EnvironmentObject var splitManager: SplitViewManager
     @Environment(\.nookSettings) var nookSettings
-    @State private var hoveredLink: String?
-    @State private var isCommandPressed: Bool = false
+    @StateObject private var linkHover = LinkHoverState()
     @State private var isDropTargeted: Bool = false
     
     private let dragCoordinateSpace = "splitPreview"
@@ -210,8 +215,7 @@ struct WebsiteView: View {
                         TabCompositorWrapper(
                             browserManager: browserManager,
                             hoverManager: hoverManager,
-                            hoveredLink: $hoveredLink,
-                            isCommandPressed: $isCommandPressed,
+                            linkHover: linkHover,
                             splitFraction: splitManager.dividerFraction(for: windowState.id),
                             isSplit: splitManager.isSplit(for: windowState.id),
                             leftId: splitManager.leftTabId(for: windowState.id),
@@ -250,8 +254,7 @@ struct WebsiteView: View {
                 if nookSettings.showLinkStatusBar {
                     HStack {
                         LinkStatusBar(
-                            hoveredLink: hoveredLink,
-                            isCommandPressed: isCommandPressed,
+                            hover: linkHover,
                             accentColor: browserManager.gradientColorManager.accentColor
                         )
                         .padding(10)
@@ -517,11 +520,10 @@ private struct MagneticCardView: View {
 }
 
 // MARK: - Tab Compositor Wrapper
-struct TabCompositorWrapper: NSViewRepresentable {
+private struct TabCompositorWrapper: NSViewRepresentable {
     let browserManager: BrowserManager
     let hoverManager: HoverSidebarManager
-    @Binding var hoveredLink: String?
-    @Binding var isCommandPressed: Bool
+    let linkHover: LinkHoverState
     var splitFraction: CGFloat
     var isSplit: Bool
     var leftId: UUID?
@@ -881,19 +883,27 @@ struct TabCompositorWrapper: NSViewRepresentable {
     }
 
     private func setupHoverCallbacks(for session: PageSession) {
-        // Set up link hover callback
-        session.onLinkHover = { [self] href in
+        if linkHover.session !== session {
+            linkHover.session = session
             DispatchQueue.main.async {
-                self.hoveredLink = href
-                if let href = href {
-                }
+                linkHover.hoveredLink = nil
+                linkHover.isCommandPressed = false
             }
         }
-        
-        // Set up command hover callback
-        session.onCommandHover = { [self] href in
+        session.onLinkHover = { [weak session, weak linkHover] href in
             DispatchQueue.main.async {
-                self.isCommandPressed = href != nil
+                guard let session, let linkHover, linkHover.session === session,
+                      windowState.selectedItemID == session.itemID,
+                      !browserManager.tabs.isPageShownElsewhere(session.itemID, from: windowState) else { return }
+                linkHover.hoveredLink = href
+            }
+        }
+        session.onCommandHover = { [weak session, weak linkHover] href in
+            DispatchQueue.main.async {
+                guard let session, let linkHover, linkHover.session === session,
+                      windowState.selectedItemID == session.itemID,
+                      !browserManager.tabs.isPageShownElsewhere(session.itemID, from: windowState) else { return }
+                linkHover.isCommandPressed = href != nil
             }
         }
     }
