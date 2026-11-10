@@ -9,7 +9,6 @@
 //
 
 import Combine
-import FaviconFinder
 import NookBlocker
 import NookTabsCore
 import NookSettings
@@ -750,7 +749,8 @@ public final class PageSession: NSObject, Identifiable {
         guard faviconFetchAttempts < Self.maxFaviconRetries else { return }
         faviconFetchInFlight = true
         Task { @MainActor in
-            await fetchAndSetFavicon(for: url)
+            let page = primaryWebView.flatMap { $0.isLoading ? nil : $0 }
+            await fetchAndSetFavicon(for: url, in: page)
             faviconFetchInFlight = false
         }
     }
@@ -764,7 +764,13 @@ public final class PageSession: NSObject, Identifiable {
         }
     }
 
-    func fetchAndSetFavicon(for url: URL) async {
+    /// Shows the cached icon, and with a loaded `page` fetches a missing or stale one.
+    ///
+    /// The icon links are read from the page WebKit has already parsed. Downloading the document
+    /// again and parsing it in this process cost seconds of CPU on a large page, for every load
+    /// of a host with no cached icon. Without a `page` (the load has only started) nothing is
+    /// fetched: `didFinish` calls again with one.
+    func fetchAndSetFavicon(for url: URL, in page: WKWebView? = nil) async {
         let defaultFavicon = SwiftUI.Image(systemName: "globe")
         guard url.scheme == "http" || url.scheme == "https", url.host != nil else {
             favicon = defaultFavicon
@@ -780,43 +786,72 @@ public final class PageSession: NSObject, Identifiable {
             guard await FaviconCache.shared.isStale(cacheKey) else { return }
         }
 
+        // A private page's host must not reach ~/Library/Caches/FaviconCache, and its fetch
+        // must not be shared with a regular page's.
+        let isPrivate = self.isPrivate
+        let fetchKey = isPrivate ? cacheKey + "#private" : cacheKey
+        let recentlyFailed = Self.faviconFailures[fetchKey].map { Date().timeIntervalSince($0) < Self.faviconFailureTTL } ?? false
+        guard let page, !recentlyFailed else {
+            if cached == nil { favicon = defaultFavicon }
+            return
+        }
+
         faviconFetchAttempts += 1
 
-        // FaviconFinder parses HTML <link> tags, then falls back to /favicon.ico. It only
-        // fetches through URLSession.shared (shared cookies, disk URLCache), so a private
-        // page skips it and takes the root icon below.
-        if !isPrivate, let nsImage = await Self.fetchFaviconImage(for: url) {
-            FaviconCache.shared.store(nsImage, for: cacheKey)
-            favicon = SwiftUI.Image(platformImage: FaviconCache.shared.image(for: cacheKey) ?? nsImage)
-            hasFavicon = true
+        // Pages of one host that load together share a single fetch.
+        let fetch = Self.faviconFetches[fetchKey] ?? {
+            let task = Task { @MainActor () -> PlatformImage? in
+                for link in await Self.iconLinks(in: page).prefix(3) {
+                    if let image = await Self.downloadImage(from: link, isPrivate: isPrivate) { return image }
+                }
+                // Last resort: the root /favicon.ico (for sites with no <link>, or whose targets return 403).
+                guard let root = URL(string: "/favicon.ico", relativeTo: url)?.absoluteURL else { return nil }
+                return await Self.downloadImage(from: root, isPrivate: isPrivate)
+            }
+            Self.faviconFetches[fetchKey] = task
+            return task
+        }()
+        let image = await fetch.value
+        Self.faviconFetches[fetchKey] = nil
+
+        guard let image else {
+            // A failed refresh keeps the cached icon; otherwise hasFavicon stays false so
+            // ensureFaviconLoaded() can retry once the failure has aged out.
+            Self.faviconFailures[fetchKey] = Date()
+            if cached == nil { favicon = defaultFavicon }
             return
         }
-
-        // Last resort: the root /favicon.ico (for sites whose <link> targets return 403).
-        if let rootFaviconURL = URL(string: "/favicon.ico", relativeTo: url)?.absoluteURL,
-           let nsImage = await Self.downloadImage(from: rootFaviconURL, isPrivate: isPrivate) {
-            // A private page's host must not reach ~/Library/Caches/FaviconCache.
-            FaviconCache.shared.store(nsImage, for: cacheKey, toDisk: !isPrivate)
-            favicon = SwiftUI.Image(platformImage: FaviconCache.shared.image(for: cacheKey) ?? nsImage)
-            hasFavicon = true
-            return
-        }
-
-        // A failed refresh keeps the cached icon; otherwise hasFavicon stays false so
-        // ensureFaviconLoaded() can retry.
-        if cached == nil { favicon = defaultFavicon }
+        Self.faviconFailures[fetchKey] = nil
+        FaviconCache.shared.store(image, for: cacheKey, toDisk: !isPrivate)
+        // The page may have moved to another host while the icon downloaded.
+        guard FaviconCache.key(for: self.url) == cacheKey else { return }
+        favicon = SwiftUI.Image(platformImage: FaviconCache.shared.image(for: cacheKey) ?? image)
+        hasFavicon = true
     }
 
-    private static func fetchFaviconImage(for url: URL) async -> PlatformImage? {
-        do {
-            let favicon = try await FaviconFinder(url: url)
-                .fetchFaviconURLs()
-                .download()
-                .largest()
-            return favicon.image?.image
-        } catch {
-            return nil
+    /// Hosts whose icon could not be fetched, so a site without one is not asked on every
+    /// navigation and every same-document URL change.
+    private static var faviconFailures: [String: Date] = [:]
+    private static let faviconFailureTTL: TimeInterval = 120
+    private static var faviconFetches: [String: Task<PlatformImage?, Never>] = [:]
+
+    /// The page's icon links, best first: the smallest one of at least 64 px, then the rest by
+    /// size. An icon with no declared size counts as 48 px, a bare apple-touch-icon as 180.
+    private static func iconLinks(in page: WKWebView) async -> [URL] {
+        let script = """
+        return Array.from(document.querySelectorAll('link[rel~="icon" i],link[rel^="apple-touch-icon" i]'))
+            .slice(0, 16).map(l => [l.href, l.getAttribute('sizes') || '', l.rel || '']);
+        """
+        guard let rows = try? await page.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .defaultClient) as? [[String]]
+        else { return [] }
+        let sized: [(url: URL, size: Int)] = rows.compactMap { row in
+            guard row.count == 3, let link = URL(string: row[0]), link.scheme == "http" || link.scheme == "https" else { return nil }
+            let declared = row[1].lowercased().split(separator: " ").compactMap { Int($0.split(separator: "x").first ?? "") }.max()
+            return (link, declared ?? (row[2].lowercased().contains("apple-touch") ? 180 : 48))
         }
+        let large = sized.filter { $0.size >= 64 }.sorted { $0.size < $1.size }
+        let small = sized.filter { $0.size < 64 }.sorted { $0.size > $1.size }
+        return (large + small).map(\.url)
     }
 
     /// What private pages fetch their favicon with. An ephemeral config still holds cookies in

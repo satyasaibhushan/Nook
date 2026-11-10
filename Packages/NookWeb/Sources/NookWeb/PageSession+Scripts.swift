@@ -357,8 +357,8 @@ extension PageSession: WKScriptMessageHandler {
                     }
 
                     // Fetch favicon for new URL
-                    Task { @MainActor [weak self] in
-                        await self?.fetchAndSetFavicon(for: url)
+                    Task { @MainActor [weak self, weak page = message.webView] in
+                        await self?.fetchAndSetFavicon(for: url, in: page)
                     }
 
                     // The store coalesces writes, so SPA URL changes report directly.
