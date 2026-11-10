@@ -153,7 +153,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
         let stride = CVPixelBufferGetBytesPerRow(buffer)
         let ptr = base.assumingMemoryBound(to: UInt8.self).advanced(by: Int(crop.minY) * stride + Int(crop.minX) * 4)
         var pixels: [UInt8] = []
-        var red = 0, blue = 0, green = 0, changed = 0
+        var red = 0, blue = 0, green = 0, changed = 0, colorSamples = 0
         for y in 0..<100 {
             for x in 0..<160 {
                 let index = min(height - 1, y * height / 100) * stride + min(width - 1, x * width / 160) * 4
@@ -161,14 +161,18 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 let j = pixels.count
                 pixels.append(contentsOf: [r, g, b])
                 if let last, abs(Int(r) - Int(last[j])) + abs(Int(g) - Int(last[j+1])) + abs(Int(b) - Int(last[j+2])) > 30 { changed += 1 }
+                let screenPoint = CGPoint(x:captureRect.minX+Double(x)*captureRect.width/160,
+                                          y:captureRect.minY+Double(y)*captureRect.height/100)
+                guard !attribute || windowRect.contains(screenPoint) else { continue }
+                colorSamples += 1
                 if Double(r) > Double(g)*1.5 && Double(r) > Double(b)*1.3 { red += 1 }
                 if Double(b) > Double(r)*1.3 && Double(b) > Double(g)*1.2 { blue += 1 }
                 if Double(g) > Double(r)*1.5 && Double(g) > Double(b)*1.2 { green += 1 }
             }
         }
         let t = CMTimeGetSeconds(sample.presentationTimeStamp)
-        var frame: [String: Any] = ["t": t, "changed": Double(changed)/16000, "red": Double(red)/16000,
-                                  "blue": Double(blue)/16000, "green": Double(green)/16000,
+        var frame: [String: Any] = ["t": t, "changed": Double(changed)/16000, "red": Double(red)/Double(max(1,colorSamples)),
+                                  "blue": Double(blue)/Double(max(1,colorSamples)), "green": Double(green)/Double(max(1,colorSamples)),
                                   "delivery_lag_ms": (now()-t)*1000]
         if attribute {
             let scaleX = Double(width) / captureRect.width, scaleY = Double(height) / captureRect.height
