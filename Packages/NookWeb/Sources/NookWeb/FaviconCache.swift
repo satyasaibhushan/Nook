@@ -17,12 +17,7 @@ public final class FaviconCache: @unchecked Sendable {
 
     public static let maxMemoryEntries = 200
 
-    private struct Entry {
-        let nsImage: PlatformImage
-        let image: SwiftUI.Image
-    }
-
-    private var memory: [String: Entry] = [:]
+    private var memory: [String: PlatformImage] = [:]
     /// Insertion order for LRU eviction.
     private var order: [String] = []
     private let lock = NSLock()
@@ -48,12 +43,12 @@ public final class FaviconCache: @unchecked Sendable {
 
     /// Memory cache only, synchronous.
     public func image(for key: String) -> PlatformImage? {
-        lock.withLock { memory[key]?.nsImage }
+        lock.withLock { memory[key] }
     }
 
     /// Memory cache only, as a SwiftUI image.
     public func swiftUIImage(for key: String) -> SwiftUI.Image? {
-        lock.withLock { memory[key]?.image }
+        image(for: key).map { SwiftUI.Image(platformImage: $0) }
     }
 
     /// Memory first, then disk off the main thread. A disk hit is promoted to memory.
@@ -62,7 +57,7 @@ public final class FaviconCache: @unchecked Sendable {
         return await withCheckedContinuation { continuation in
             queue.async {
                 let image = self.readFromDisk(key)
-                if let image { self.insert(Entry(nsImage: image, image: SwiftUI.Image(platformImage: image)), for: key) }
+                if let image { self.insert(image, for: key) }
                 continuation.resume(returning: image)
             }
         }
@@ -71,7 +66,7 @@ public final class FaviconCache: @unchecked Sendable {
     /// Synchronous disk read with promotion to memory. For startup restore of a few visible rows.
     public func imageFromDiskSync(for key: String) -> PlatformImage? {
         guard let image = readFromDisk(key) else { return nil }
-        insert(Entry(nsImage: image, image: SwiftUI.Image(platformImage: image)), for: key)
+        insert(image, for: key)
         return image
     }
 
@@ -97,7 +92,7 @@ public final class FaviconCache: @unchecked Sendable {
     }
 
     func store(_ image: PlatformImage, for key: String, toDisk: Bool) {
-        insert(Entry(nsImage: image, image: SwiftUI.Image(platformImage: image)), for: key)
+        insert(image, for: key)
         guard toDisk else { return }
         // PNG encoding is CPU work, not I/O; do it on the caller.
         guard let png = image.pngData() else { return }
@@ -135,10 +130,10 @@ public final class FaviconCache: @unchecked Sendable {
 
     // MARK: - Private
 
-    private func insert(_ entry: Entry, for key: String) {
+    private func insert(_ image: PlatformImage, for key: String) {
         var evicted: [String] = []
         lock.withLock {
-            memory[key] = entry
+            memory[key] = image
             order.removeAll { $0 == key }
             order.append(key)
             if memory.count > Self.maxMemoryEntries {
