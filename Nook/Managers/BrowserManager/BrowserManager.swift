@@ -370,6 +370,7 @@ class BrowserManager: ObservableObject {
     /// True for the length of a space change, so views do not animate content from the old space
     /// into the new one.
     private var transitionEndTasks: [UUID: Task<Void, Never>] = [:]
+    private var transitionSpaces: [UUID: UUID] = [:]
     // Tab closure undo notification
     @Published var showTabClosureToast: Bool = false
     @Published var tabClosureToastCount: Int = 0
@@ -610,12 +611,17 @@ class BrowserManager: ObservableObject {
     /// follow it. Only the active window's space sets the app-wide managers.
     func windowSpaceChanged(_ windowState: BrowserWindowState) {
         guard !windowState.isIncognito else { return }
-        windowState.isSwitchingSpace = true
-        transitionEndTasks[windowState.id]?.cancel()
-        transitionEndTasks[windowState.id] = Task { [weak windowState] in
-            try? await Task.sleep(for: .seconds(Self.spaceSwitchDuration))
-            guard !Task.isCancelled else { return }
-            windowState?.isSwitchingSpace = false
+        if let spaceID = windowState.spaceID {
+            let previous = transitionSpaces.updateValue(spaceID, forKey: windowState.id)
+            if let previous, previous != spaceID {
+                windowState.isSwitchingSpace = true
+                transitionEndTasks[windowState.id]?.cancel()
+                transitionEndTasks[windowState.id] = Task { [weak windowState] in
+                    try? await Task.sleep(for: .seconds(Self.spaceSwitchDuration))
+                    guard !Task.isCancelled else { return }
+                    windowState?.isSwitchingSpace = false
+                }
+            }
         }
         guard windowRegistry?.activeWindow == nil || windowRegistry?.activeWindow?.id == windowState.id else { return }
         guard let spaceID = windowState.spaceID, let profile = tabs.profile(forSpace: spaceID),

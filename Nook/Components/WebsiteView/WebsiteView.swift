@@ -892,6 +892,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
             if linkHover.session != nil {
                 linkHover.session = nil
                 DispatchQueue.main.async {
+                    guard linkHover.session == nil else { return }
                     linkHover.hoveredLink = nil
                     linkHover.isCommandPressed = false
                 }
