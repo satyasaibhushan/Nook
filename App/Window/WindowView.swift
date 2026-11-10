@@ -177,10 +177,25 @@ struct WindowView: View {
             hoverSidebarManager.attach(browserManager: browserManager)
             hoverSidebarManager.windowRegistry = windowRegistry
             hoverSidebarManager.nookSettings = nookSettings
-            hoverSidebarManager.start()
+            hoverSidebarManager.updateMonitoring(for: windowState)
             applyAccent(spaceAccentHex)
         }
         .onDisappear {
+            hoverSidebarManager.stop()
+        }
+        .onChange(of: windowRegistry.activeWindowId) { _, _ in
+            hoverSidebarManager.updateMonitoring(for: windowState)
+        }
+        .onChange(of: windowState.isSidebarVisible) { _, _ in
+            hoverSidebarManager.updateMonitoring(for: windowState)
+        }
+        .onChange(of: windowState.showsFullscreenPage) { _, _ in
+            hoverSidebarManager.updateMonitoring(for: windowState)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            hoverSidebarManager.updateMonitoring(for: windowState)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             hoverSidebarManager.stop()
         }
         // Handle shortcut conflict notifications
