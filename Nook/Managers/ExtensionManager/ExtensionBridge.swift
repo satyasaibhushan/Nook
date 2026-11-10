@@ -310,7 +310,9 @@ final class ExtensionTabAdapter: NSObject, WKWebExtensionTab {
         }
         if page.isUnloaded {
             page.url = url
-            page.loadWebViewIfNeeded()
+            // Through the compositor so the page gets an idle timer: a direct load in a tab
+            // nobody selects was never unloaded again.
+            browserManager.compositorManager.load(page)
         } else {
             page.load(url)
         }
