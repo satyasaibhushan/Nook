@@ -61,18 +61,26 @@ private enum InWindowFullscreen {
         dlsym(dlopen(nil, RTLD_LAZY), name).map { unsafeBitCast($0, to: T.self) }
     }
 
-    // The presenter has nothing to move or animate: the web view already sits where the page
-    // goes. WebKit only waits for the two steps that carry a listener.
-    private static let willEnter: WillEnter = { _, listener, _ in completeListener?(listener, nil) }
-    private static let beganEnter: BeganEnter = { _, _, _, _ in }
+    // The web view already sits where the page goes, so the presenter moves nothing. It runs
+    // the zoom, and WebKit only waits for the two steps that carry a listener.
+    private static let willEnter: WillEnter = { _, listener, info in
+        if let info { MainActor.assumeIsolated { webViewRef(info).zoom.pageWillEnter() } }
+        completeListener?(listener, nil)
+    }
+    private static let beganEnter: BeganEnter = { _, initialFrame, _, info in
+        guard let info else { return }
+        MainActor.assumeIsolated { webViewRef(info).zoom.pageEntered(from: initialFrame) }
+    }
     // The page stays fullscreen until the second step is completed, and the app puts its
     // chrome back when the exit starts. Holding the step until the view has drawn at its
-    // smaller frame lets the page leave fullscreen at the size it ends up with. Otherwise it
-    // leaves at the old size and resizes while busy with its own exit, which shows its
-    // fullscreen picture cropped for as long as that takes.
+    // smaller frame lets the page leave fullscreen at the size it ends up with, which is one
+    // layout fewer under the zoom.
     private static let exit: Exit = { _, info in
         guard let info else { return }
-        MainActor.assumeIsolated { webViewRef(info).watchFrame() }
+        MainActor.assumeIsolated {
+            webViewRef(info).zoom.pageWillExit()
+            webViewRef(info).watchFrame()
+        }
     }
     private static let beganExit: BeganExit = { _, _, _, listener, info in
         guard let info, let retain, let release, retain(listener) != nil else {
@@ -80,7 +88,13 @@ private enum InWindowFullscreen {
             return
         }
         let step = HeldStep(listener: listener, release: release)
-        MainActor.assumeIsolated { webViewRef(info).afterRedraw { step.finish() } }
+        MainActor.assumeIsolated {
+            let ref = webViewRef(info)
+            ref.afterRedraw {
+                step.finish()
+                ref.zoom.pageExited()
+            }
+        }
     }
 
     private static func webViewRef(_ info: UnsafeRawPointer) -> WebViewRef {
@@ -107,7 +121,12 @@ private enum InWindowFullscreen {
         private var frameChanged = false
         private var proceed: (@MainActor () -> Void)?
 
-        nonisolated init(_ webView: WKWebView) { self.webView = webView }
+        let zoom: FullscreenZoom
+
+        nonisolated init(_ webView: WKWebView) {
+            self.webView = webView
+            zoom = FullscreenZoom(webView)
+        }
 
         /// From the start of an exit, since the app may resize the view before WebKit reaches
         /// the step that waits.
@@ -139,10 +158,8 @@ private enum InWindowFullscreen {
 
         private func afterNextDraw() {
             stopWatching()
-            let selector = NSSelectorFromString("_doAfterNextPresentationUpdate:")
-            guard proceed != nil, let webView, webView.responds(to: selector) else { return finish() }
-            let done: @convention(block) () -> Void = { [weak self] in MainActor.assumeIsolated { self?.finish() } }
-            webView.perform(selector, with: done)
+            guard proceed != nil, let webView else { return finish() }
+            webView.afterNextPresentation { [weak self] in self?.finish() }
         }
 
         private func finish() {
