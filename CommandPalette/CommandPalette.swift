@@ -21,15 +21,16 @@ class CommandPalette {
     /// Whether pressing Return should navigate the current tab (vs creating new tab)
     var shouldNavigateCurrentTab: Bool = false
 
+    private(set) var focusRequest = UUID()
+
     // MARK: - Actions
 
     /// Open the command palette with optional prefill text
     func open(prefill: String = "", navigateCurrentTab: Bool = false) {
         prefilledText = prefill
         self.shouldNavigateCurrentTab = navigateCurrentTab
-        DispatchQueue.main.async {
-            self.isVisible = true
-        }
+        focusRequest = UUID()
+        isVisible = true
     }
 
     /// Open the command palette with the current tab's URL

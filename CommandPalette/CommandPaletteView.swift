@@ -22,7 +22,6 @@ struct CommandPaletteView: View {
     @State private var searchManager = SearchManager()
     @Environment(\.nookSettings) var nookSettings
 
-    @FocusState private var isSearchFocused: Bool
     @State private var text: String = ""
     @State private var selectedSuggestionIndex: Int = -1
     @State private var hoveredSuggestionIndex: Int? = nil
@@ -35,16 +34,6 @@ struct CommandPaletteView: View {
     private var siteSearchMatch: SiteSearchEntry? {
         guard activeSiteSearch == nil else { return nil }
         return SiteSearchEntry.match(for: text, in: nookSettings.siteSearchEntries)
-    }
-
-    /// True while an input method is composing, i.e. the field editor holds marked text.
-    ///
-    /// SwiftUI delivers `onKeyPress` ahead of the text input context, so without this the
-    /// palette eats the keys a CJK input method needs: Return commits a candidate rather
-    /// than submitting, and the arrow keys pick candidates rather than moving through
-    /// suggestions. Handlers return `.ignored` while this is true so the IME gets them.
-    private var isComposing: Bool {
-        (NSApp.keyWindow?.firstResponder as? NSTextInputClient)?.hasMarkedText() ?? false
     }
 
     /// The Return row first, then what the search found. Index -1 means the Return row.
@@ -138,16 +127,17 @@ struct CommandPaletteView: View {
                                 }
 
                                 ZStack(alignment: .trailing) {
-                                    TextField(
-                                        activeSiteSearch != nil
-                                            ? "Search \(activeSiteSearch!.name)..."
-                                            : "Search or enter URL...",
-                                        text: $text
+                                    PaletteSearchField(
+                                        text: $text,
+                                        placeholder: activeSiteSearch.map { "Search \($0.name)..." } ?? "Search or enter URL...",
+                                        isVisible: isVisible,
+                                        focusRequest: commandPalette.focusRequest,
+                                        prefill: commandPalette.prefilledText,
+                                        textColor: NSColor(textFieldColor),
+                                        accentColor: NSColor(gradientColorManager.accentColor),
+                                        onCommand: handleFieldCommand
                                     )
-                                    .textFieldStyle(.plain)
-                                    .font(NookDesign.Font.heading)
-                                    .foregroundColor(textFieldColor)
-                                    .tint(gradientColorManager.accentColor)
+                                    .frame(height: 22)
                                     .overlay(alignment: .leading) {
                                         if let suffix = inlineCompletionSuffix {
                                             (Text(text).foregroundColor(.clear) + Text(suffix).foregroundColor(.secondary))
@@ -156,83 +146,8 @@ struct CommandPaletteView: View {
                                                 .allowsHitTesting(false)
                                         }
                                     }
-                                    .focused($isSearchFocused)
-                                    .onKeyPress(.tab) {
-                                        if isComposing { return .ignored }
-                                        if let match = siteSearchMatch, activeSiteSearch == nil {
-                                            withAnimation(NookDesign.Motion.spring) {
-                                                activeSiteSearch = match
-                                            }
-                                            text = ""
-                                            return .handled
-                                        }
-                                        if acceptInlineCompletion() { return .handled }
-                                        // With nothing selected, Tab moves to the first row under the Return row.
-                                        if selectedSuggestionIndex < 0 && visibleSuggestions.count > 1 {
-                                            navigateSuggestions(direction: 1)
-                                            return .handled
-                                        }
-                                        // Tab with a selected suggestion = accept it (same as Enter)
-                                        if selectedSuggestionIndex >= 0 && selectedSuggestionIndex < visibleSuggestions.count {
-                                            let suggestion = visibleSuggestions[selectedSuggestionIndex]
-                                            selectSuggestion(suggestion)
-                                            return .handled
-                                        }
-                                        return .ignored
-                                    }
-                                    .onKeyPress(.return) {
-                                        if isComposing { return .ignored }
-                                        handleReturn()
-                                        return .handled
-                                    }
-                                    .onKeyPress(.rightArrow) {
-                                        if isComposing || !caretIsAtEnd { return .ignored }
-                                        return acceptInlineCompletion() ? .handled : .ignored
-                                    }
-                                    .onKeyPress(.upArrow) {
-                                        if isComposing { return .ignored }
-                                        navigateSuggestions(direction: -1)
-                                        return .handled
-                                    }
-                                    .onKeyPress(.downArrow) {
-                                        if isComposing { return .ignored }
-                                        navigateSuggestions(direction: 1)
-                                        return .handled
-                                    }
-                                    .onKeyPress(.escape) {
-                                        if isComposing { return .ignored }
-                                        if activeSiteSearch != nil {
-                                            withAnimation(NookDesign.Motion.standard) {
-                                                activeSiteSearch = nil
-                                            }
-                                            return .handled
-                                        }
-                                        commandPalette.close()
-                                        return .handled
-                                    }
-                                    .onKeyPress(keys: [.delete]) { press in
-                                        if isComposing { return .ignored }
-                                        if press.modifiers.contains(.shift), removeSelectedHistoryRow() { return .handled }
-                                        if activeSiteSearch != nil && text.isEmpty {
-                                            withAnimation(NookDesign.Motion.standard) {
-                                                activeSiteSearch = nil
-                                            }
-                                            return .handled
-                                        }
-                                        return .ignored
-                                    }
-                                    .onKeyPress(characters: CharacterSet(charactersIn: "\u{7F}")) { press in
-                                        if isComposing { return .ignored }
-                                        if press.modifiers.contains(.shift), removeSelectedHistoryRow() { return .handled }
-                                        if activeSiteSearch != nil && text.isEmpty {
-                                            withAnimation(NookDesign.Motion.standard) {
-                                                activeSiteSearch = nil
-                                            }
-                                            return .handled
-                                        }
-                                        return .ignored
-                                    }
                                     .onChange(of: text) { _, newValue in
+                                        guard commandPalette.isVisible else { return }
                                         if isNavigatingSuggestion {
                                             isNavigatingSuggestion = false
                                             return
@@ -299,10 +214,6 @@ struct CommandPaletteView: View {
                         .frame(maxWidth: .infinity)
                         .frame(width: effectiveCommandPaletteWidth)
                         .nookFloatingSurface(in: NookDesign.Radius.shape(NookDesign.Radius.xxl))
-                        .animation(
-                            NookDesign.Motion.quick,
-                            value: searchManager.suggestions.count
-                        )
                         Spacer()
                     }
                     .frame(
@@ -318,27 +229,18 @@ struct CommandPaletteView: View {
         }
         .allowsHitTesting(isVisible)
         .opacity(isVisible ? 1.0 : 0.0)
+        .onChange(of: commandPalette.focusRequest, initial: true) { _, _ in
+            guard commandPalette.isVisible else { return }
+            searchManager.setTabs(browserManager.tabs, window: windowState)
+            searchManager.setHistoryManager(browserManager.historyManager)
+            text = commandPalette.prefilledText
+            userTypedText = text
+            completionSuppressed = false
+            selectedSuggestionIndex = -1
+            searchManager.searchSuggestions(for: text)
+        }
         .onChange(of: commandPalette.isVisible) { _, newVisible in
-            if newVisible {
-                searchManager.setTabs(browserManager.tabs, window: windowState)
-                searchManager.setHistoryManager(browserManager.historyManager)
-                searchManager.updateSpaceContext()
-
-                text = commandPalette.prefilledText
-                userTypedText = commandPalette.prefilledText
-
-                DispatchQueue.main.async {
-                    isSearchFocused = true
-                    DispatchQueue.main.async {
-                        NSApplication.shared.sendAction(
-                            #selector(NSText.selectAll(_:)),
-                            to: nil,
-                            from: nil
-                        )
-                    }
-                }
-            } else {
-                isSearchFocused = false
+            if !newVisible {
                 searchManager.clearSuggestions()
                 text = ""
                 userTypedText = ""
@@ -360,16 +262,40 @@ struct CommandPaletteView: View {
                 selectedSuggestionIndex = count - 1
             }
         }
-        .animation(NookDesign.Motion.quick, value: selectedSuggestionIndex)
-        .onChange(of: commandPalette.prefilledText) { _, newValue in
-            if isVisible {
-                text = newValue
-                userTypedText = newValue
-                DispatchQueue.main.async {
-                    isSearchFocused = true
-                }
+    }
+
+    private func handleFieldCommand(_ selector: Selector, _ modifiers: NSEvent.ModifierFlags) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertTab(_:)):
+            if let match = siteSearchMatch, activeSiteSearch == nil {
+                withAnimation(NookDesign.Motion.spring) { activeSiteSearch = match }
+                text = ""
+            } else if acceptInlineCompletion() {
+                return true
+            } else if selectedSuggestionIndex < 0, visibleSuggestions.count > 1 {
+                navigateSuggestions(direction: 1)
+            } else if selectedSuggestionIndex >= 0, selectedSuggestionIndex < visibleSuggestions.count {
+                selectSuggestion(visibleSuggestions[selectedSuggestionIndex])
+            } else {
+                return false
             }
+        case #selector(NSResponder.insertNewline(_:)): handleReturn()
+        case #selector(NSResponder.moveRight(_:)):
+            return caretIsAtEnd && acceptInlineCompletion()
+        case #selector(NSResponder.moveUp(_:)): navigateSuggestions(direction: -1)
+        case #selector(NSResponder.moveDown(_:)): navigateSuggestions(direction: 1)
+        case #selector(NSResponder.cancelOperation(_:)):
+            if activeSiteSearch != nil {
+                withAnimation(NookDesign.Motion.standard) { activeSiteSearch = nil }
+            } else { commandPalette.close() }
+        case #selector(NSResponder.deleteBackward(_:)):
+            if modifiers.contains(.shift), removeSelectedHistoryRow() { return true }
+            if activeSiteSearch != nil, text.isEmpty {
+                withAnimation(NookDesign.Motion.standard) { activeSiteSearch = nil }
+            } else { return false }
+        default: return false
         }
+        return true
     }
 
     // MARK: - Suggestions List Subview
@@ -601,5 +527,81 @@ struct CommandPaletteView: View {
 
     private var inlineCompletionSuffix: String? {
         autofillTarget.map { String($0.dropFirst(text.count)) }
+    }
+}
+
+/// Focus and prefill selection happen together, before the next key event can reach the page.
+private struct PaletteSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let isVisible: Bool
+    let focusRequest: UUID
+    let prefill: String
+    let textColor: NSColor
+    let accentColor: NSColor
+    let onCommand: (Selector, NSEvent.ModifierFlags) -> Bool
+
+    final class Field: NSTextField {
+        var focusRequest: UUID?
+        var appliedFocusRequest: UUID?
+        var prefill = ""
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            applyFocusRequest()
+        }
+
+        func applyFocusRequest() {
+            guard let window, let focusRequest, appliedFocusRequest != focusRequest else { return }
+            stringValue = prefill
+            if window.makeFirstResponder(self) {
+                currentEditor()?.selectAll(nil)
+                appliedFocusRequest = focusRequest
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: PaletteSearchField
+        init(_ parent: PaletteSearchField) { self.parent = parent }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            guard !textView.hasMarkedText() else { return false }
+            return parent.onCommand(selector, NSApp.currentEvent?.modifierFlags ?? [])
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> Field {
+        let field = Field()
+        field.font = .systemFont(ofSize: 17, weight: .semibold)
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.usesSingleLineMode = true
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.delegate = context.coordinator
+        return field
+    }
+
+    func updateNSView(_ field: Field, context: Context) {
+        context.coordinator.parent = self
+        field.placeholderString = placeholder
+        field.setAccessibilityLabel(placeholder)
+        field.textColor = textColor
+        field.prefill = prefill
+        field.focusRequest = isVisible ? focusRequest : nil
+        if field.stringValue != text { field.stringValue = text }
+        field.applyFocusRequest()
+        if let editor = field.currentEditor() as? NSTextView {
+            editor.insertionPointColor = accentColor
+            if !isVisible { field.window?.makeFirstResponder(nil) }
+        }
     }
 }
