@@ -429,7 +429,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             // Capture the visible display region so app activation and occlusion are observable too.
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let config = SCStreamConfiguration()
-            let rect = frame?.intersection(display.frame) ?? display.frame
+            let rect = (spec["full_display"] as? Bool ?? false) ? display.frame : (frame?.intersection(display.frame) ?? display.frame)
             // Capture the whole display and crop the delivered buffer explicitly. This avoids
             // sourceRect point/pixel ambiguity on Retina displays and preserves CG top-left coordinates.
             let backing = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.displayID })?.backingScaleFactor ?? 1
