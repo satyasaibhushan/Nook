@@ -64,7 +64,12 @@ struct TabSheetRows: View {
             if row.item.isFolder {
                 TabFolderView(item: row.item, spaceID: spaceID, isDropTarget: dropTarget == row.item.id)
             } else {
-                SpaceTab(item: row.item, hasChildren: row.hasChildren)
+                SpaceTab(
+                    item: row.item,
+                    hasChildren: row.hasChildren,
+                    isSelected: row.id == window.selectedItemID,
+                    isMultiSelected: window.multiSelection.contains(row.id)
+                        && tabs.selectedItems(in: window).contains(row.id))
                     .simultaneousGesture(TapGesture().onEnded { onSelect() })
             }
         }

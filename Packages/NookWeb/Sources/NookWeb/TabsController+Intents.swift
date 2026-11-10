@@ -232,8 +232,10 @@ extension TabsController {
         window.emptiedSpaces.remove(spaceID)
         if case .main = owner {
             let now = Date()
-            device.stampActive(itemID, at: now)
-            if let previous, tree.item(previous.itemID) != nil { device.stampActive(previous.itemID, at: now) }
+            updateDeviceUnobserved { device in
+                device.stampActive(itemID, at: now)
+                if let previous, tree.item(previous.itemID) != nil { device.stampActive(previous.itemID, at: now) }
+            }
         }
         let switchInterval = BrowserPerformance.signposter.beginInterval(
             "TabSwitch", id: BrowserPerformance.signposter.makeSignpostID())

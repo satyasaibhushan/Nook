@@ -63,9 +63,13 @@ extension TabsController {
         guard hours > 0, !isReadOnly else { return }
         let before = device.lastActive
         let shielded = archiveProtectedIDs()
-        for id in archiveShielded.subtracting(shielded) where tree.item(id) != nil { device.stampActive(id, at: now) }
+        let restamp = archiveShielded.subtracting(shielded).filter { tree.item($0) != nil }
         archiveShielded = shielded
-        let roots = device.idleArchiveRoots(in: tree, olderThan: TimeInterval(hours) * 3600, keeping: shielded, now: now)
+        var roots: [UUID] = []
+        updateDeviceUnobserved { device in
+            for id in restamp { device.stampActive(id, at: now) }
+            roots = device.idleArchiveRoots(in: tree, olderThan: TimeInterval(hours) * 3600, keeping: shielded, now: now)
+        }
         if device.lastActive != before { save() }
         for root in roots { remove(root, promotingChildren: false, archiving: .auto) }
     }

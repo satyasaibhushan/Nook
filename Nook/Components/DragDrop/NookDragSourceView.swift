@@ -13,15 +13,15 @@ import NookWeb
 
 @MainActor
 final class NookDragSourceCoordinator: NSObject, NSDraggingSource {
-    var item: NookDragItem
-    var icon: Image?
+    var item: () -> NookDragItem
+    var icon: () -> Image?
     var zoneID: DropZoneID
     var theme: SpaceTheme?
     var accent: Color = .gray
     var colorScheme: ColorScheme = .light
     let manager: NookDragSessionManager
 
-    init(item: NookDragItem, icon: Image?, zoneID: DropZoneID, manager: NookDragSessionManager) {
+    init(item: @escaping () -> NookDragItem, icon: @escaping () -> Image?, zoneID: DropZoneID, manager: NookDragSessionManager) {
         self.item = item
         self.icon = icon
         self.zoneID = zoneID
@@ -66,6 +66,7 @@ final class NookDragSourceNSView: NSView {
 
     func initiateDrag(with event: NSEvent, mouseDownEvent: NSEvent?) {
         guard let coordinator = coordinator else { return }
+        let item = coordinator.item()
 
         // Capture screen position from the event for preview window positioning
         let screenPoint: NSPoint
@@ -76,8 +77,8 @@ final class NookDragSourceNSView: NSView {
         }
 
         coordinator.manager.beginDrag(
-            item: coordinator.item,
-            icon: coordinator.icon,
+            item: item,
+            icon: coordinator.icon(),
             from: coordinator.zoneID,
             cursorScreenPoint: screenPoint,
             grabScreenPoint: mouseDownEvent.flatMap { window?.convertPoint(toScreen: $0.locationInWindow) } ?? screenPoint,
@@ -89,10 +90,10 @@ final class NookDragSourceNSView: NSView {
         )
 
         let pasteboardItem = NSPasteboardItem()
-        if let data = try? JSONEncoder().encode(coordinator.item) {
+        if let data = try? JSONEncoder().encode(item) {
             pasteboardItem.setData(data, forType: .nookTabItem)
         }
-        pasteboardItem.setString(coordinator.item.tabId.uuidString, forType: .string)
+        pasteboardItem.setString(item.tabId.uuidString, forType: .string)
 
         let transparentImage = NSImage(size: NSSize(width: 1, height: 1))
 
@@ -109,8 +110,8 @@ final class NookDragSourceNSView: NSView {
 // MARK: - Invisible Anchor (NSViewRepresentable)
 
 private struct DragSourceAnchor: NSViewRepresentable {
-    let item: NookDragItem
-    let icon: Image?
+    let item: () -> NookDragItem
+    let icon: () -> Image?
     let zoneID: DropZoneID
     let manager: NookDragSessionManager
     let theme: SpaceTheme?
@@ -148,14 +149,29 @@ private struct DragSourceAnchor: NSViewRepresentable {
 // MARK: - NookDragSourceView
 
 struct NookDragSourceView<Content: View>: View {
-    let item: NookDragItem
-    let icon: Image?
+    /// Built when a drag starts, so a redraw of the row never pays for titles, URLs and icons.
+    let item: () -> NookDragItem
+    let icon: () -> Image?
     let zoneID: DropZoneID
     let manager: NookDragSessionManager
     @ViewBuilder let content: () -> Content
     @Environment(TabsController.self) private var tabs
     @Environment(BrowserWindowState.self) private var windowState
     @Environment(\.colorScheme) private var colorScheme
+
+    init(
+        item: @autoclosure @escaping () -> NookDragItem,
+        icon: @autoclosure @escaping () -> Image?,
+        zoneID: DropZoneID,
+        manager: NookDragSessionManager,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.item = item
+        self.icon = icon
+        self.zoneID = zoneID
+        self.manager = manager
+        self.content = content
+    }
 
     private var space: SpaceRecord? {
         windowState.isIncognito ? nil : windowState.spaceID.flatMap { tabs.space($0) }

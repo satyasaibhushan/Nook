@@ -231,23 +231,33 @@ struct SpaceView: View {
         if let split, row.id == split.anchorID {
             SplitTabRow(left: split.left, right: split.right, zoneID: zone)
         } else {
-            let session = tabs.session(for: row.item.id)
-            let group = windowState.multiSelection.contains(row.id) ? tabs.selectedItems(in: windowState) : []
             NookDragSourceView(
-                item: NookDragItem(tabId: row.item.id, title: tabs.title(for: row.item), urlString: tabs.currentURL(for: row.item)?.absoluteString ?? "",
-                                    count: group.contains(row.id) ? group.count : nil),
-                icon: row.item.isFolder ? Image(systemName: "folder.fill") : session?.favicon,
+                item: dragItem(for: row),
+                icon: row.item.isFolder ? Image(systemName: "folder.fill") : tabs.session(for: row.item.id)?.favicon,
                 zoneID: zone,
                 manager: dragSession
             ) {
                 if row.item.isFolder {
                     TabFolderView(item: row.item, spaceID: spaceID, isDropTarget: isDropTarget)
                 } else {
-                    SpaceTab(item: row.item, hasChildren: row.hasChildren)
+                    SpaceTab(
+                        item: row.item,
+                        hasChildren: row.hasChildren,
+                        isSelected: row.id == windowState.selectedItemID,
+                        isMultiSelected: windowState.multiSelection.contains(row.id)
+                            && tabs.selectedItems(in: windowState).contains(row.id))
                 }
             }
             .id(row.item.id)
         }
+    }
+
+    /// What a drag of the row carries: the whole multi-selection when the row is part of it.
+    private func dragItem(for row: Row) -> NookDragItem {
+        let group = windowState.multiSelection.contains(row.id) ? tabs.selectedItems(in: windowState) : []
+        return NookDragItem(
+            tabId: row.item.id, title: tabs.title(for: row.item), urlString: tabs.currentURL(for: row.item)?.absoluteString ?? "",
+            count: group.contains(row.id) ? group.count : nil)
     }
 
     // MARK: - Split
