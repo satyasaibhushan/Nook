@@ -587,6 +587,19 @@ public final class TabsController {
         pageOwnerWindow(of: itemID)?.windowHandle?.bringToFront()
     }
 
+    /// A page entered or left element fullscreen. `inWindow` is whether it fills its browser
+    /// window, which then gives it the whole window; WebKit's own fullscreen window needs nothing.
+    func pageFullscreenChanged(itemID: UUID, inWindow: Bool) {
+        for window in allWindows {
+            if inWindow, pageOwnerWindow(of: itemID)?.id == window.id {
+                window.fullscreenPageID = itemID
+            } else if window.fullscreenPageID == itemID {
+                window.fullscreenPageID = nil
+            }
+        }
+        refreshWindows(showing: itemID)
+    }
+
     public func refreshWindows(showing itemID: UUID) {
         for window in allWindows
         where window.selectedItemID == itemID || window.split?.leftItemID == itemID || window.split?.rightItemID == itemID {

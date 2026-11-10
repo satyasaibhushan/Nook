@@ -180,7 +180,7 @@ struct WebsiteView: View {
     private let dragCoordinateSpace = "splitPreview"
 
     private var cornerRadius: CGFloat {
-        nookSettings.hideWebContentBorder ? 0 : NookDesign.Radius.page
+        nookSettings.hideWebContentBorder || windowState.showsFullscreenPage ? 0 : NookDesign.Radius.page
     }
 
     private var webViewClipShape: AnyShape {
@@ -220,7 +220,8 @@ struct WebsiteView: View {
                             compositorVersion: windowState.compositorVersion,
                             selectedItemID: windowState.selectedItemID,
                             cornerRadius: cornerRadius,
-                            squareTopCorners: nookSettings.topBarAddressView || browserManager.showsDeveloperBar(in: windowState)
+                            squareTopCorners: nookSettings.topBarAddressView || browserManager.showsDeveloperBar(in: windowState),
+                            fullscreenInWindow: nookSettings.fullscreenInWindow
                         )
                         .coordinateSpace(name: dragCoordinateSpace)
                         // The page-frame shadow is drawn separately by WindowView, and the
@@ -530,6 +531,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
     var selectedItemID: UUID?
     var cornerRadius: CGFloat
     var squareTopCorners: Bool
+    var fullscreenInWindow: Bool
 
     /// Rounds the container's own layer instead of masking the SwiftUI branch:
     /// CALayer.cornerRadius composites directly, while a shape mask over the
@@ -558,6 +560,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
         var lastFraction: CGFloat = -1
         var lastSize: CGSize = .zero
         var lastVersion: Int = -1
+        var lastFullscreenInWindow = false
         var frameObserver: NSObjectProtocol? = nil
         init(browserManager: BrowserManager?, windowState: BrowserWindowState) {
             self.browserManager = browserManager
@@ -632,7 +635,8 @@ struct TabCompositorWrapper: NSViewRepresentable {
             context.coordinator.lastCurrentId != currentId ||
             abs(CGFloat(context.coordinator.lastFraction) - CGFloat(splitFraction)) > 0.0001 ||
             context.coordinator.lastSize != size ||
-            context.coordinator.lastVersion != compositorVersion
+            context.coordinator.lastVersion != compositorVersion ||
+            context.coordinator.lastFullscreenInWindow != fullscreenInWindow
 
         if needsRebuild {
             let previousCurrentId = context.coordinator.lastCurrentId
@@ -644,6 +648,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
             context.coordinator.lastFraction = splitFraction
             context.coordinator.lastSize = size
             context.coordinator.lastVersion = compositorVersion
+            context.coordinator.lastFullscreenInWindow = fullscreenInWindow
 
             // Restore focus when tab changed (webview is now in hierarchy)
             if previousCurrentId != currentId {
@@ -686,11 +691,16 @@ struct TabCompositorWrapper: NSViewRepresentable {
         let selected = tabs.selectedSession(in: windowState)
         let split = browserManager.splitManager
 
-        // While fullscreen, WebKit's window holds the page and leaves a placeholder here. Moving
-        // either strands the page off screen when fullscreen ends, still playing.
+        // While fullscreen in WebKit's own window, that window holds the page and leaves a
+        // placeholder here. Moving either strands the page off screen when fullscreen ends,
+        // still playing. A page fullscreen in this window stays in the passes below.
         let pages = [selected] + [split.leftTabId(for: windowState.id), split.rightTabId(for: windowState.id)]
             .map { $0.flatMap(tabs.session(for:)) }
-        if pages.contains(where: { ($0?.webView?.fullscreenState ?? .notInFullscreen) != .notInFullscreen }) { return }
+        if pages.contains(where: { page in
+            guard let view = page?.webView else { return false }
+            return view.fullscreenState != .notInFullscreen && !view.presentsFullscreenInWindow
+        }) { return }
+        leaveFullscreenIfHidden()
 
         // Identify overlay (always preserved)
         let overlay = containerView.subviews.compactMap { $0 as? SplitDropCaptureView }.first
@@ -751,8 +761,14 @@ struct TabCompositorWrapper: NSViewRepresentable {
                 panes.forEach { containerView.addSubview($0) }
             }
 
+            // A fullscreen page takes both panes' room. The other pane stays in the container,
+            // hidden, so its page keeps its video surface.
+            let fullscreenID = windowState.showsFullscreenPage ? windowState.fullscreenPageID : nil
+            divider.isHidden = fullscreenID != nil
             for (pane, session, rect) in [(panes[0], leftSession, leftRect), (panes[1], rightSession, rightRect)] {
-                pane.frame = rect
+                pane.isHidden = fullscreenID != nil && fullscreenID != pane.itemID
+                pane.showsFullscreenPage = fullscreenID == pane.itemID
+                pane.frame = pane.showsFullscreenPage ? total : rect
                 pane.show(pageView(for: session, reusing: pane.content.subviews))
             }
         } else {
@@ -904,7 +920,27 @@ struct TabCompositorWrapper: NSViewRepresentable {
     private func webView(for session: PageSession, windowId: UUID) -> WKWebView {
         // One view per window: the session's primary in the first window, clones elsewhere.
         guard let coordinator = browserManager.webViewCoordinator else { return session.activeWebView }
-        return coordinator.createWebView(for: session, in: windowId)
+        let view = coordinator.createWebView(for: session, in: windowId)
+        // Only pages in a browser window: Peek and mini windows have no window of this kind to
+        // fill, so their views keep WebKit's own fullscreen.
+        view.setPresentsFullscreenInWindow(fullscreenInWindow)
+        return view
+    }
+
+    /// A page that is fullscreen in this window but no longer on screen (another tab was
+    /// selected, or it closed) leaves fullscreen, as it would in Chrome.
+    private func leaveFullscreenIfHidden() {
+        guard let itemID = windowState.fullscreenPageID, !windowState.showsFullscreenPage else { return }
+        let view = browserManager.tabs.session(for: itemID)?.webView
+        if let view, view.fullscreenState != .notInFullscreen {
+            // In Nook's own world, where a page cannot replace exitFullscreen with a no-op.
+            view.evaluateJavaScript("document.exitFullscreen()", in: nil, in: .defaultClient) { _ in }
+        } else {
+            // Nothing left to report the exit. Not during this view update.
+            DispatchQueue.main.async { [windowState] in
+                if windowState.fullscreenPageID == itemID { windowState.fullscreenPageID = nil }
+            }
+        }
     }
 
 

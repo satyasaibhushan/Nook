@@ -30,6 +30,17 @@ final class SplitPaneView: NSView {
     let content = NSView()
     private let maskLayer = CAShapeLayer()
     private weak var settings: NookSettingsService?
+    /// The URL bar, buttons and focus cover that float over the page.
+    private var controls: [NSView] = []
+
+    /// The pane's page is fullscreen in the window: the pane is the whole window, square and bare.
+    var showsFullscreenPage = false {
+        didSet {
+            guard showsFullscreenPage != oldValue else { return }
+            controls.forEach { $0.isHidden = showsFullscreenPage }
+            updateMask()
+        }
+    }
 
     init(frame: NSRect, side: SplitViewManager.Side, itemID: UUID, browserManager: BrowserManager, windowState: BrowserWindowState, hoverManager: HoverSidebarManager) {
         self.side = side
@@ -73,6 +84,7 @@ final class SplitPaneView: NSView {
             buttons.topAnchor.constraint(equalTo: topAnchor, constant: inset),
             buttons.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -inset),
         ])
+        controls = [cover, title, buttons]
         updateMask()
     }
 
@@ -95,7 +107,7 @@ final class SplitPaneView: NSView {
     }
 
     private func updateMask() {
-        let radius = NookDesign.Radius.page
+        let radius = showsFullscreenPage ? 0 : NookDesign.Radius.page
         // Toggling the border resizes the pane, so this reruns through setFrameSize.
         let outer = settings?.hideWebContentBorder == true ? 0 : radius
         maskLayer.path = TabCompositorWrapper.createUnevenRoundedRectPath(

@@ -102,8 +102,8 @@ final class HoverSidebarManager: ObservableObject {
               let registry = windowRegistry,
               let activeState = registry.activeWindow else { return }
 
-        // Never show overlay while the real sidebar is visible
-        if activeState.isSidebarVisible {
+        // Never show overlay while the real sidebar is visible, or over a fullscreen page
+        if activeState.isSidebarVisible || activeState.showsFullscreenPage {
             if isOverlayVisible {
                 isOverlayVisible = false
             }

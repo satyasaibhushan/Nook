@@ -116,6 +116,19 @@ public class BrowserWindowState {
     /// Compositor version counter for this window (incremented when tab ownership changes)
     public var compositorVersion: Int = 0
 
+    /// The item whose page is in element fullscreen inside this window, nil when none is or
+    /// WebKit's own fullscreen window holds it.
+    public var fullscreenPageID: UUID?
+
+    /// Whether the fullscreen page is on screen, so it takes the whole window and the chrome
+    /// steps aside. In a split it takes both panes' room.
+    public var showsFullscreenPage: Bool {
+        guard let fullscreenPageID, let selectedItemID else { return false }
+        if fullscreenPageID == selectedItemID { return true }
+        guard let split, [split.leftItemID, split.rightItemID].contains(selectedItemID) else { return false }
+        return fullscreenPageID == split.leftItemID || fullscreenPageID == split.rightItemID
+    }
+
     /// The sidebar tab row the pointer is over, for middle-click to close.
     /// Observation-ignored on purpose: this changes on every hover and nothing
     /// renders from it, so tracking it would invalidate views for nothing.

@@ -40,6 +40,7 @@ public struct SettingsAppearanceTab: View {
                 Toggle("Show previews when hovering favorites", isOn: $settings.favoritePreviews)
                 Toggle("Translucent space themes", isOn: $settings.themeTranslucency)
                 Toggle("Hide border", isOn: $settings.hideWebContentBorder)
+                Toggle("Keep fullscreen pages in the window", isOn: $settings.fullscreenInWindow)
             }
             #endif
         }

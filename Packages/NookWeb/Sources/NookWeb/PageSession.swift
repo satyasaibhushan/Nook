@@ -734,8 +734,15 @@ public final class PageSession: NSObject, Identifiable {
                 updateTitle(newTitle)
             }
         } else if keyPath == "fullscreenState", let webView = object as? WKWebView {
-            // The compositor skips its passes while fullscreen; catch up once the page is back.
-            if webView.fullscreenState == .notInFullscreen { controller?.refreshWindows(showing: itemID) }
+            // WebKit's own fullscreen window: the compositor skips its passes meanwhile and
+            // catches up once the page is back. In the browser window, the page takes it over.
+            let isFullscreen = webView.fullscreenState != .notInFullscreen
+            #if os(macOS)
+            let inWindow = isFullscreen && webView.presentsFullscreenInWindow
+            #else
+            let inWindow = false
+            #endif
+            if inWindow || !isFullscreen { controller?.pageFullscreenChanged(itemID: itemID, inWindow: inWindow) }
         } else {
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
         }
