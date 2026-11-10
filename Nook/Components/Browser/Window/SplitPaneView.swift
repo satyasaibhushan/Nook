@@ -56,6 +56,10 @@ final class SplitPaneView: NSView {
             addSubview(host)
             return host
         }
+        let cover = FocusCoverHostingView(itemID: itemID, tabs: browserManager.tabs, gradientColorManager: browserManager.gradientColorManager)
+        cover.frame = bounds
+        cover.autoresizingMask = [.width, .height]
+        addSubview(cover)
         let title = host(URLBarView(isSidebarHovered: false, splitItemID: itemID)
             .environmentObject(browserManager)
             .environmentObject(hoverManager), textCursor: true)

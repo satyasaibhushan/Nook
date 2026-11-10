@@ -65,6 +65,7 @@ struct PeekOverlayView: View {
                     .id(page.itemID)
 
                 BlockedPageView(session: page)
+                FocusCoverView(session: page, shape: AnyShape(NookDesign.Radius.shape(cornerRadius)))
                 TranslationTaskHost(session: page)
 
                 if let webView = page.webView {

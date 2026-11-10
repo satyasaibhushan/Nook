@@ -390,6 +390,14 @@ struct NookCommands: Commands {
                 Button(browserManager.activityRecorder.recordingPaused ? "Resume Recording" : "Pause Recording") {
                     browserManager.activityRecorder.setPaused(!browserManager.activityRecorder.recordingPaused)
                 }
+                Menu("Focus") {
+                    ForEach(browserManager.focus.modes.modes, id: \.name) { mode in
+                        Button(mode.name) { browserManager.focus.start(named: mode.name) }
+                    }
+                    Divider()
+                    Button("End Focus") { browserManager.focus.end() }
+                        .disabled(browserManager.focus.activeMode == nil)
+                }
                 Divider()
                 Menu("Clear Cookies") {
                     Button("Clear Cookies for Current Site") {

@@ -152,6 +152,10 @@ struct SpacesSideBarView: View {
                 .environmentObject(browserManager)
                 .environment(windowState)
 
+            FocusModeIndicator()
+                .environmentObject(browserManager)
+                .environment(windowState)
+
             // Bottom bar (menu, spaces indicators, new space)
             SidebarBottomBar(
                 isMenuButtonHovered: $isMenuButtonHovered,

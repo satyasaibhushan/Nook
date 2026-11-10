@@ -13,6 +13,7 @@ final class ActivityRecorder {
     var modeProvider: () -> String? = { nil }
     private(set) var recordingPaused = false
     let stateStore: ActivityStateStore
+    let machine: String
 
     @ObservationIgnored private let tabs: TabsController
     @ObservationIgnored private let registry: WindowRegistry
@@ -38,7 +39,7 @@ final class ActivityRecorder {
         let directory = tabs.directory.deletingLastPathComponent().appendingPathComponent("Activity", isDirectory: true)
         stateStore = ActivityStateStore(directory: directory)
         writer = ActivityLogWriter(directory: directory)
-        let machine = SCDynamicStoreCopyLocalHostName(nil) as String? ?? ProcessInfo.processInfo.hostName
+        machine = SCDynamicStoreCopyLocalHostName(nil) as String? ?? ProcessInfo.processInfo.hostName
         accounting = ActivityAccounting(machine: machine)
         let store = stateStore
         stateQueue.async { [weak self] in

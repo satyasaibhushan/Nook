@@ -33,6 +33,14 @@ struct NookURLCommandCheck {
             precondition(parse("nook://recording\(suffix)") == nil)
         }
 
+        precondition(parse("nook://focus?mode=Focus")?.action == .focus("Focus"))
+        precondition(parse("nook://focus?mode=deep%20work")?.action == .focus("deep work"))
+        precondition(parse("nook://focus?mode=OFF")?.action == .focus(nil))
+        precondition(parse("nook://focus?mode=off&x=1")?.ignored == ["x"])
+        for suffix in ["", "?mode=", "?mode=%20", "?name=Focus"] {
+            precondition(parse("nook://focus\(suffix)") == nil)
+        }
+
         // Hostile or malformed
         for bad in [
             "nook://open", "nook://open?url=", "nook://open?url=file:///etc/passwd",

@@ -16,6 +16,7 @@ struct MiniBrowserWindowView: View {
             DetachedPageHost(page: page)
                 .underToolbar()
             BlockedPageView(session: page)
+            FocusCoverView(session: page)
             TranslationTaskHost(session: page)
             if let webView = page.webView {
                 PageLoadBar(webView: webView, tint: gradientColorManager.accentColor)
