@@ -9,6 +9,8 @@ kind = sys.argv[3] if len(sys.argv) > 3 else "dom"
 count = int(sys.argv[4]) if len(sys.argv) > 4 else 10
 server = bench.DualStackServer(("::", bench.PORT), bench.Handler); server.daemon_threads = True
 threading.Thread(target=server.serve_forever, daemon=True).start()
+ports = bench.start_new_sites()
+bench.SERVE_FAVICON[0] = "--no-favicon" not in sys.argv
 app = bench.App(app_path); app.defaults()
 state = tempfile.mkdtemp(prefix="nookperf-")
 app.launch(state); time.sleep(3)
@@ -21,3 +23,4 @@ for i in range(count):
 sampler.wait()
 print("cpu", round(app.cpu() - c0, 2))
 app.quit(graceful=False)
+bench.forget_favicons(ports + [bench.PORT])

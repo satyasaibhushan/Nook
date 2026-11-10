@@ -260,7 +260,10 @@ public final class TabsController {
                 let change = try body(&copy)
                 tree = copy
                 if undoable { pushUndo(change) }
-                device.prune(against: tree)
+                // Assigning device notifies every observer, so only do it when pruning dropped something.
+                var pruned = device
+                pruned.prune(against: tree)
+                if pruned != device { device = pruned }
                 save()
                 return change
             case .privateWindow(let window):
@@ -389,6 +392,7 @@ public final class TabsController {
     }
 
     public func session(for webView: WKWebView) -> PageSession? {
+        if let owner = (webView as? SessionWebView)?.owningSession { return owner }
         let coordinator = webViews
         return sessions.first { session in
             session.webView === webView
@@ -591,6 +595,8 @@ public final class TabsController {
         guard let owner = owner(ofItem: itemID) else { return }
         if case .main = owner { livePageCommitted(url, itemID: itemID) }
         guard tree(owner).scope(of: itemID) == .synced else {
+            // didCommit, didFinish and SPA reports repeat the same URL; an unchanged one must not republish the tree.
+            if case .tab(let current, _) = tree(owner).item(itemID)?.kind, current == url { return }
             perform(owner, "setURL", undoable: false) { try $0.setURL(itemID, url) }
             return
         }
@@ -610,6 +616,7 @@ public final class TabsController {
             save()
             return
         }
+        if case .tab(_, let current) = tree(owner).item(itemID)?.kind, current == title { return }
         perform(owner, "setPageTitle", undoable: false) { try $0.setPageTitle(itemID, title) }
     }
 
