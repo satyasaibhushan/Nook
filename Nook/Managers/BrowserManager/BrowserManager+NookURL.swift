@@ -150,8 +150,9 @@ extension BrowserManager {
             switch tabs.section(of: id) {
             case .tabs?: parent = .tabs(spaceID: targetID)
             case .pinned?: parent = .pinned(spaceID: targetID)
+            case .favorites?: parent = .favorites(spaceID: targetID)
             default:
-                nookURLLog.info("Ignored nook:// move: not in tabs or pinned")
+                nookURLLog.info("Ignored nook:// move: no section")
                 return
             }
             tabs.move(id, to: parent, after: tabs.children(of: parent).last?.id)
