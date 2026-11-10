@@ -923,7 +923,9 @@ struct TabCompositorWrapper: NSViewRepresentable {
         let view = coordinator.createWebView(for: session, in: windowId)
         // Only pages in a browser window: Peek and mini windows have no window of this kind to
         // fill, so their views keep WebKit's own fullscreen.
-        view.setPresentsFullscreenInWindow(fullscreenInWindow)
+        // Read live: the resize observer runs this on the wrapper it captured when the view
+        // was made, whose `fullscreenInWindow` is the setting as it was then.
+        view.setPresentsFullscreenInWindow(browserManager.nookSettings?.fullscreenInWindow ?? false)
         return view
     }
 
