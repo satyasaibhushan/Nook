@@ -15,7 +15,7 @@ import NookUI
 
 // MARK: - Status Bar View
 @MainActor
-private final class LinkHoverState: ObservableObject {
+final class LinkHoverState: ObservableObject {
     @Published var hoveredLink: String?
     @Published var isCommandPressed = false
     weak var session: PageSession?
@@ -586,7 +586,7 @@ private struct MagneticCardView: View {
 }
 
 // MARK: - Tab Compositor Wrapper
-private struct TabCompositorWrapper: NSViewRepresentable {
+struct TabCompositorWrapper: NSViewRepresentable {
     let browserManager: BrowserManager
     let hoverManager: HoverSidebarManager
     let linkHover: LinkHoverState
