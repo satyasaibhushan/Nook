@@ -31,7 +31,7 @@ public func activityLogFileName(machine: String, start: Date, calendar: Calendar
                   day.year!, day.month!, day.day!)
 }
 
-public struct ActivityRecord: Codable, Equatable {
+public struct ActivityRecord: Codable, Equatable, Sendable {
     public var v = 1
     public var start: String
     public var end: String
