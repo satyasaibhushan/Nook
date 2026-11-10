@@ -52,6 +52,22 @@ import Foundation
         rows = engine.update(at: time(330), pages: [other], lastInput: time(320), mode: nil)
         precondition(rows.count == 1 && rows[0].record.active == 10)
         _ = engine.update(at: time(340), pages: [], lastInput: base, mode: nil)
+        // An idle gap between resignation and background playback needs no accounting ticks.
+        func idleSequence(skipIdleTicks: Bool) -> [ActivityRecord] {
+            var accounting = ActivityAccounting(machine: "Mac", calendar: calendar)
+            var recorded: [ActivityRecord] = []
+            var sample = page
+            for second in 0...24 {
+                sample.foregroundWindow = second < 5 || second >= 20 ? window : nil
+                sample.playingMedia = second >= 10 && second < 18
+                if skipIdleTicks && ((second > 5 && second < 10) || (second > 18 && second < 20)) { continue }
+                let pages = sample.foregroundWindow != nil || sample.playingMedia ? [sample] : []
+                recorded += accounting.update(at: time(Double(second)), pages: pages, lastInput: base, mode: nil).map(\.record)
+            }
+            recorded += accounting.update(at: time(25), pages: [], lastInput: base, mode: nil).map(\.record)
+            return recorded
+        }
+        precondition(idleSequence(skipIdleTicks: false) == idleSequence(skipIdleTicks: true))
         // Crossing local midnight splits exactly, with the file chosen by each start date.
         page.playingMedia = true
         _ = engine.update(at: time(86390), pages: [page], lastInput: base, mode: nil)
