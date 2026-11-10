@@ -17,6 +17,7 @@
 #if os(macOS)
 import AppKit
 import ObjectiveC
+import OSLog
 import WebKit
 
 extension WKWebView {
@@ -72,12 +73,13 @@ private enum InWindowFullscreen {
         MainActor.assumeIsolated { webViewRef(info).zoom.pageEntered(from: initialFrame) }
     }
     // The page stays fullscreen until the second step is completed, and the app puts its
-    // chrome back when the exit starts. Holding the step until the view has drawn at its
+    // chrome back when the exit starts. Holding the step until the view has changed to its
     // smaller frame lets the page leave fullscreen at the size it ends up with, which is one
     // layout fewer under the zoom.
     private static let exit: Exit = { _, info in
         guard let info else { return }
         MainActor.assumeIsolated {
+            BrowserPerformance.signposter.emitEvent("FullscreenExitCallback")
             webViewRef(info).zoom.pageWillExit()
             webViewRef(info).watchFrame()
         }
@@ -92,6 +94,7 @@ private enum InWindowFullscreen {
             let ref = webViewRef(info)
             ref.afterRedraw {
                 step.finish()
+                BrowserPerformance.signposter.emitEvent("FullscreenHeldStepFinished")
                 ref.zoom.pageExited()
             }
         }
@@ -101,7 +104,7 @@ private enum InWindowFullscreen {
         Unmanaged<WebViewRef>.fromOpaque(info).takeUnretainedValue()
     }
 
-    /// A step WebKit waits on, kept alive until the view has redrawn.
+    /// A step WebKit waits on, kept alive until the view has resized.
     private struct HeldStep: @unchecked Sendable {
         let listener: UnsafeRawPointer
         let release: Release
@@ -140,7 +143,7 @@ private enum InWindowFullscreen {
 
         func afterRedraw(_ proceed: @escaping @MainActor () -> Void) {
             self.proceed = proceed
-            if frameChanged { return afterNextDraw() }
+            if frameChanged { return finish() }
             // A view whose frame is the same either way never changes it, and nothing may
             // keep the page waiting for long.
             Task { [weak self] in
@@ -153,7 +156,7 @@ private enum InWindowFullscreen {
 
         private func frameDidChange() {
             frameChanged = true
-            if proceed != nil { afterNextDraw() }
+            if proceed != nil { finish() }
         }
 
         private func afterNextDraw() {
