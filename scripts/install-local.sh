@@ -41,7 +41,8 @@ echo "Signed build at $STAGED"
 
 # Only the installed app is quit. Other copies (an untouched release, a test build with its own
 # state) share the name and bundle id, so the process is found by its path and quit by its pid.
-installed_pid() { ps -axo pid=,comm= | awk -v bin="$APP/Contents/MacOS/Nook" '$2 == bin {print $1; exit}'; }
+# awk reads ps to the end: exiting early would kill ps with SIGPIPE and fail the script under pipefail.
+installed_pid() { ps -axo pid=,comm= | awk -v bin="$APP/Contents/MacOS/Nook" '$2 == bin && !found {print $1; found = 1}'; }
 PID=$(installed_pid)
 if [ -n "$PID" ]; then
   osascript -l JavaScript -e "ObjC.import('AppKit'); \$.NSRunningApplication.runningApplicationWithProcessIdentifier($PID).terminate" >/dev/null
