@@ -352,7 +352,6 @@ class BrowserManager: ObservableObject {
     var hoveredPinnedTabId: UUID? = nil
     @Published var isSidebarVisible: Bool = true
     @Published var isCommandPaletteVisible: Bool = false
-    // Frame of the URL bar within the window; used to anchor the mini palette precisely
     @Published var shouldShowZoomPopup: Bool = false
     /// The website data store of the active window's space. Not @Published: a switch must not
     /// redraw every view observing BrowserManager.
