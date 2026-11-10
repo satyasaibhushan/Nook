@@ -33,11 +33,9 @@ struct SidebarHoverOverlayView: View {
                     .frame(width: hoverManager.triggerWidth)
                     .contentShape(Rectangle())
                     .onHoverTracking { isIn in
-                        if isIn && !windowState.isSidebarVisible {
-                            withAnimation(NookDesign.Motion.quick) {
-                                hoverManager.isOverlayVisible = true
-                            }
-                        }
+                        // The hotspot can report an enter from a frame it only holds while the
+                        // sidebar animates away, so the manager confirms the pointer is at the edge.
+                        if isIn { hoverManager.checkPointer() }
                         NSCursor.arrow.set()
                     }
 

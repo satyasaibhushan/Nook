@@ -114,6 +114,9 @@ final class HoverSidebarManager: ObservableObject {
     deinit { stop() }
 
     // MARK: - Mouse Logic
+    /// Re-evaluates the overlay against where the pointer is now.
+    func checkPointer() { scheduleHandleMouseMovement() }
+
     private func scheduleHandleMouseMovement() {
         // Ensure main-actor work since we touch NSApp/window and main-actor BrowserManager
         DispatchQueue.main.async { [weak self] in
