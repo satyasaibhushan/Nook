@@ -738,11 +738,15 @@ public final class PageSession: NSObject, Identifiable {
             // catches up once the page is back. In the browser window, the page takes it over.
             let isFullscreen = webView.fullscreenState != .notInFullscreen
             #if os(macOS)
-            let inWindow = isFullscreen && webView.presentsFullscreenInWindow
+            // A page leaving in-window fullscreen counts as out of it at once: its view gets its
+            // smaller frame while WebKit still waits, so the page leaves at its final size.
+            let presentsInWindow = webView.presentsFullscreenInWindow
+            let inWindow = isFullscreen && presentsInWindow && webView.fullscreenState != .exitingFullscreen
             #else
+            let presentsInWindow = false
             let inWindow = false
             #endif
-            if inWindow || !isFullscreen { controller?.pageFullscreenChanged(itemID: itemID, inWindow: inWindow) }
+            if presentsInWindow || !isFullscreen { controller?.pageFullscreenChanged(itemID: itemID, inWindow: inWindow) }
         } else {
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
         }
