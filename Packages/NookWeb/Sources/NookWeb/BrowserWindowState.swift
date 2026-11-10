@@ -103,9 +103,27 @@ public class BrowserWindowState {
     var toastInfo: WindowToastInfo?
 
     /// Presentation flag for the copy URL toast
-    public var isShowingCopyURLToast: Bool = false
+    public var isShowingCopyURLToast: Bool = false {
+        didSet {
+            if isShowingCopyURLToast { restartCopyToastLifetime() }
+            else {
+                ToastLifetime.cancel(for: self)
+                copyToastText = nil
+            }
+        }
+    }
     /// Replaces the copy toast's text for one showing; nil is the URL wording.
-    public var copyToastText: String?
+    public var copyToastText: String? {
+        didSet {
+            if isShowingCopyURLToast { restartCopyToastLifetime() }
+        }
+    }
+
+    private func restartCopyToastLifetime() {
+        ToastLifetime.restart(for: self, after: 2) { [weak self] in
+            self?.isShowingCopyURLToast = false
+        }
+    }
 
     /// Tabs opened in the background while the sidebar was hidden; non-empty shows the toast.
     public var backgroundOpened: [UUID] = []

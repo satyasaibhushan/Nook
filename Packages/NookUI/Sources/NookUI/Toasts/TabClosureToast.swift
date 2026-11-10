@@ -43,12 +43,6 @@ public struct TabClosureToast: View {
             }
         }
         .transition(.toast)
-        .onAppear {
-            // Auto-dismiss after 3 seconds
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                actions?.hideTabClosureToast()
-            }
-        }
         .onTapGesture {
             actions?.hideTabClosureToast()
         }

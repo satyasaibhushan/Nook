@@ -150,13 +150,7 @@ struct FindBarView: View {
         .animation(NookDesign.Motion.standard, value: findManager.isFindBarVisible)
         // Focus management
         .onChange(of: findManager.isFindBarVisible) { _, isVisible in
-            if isVisible {
-                DispatchQueue.main.async {
-                    isTextFieldFocused = true
-                }
-            } else {
-                isTextFieldFocused = false
-            }
+            isTextFieldFocused = isVisible
         }
         // Only handle escape when find bar is visible
         if findManager.isFindBarVisible {
