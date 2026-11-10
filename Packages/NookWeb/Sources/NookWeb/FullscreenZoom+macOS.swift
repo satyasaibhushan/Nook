@@ -16,15 +16,13 @@
 
 #if os(macOS)
 import AppKit
+import OSLog
 import WebKit
 
 @MainActor
 final class FullscreenZoom {
     private static let duration: CFTimeInterval = 0.2
     private static let fade: CFTimeInterval = 0.1
-    /// A page gets no signal when a site's own scripts have finished rearranging it after
-    /// fullscreen. This is how long past its first redraw the cover stays for them.
-    private static let settle: TimeInterval = 0.2
     /// Nothing may leave the cover up if WebKit drops a step.
     private static let limit: TimeInterval = 1.2
 
@@ -120,7 +118,7 @@ final class FullscreenZoom {
         guard element.width >= 1, element.height >= 1, cover.bounds.intersects(element) else { return uncover() }
         entering?.element = element
         aim()
-        uncoverAfterNextDraw(settle: 0)
+        uncoverAfterNextDraw()
     }
 
     private func aim() {
@@ -186,16 +184,36 @@ final class FullscreenZoom {
         zoomEnds = Date(timeIntervalSinceNow: Self.duration)
         afterResize { [weak self] in
             guard let self else { return }
+            BrowserPerformance.signposter.emitEvent("FullscreenShrinkStart")
             self.animate(shot, "bounds", to: CGRect(origin: .zero, size: origin.element.size))
             if origin.corner > 0 { self.animate(shot, "cornerRadius", to: origin.corner) }
             self.animate(cover.scene, "transform", to: CATransform3DIdentity)
             self.zoomEnds = Date(timeIntervalSinceNow: Self.duration)
+            let run = self.run
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.zoomEnds.timeIntervalSinceNow) { [weak self] in
+                guard let self, self.run == run else { return }
+                BrowserPerformance.signposter.emitEvent("FullscreenShrinkEnd")
+            }
         }
     }
 
     /// WebKit has let the page leave fullscreen.
     func pageExited() {
-        uncoverAfterNextDraw(settle: Self.settle)
+        guard let webView else { return uncover() }
+        let run = run
+        var waiting = true
+        let proceed: @MainActor () -> Void = { [weak self] in
+            guard waiting else { return }
+            waiting = false
+            guard let self, self.run == run else { return }
+            self.uncoverAfterNextDraw()
+        }
+        webView.callAsyncJavaScript(
+            "return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
+            arguments: [:], in: nil, in: .defaultClient
+        ) { _ in proceed() }
+        // Hidden pages may never run animation frames, and navigation may drop the reply.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { proceed() }
     }
 
     // MARK: Cover
@@ -278,13 +296,12 @@ final class FullscreenZoom {
         }
     }
 
-    private func uncoverAfterNextDraw(settle: TimeInterval) {
+    private func uncoverAfterNextDraw() {
         let run = run
         guard let webView else { return uncover() }
         webView.afterNextPresentation { [weak self] in
             guard let self, self.run == run else { return }
-            let wait = max(settle, self.zoomEnds.timeIntervalSinceNow)
-            DispatchQueue.main.asyncAfter(deadline: .now() + max(wait, 0)) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(self.zoomEnds.timeIntervalSinceNow, 0)) { [weak self] in
                 guard let self, self.run == run else { return }
                 self.uncover()
             }
@@ -293,6 +310,7 @@ final class FullscreenZoom {
 
     private func uncover() {
         guard let cover, let layer = cover.layer else { return }
+        BrowserPerformance.signposter.emitEvent("FullscreenUncoverStart")
         self.cover = nil
         entering = nil
         leaving = false
