@@ -39,10 +39,14 @@ echo "Signed build at $STAGED"
 
 [ "${1:-}" = "--build" ] && exit 0
 
-if pgrep -x Nook >/dev/null; then
-  osascript -e 'tell application id "com.gstudios.nook" to quit'
-  for _ in $(seq 1 20); do pgrep -x Nook >/dev/null || break; /bin/sleep 0.5; done
-  pgrep -x Nook >/dev/null && { echo "Nook did not quit; nothing was replaced" >&2; exit 1; }
+# Only the installed app is quit. Other copies (an untouched release, a test build with its own
+# state) share the name and bundle id, so the process is found by its path and quit by its pid.
+installed_pid() { ps -axo pid=,comm= | awk -v bin="$APP/Contents/MacOS/Nook" '$2 == bin {print $1; exit}'; }
+PID=$(installed_pid)
+if [ -n "$PID" ]; then
+  osascript -l JavaScript -e "ObjC.import('AppKit'); \$.NSRunningApplication.runningApplicationWithProcessIdentifier($PID).terminate" >/dev/null
+  for _ in $(seq 1 20); do [ -z "$(installed_pid)" ] && break; /bin/sleep 0.5; done
+  [ -n "$(installed_pid)" ] && { echo "Nook did not quit; nothing was replaced" >&2; exit 1; }
 fi
 
 mkdir -p "$BACKUPS"
