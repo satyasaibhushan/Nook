@@ -605,7 +605,7 @@ public final class NookSettingsService {
             topBarAddressViewKey: false,
 
             geminiModelKey: GeminiModel.flash.rawValue,
-            showAIAssistantKey: true,
+            showAIAssistantKey: false,
             browserControlServerKey: false,
             aiProviderKey: AIProvider.gemini.rawValue,
             openRouterModelKey: OpenRouterModel.gpt4o.rawValue,
