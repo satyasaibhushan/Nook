@@ -103,6 +103,9 @@ struct SpaceSwitcherTitle: View {
             Circle()
                 .fill(space.accentColor)
                 .frame(width: NookDesign.Spacing.sm, height: NookDesign.Spacing.sm)
+        } else if SpaceIcon.isEmoji(space.icon) {
+            // SpaceIcon draws emoji at heading size, wider than this 16 pt slot, which clips it.
+            Text(space.icon).font(.system(size: 14)).fixedSize()
         } else {
             SpaceIcon(space.icon).foregroundStyle(.secondary)
         }
