@@ -10,6 +10,12 @@ import UniformTypeIdentifiers
 final class FocusableWKWebView: WKWebView, SessionWebView {
     weak var owningSession: PageSession?
     var contextMenuBridge: WebContextMenuBridge?
+    /// WebKit registers page edits on `undoManager` with a target it frees with the view, and
+    /// clears them through `undoManager` only at teardown. Inherited, that is the window's, and
+    /// a view already detached from the window clears nothing, so a later Cmd+Z in that window
+    /// messages the freed target. A per-view manager lives and dies with the view's own target.
+    private let editUndoManager = UndoManager()
+    override var undoManager: UndoManager? { editUndoManager }
     nonisolated private static let imageContentTypes: [UTType] = [
         .jpeg, .png, .gif, .bmp, .tiff, .webP, .heic, .heif
     ]
@@ -82,6 +88,24 @@ final class FocusableWKWebView: WKWebView, SessionWebView {
             window?.makeFirstResponder(self)
         }
         super.rightMouseDown(with: event)
+    }
+
+    // NSWindow's undo: acts on the window's manager, so the view answers Edit > Undo and Redo
+    // for its own page edits before the action reaches the window.
+    @objc func undo(_ sender: Any?) { editUndoManager.undo() }
+    @objc func redo(_ sender: Any?) { editUndoManager.redo() }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(undo(_:)):
+            (item as? NSMenuItem)?.title = editUndoManager.undoMenuItemTitle
+            return editUndoManager.canUndo
+        case #selector(redo(_:)):
+            (item as? NSMenuItem)?.title = editUndoManager.redoMenuItemTitle
+            return editUndoManager.canRedo
+        default:
+            return super.validateUserInterfaceItem(item)
+        }
     }
 
     /// Never while hidden under the person's page as the agent's: it would take their typing.
