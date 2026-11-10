@@ -58,6 +58,7 @@ final class FavoritePreview {
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, tileUnderPointer == item.id else { return }
             let rows = await load(item, tabs: tabs)
+            await HoverResync.waitForMenuTracking()
             guard !Task.isCancelled, tileUnderPointer == item.id else { return }
             guard !rows.isEmpty else { return dismiss() }
             self.rows = rows
@@ -82,6 +83,7 @@ final class FavoritePreview {
         pending?.cancel()
         pending = Task {
             try? await Task.sleep(for: Self.closeDelay)
+            await HoverResync.waitForMenuTracking()
             guard !Task.isCancelled, tileUnderPointer == nil, !pointerOverCard else { return }
             dismiss()
         }
