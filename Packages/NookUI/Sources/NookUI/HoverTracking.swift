@@ -110,7 +110,7 @@ private final class HoverActivationRegistry {
                 guard let self, let window = notification.object as? NSWindow else { return }
                 let perfID = OSSignpostID(log: BrowserPerformance.hover)
                 os_signpost(.begin, log: BrowserPerformance.hover, name: "HoverActivationScan", signpostID: perfID)
-                let recording = os_signpost_enabled(BrowserPerformance.hover)
+                let recording = BrowserPerformance.hover.signpostsEnabled
                 var visited = 0, matching = 0, changed = 0, queued = 0
                 for view in self.views.allObjects {
                     if recording { visited += 1 }

@@ -648,7 +648,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
 
         if needsRebuild {
             let previousCurrentId = context.coordinator.lastCurrentId
-            let sizeOnly = os_signpost_enabled(BrowserPerformance.compositor) &&
+            let sizeOnly = BrowserPerformance.compositor.signpostsEnabled &&
                 context.coordinator.lastIsSplit == isSplit &&
                 context.coordinator.lastLeftId == leftId && context.coordinator.lastRightId == rightId &&
                 context.coordinator.lastCurrentId == currentId &&
