@@ -19,6 +19,7 @@ final class GradientColorManager: ObservableObject {
 
     /// Set the accent with no animation (window setup, non-active windows).
     func setImmediate(_ gradient: SpaceGradient) {
+        guard accentColor != gradient.primaryColor else { return }
         var tx = Transaction()
         tx.disablesAnimations = true
         withTransaction(tx) {
