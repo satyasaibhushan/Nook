@@ -67,6 +67,12 @@ public final class TabsController {
     /// Collects the changes of one multi-item intent into a single undo step (`grouped`).
     @ObservationIgnored private var undoGroup: Change?
     @ObservationIgnored private var isTerminating = false
+
+    private struct HeldReport { var url: URL?; var title: String? }
+    private static let reportInterval: Duration = .seconds(1)
+    @ObservationIgnored private var heldReports: [UUID: HeldReport] = [:]
+    @ObservationIgnored private var heldReportFlush: Task<Void, Never>?
+    @ObservationIgnored private var lastReportApplied = ContinuousClock.now - .seconds(60)
     @ObservationIgnored public let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Nook", category: "Tabs")
 
     // MARK: - Injected
@@ -190,6 +196,7 @@ public final class TabsController {
     /// Writes now, with every regular window's current frame. Called at quit; windows closing
     /// afterwards keep their records so they all reopen.
     public func flushSync() {
+        applyHeldReports()
         isTerminating = true
         for window in regularWindows { mirror(window) }
         store.save(tree, device)
@@ -592,6 +599,47 @@ public final class TabsController {
     /// A committed navigation or SPA URL change. Device items store it as their URL; synced items
     /// keep their home URL and store the open page instead.
     func pageCommitted(itemID: UUID, url: URL) {
+        if holdsReport(for: itemID, { $0.url = url }) { return }
+        applyPageCommitted(itemID: itemID, url: url)
+    }
+
+    func pageTitleChanged(itemID: UUID, title: String) {
+        if holdsReport(for: itemID, { $0.title = title }) { return }
+        applyPageTitle(itemID: itemID, title: title)
+    }
+
+    /// Rows and the address bar show a loaded page's own title and URL, so the saved copy can lag.
+    /// Every edit to it redraws each view that reads the tabs, and a page that keeps retitling
+    /// itself or rewriting its address would cause that many times a second. The first report
+    /// after a quiet spell lands at once; the ones that follow wait and land together.
+    private func holdsReport(for itemID: UUID, _ record: (inout HeldReport) -> Void) -> Bool {
+        let now = ContinuousClock.now
+        if heldReports.isEmpty, heldReportFlush == nil, now - lastReportApplied >= Self.reportInterval {
+            lastReportApplied = now
+            return false
+        }
+        record(&heldReports[itemID, default: HeldReport()])
+        guard heldReportFlush == nil else { return true }
+        heldReportFlush = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.reportInterval)
+            self?.applyHeldReports()
+        }
+        return true
+    }
+
+    func applyHeldReports() {
+        heldReportFlush?.cancel()
+        heldReportFlush = nil
+        lastReportApplied = .now
+        let reports = heldReports
+        heldReports = [:]
+        for (itemID, report) in reports {
+            if let url = report.url { applyPageCommitted(itemID: itemID, url: url) }
+            if let title = report.title { applyPageTitle(itemID: itemID, title: title) }
+        }
+    }
+
+    private func applyPageCommitted(itemID: UUID, url: URL) {
         guard let owner = owner(ofItem: itemID) else { return }
         if case .main = owner { livePageCommitted(url, itemID: itemID) }
         guard tree(owner).scope(of: itemID) == .synced else {
@@ -607,7 +655,7 @@ public final class TabsController {
         save()
     }
 
-    func pageTitleChanged(itemID: UUID, title: String) {
+    private func applyPageTitle(itemID: UUID, title: String) {
         guard let owner = owner(ofItem: itemID) else { return }
         if case .main = owner, tree.scope(of: itemID) == .synced {
             guard var page = device.openPages[itemID], page.title != title else { return }
