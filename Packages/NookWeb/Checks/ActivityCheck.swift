@@ -194,12 +194,15 @@ import Foundation
         try Data().write(to: blockedLogs)
         retry.write(closed: [firstStretch], open: [])
         retry.drain { drained.signal() }; drained.wait()
-        try FileManager.default.removeItem(at: blockedLogs)
         retry.write(closed: [nextStretch], open: [])
+        retry.drain { drained.signal() }; drained.wait()
+        try FileManager.default.removeItem(at: blockedLogs)
+        let laterStretch = ActivityAccounting.Stretch(id: UUID(), fileName: firstStretch.fileName, record: firstStretch.record)
+        retry.write(closed: [laterStretch], open: [])
         retry.drain { drained.signal() }; drained.wait()
         let retriedLog = try Data(contentsOf: blockedLogs.appendingPathComponent(firstStretch.fileName))
         let retriedRows = try retriedLog.split(separator: 0x0a).map { try JSONDecoder().decode(ActivityRecord.self, from: Data($0)) }
-        precondition(retriedRows == [firstStretch.record, nextStretch.record])
+        precondition(retriedRows == [firstStretch.record, nextStretch.record, laterStretch.record])
         let stateData = try Data(contentsOf: store.url)
         try Data("not JSON".utf8).write(to: store.url)
         do {
