@@ -121,27 +121,7 @@ struct NookCommands: Commands {
         }
         
 
-        // Edit Section
-        CommandGroup(replacing: .undoRedo) {
-            Button("Undo") {
-                if KeyboardShortcutManager.textHasFocus, NSApp.keyWindow?.firstResponder?.undoManager?.canUndo == true {
-                    NSApp.sendAction(Selector(("undo:")), to: nil, from: nil)
-                } else if let window = windowRegistry.activeWindow {
-                    browserManager.tabs.reopenLastClosed(in: window)
-                }
-            }
-            .modifier(dynamicShortcut(.undoCloseTab))
-
-            Button("Redo") {
-                NSApp.sendAction(Selector(("redo:")), to: nil, from: nil)
-            }
-            .keyboardShortcut("z", modifiers: [.command, .shift])
-
-            Button("Reopen Closed Tab") {
-                if let window = windowRegistry.activeWindow { browserManager.tabs.reopenLastClosed(in: window) }
-            }
-            .keyboardShortcut("t", modifiers: [.command, .shift])
-        }
+        // The Edit menu keeps the system's Undo and Redo, so Cmd+Z edits text in pages and fields.
 
         // File Section
         CommandGroup(after: .newItem) {
@@ -374,6 +354,13 @@ struct NookCommands: Commands {
                 }
                 .modifier(dynamicShortcut(.goForward))
                 .disabled(browserManager.tabs.activeWindowSession?.canGoForward != true)
+
+                Divider()
+
+                Button("Reopen Closed Tab") {
+                    if let window = windowRegistry.activeWindow { browserManager.tabs.reopenLastClosed(in: window) }
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
             }
 
             CommandMenu("Spaces") {
