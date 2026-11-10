@@ -25,7 +25,9 @@ extension FaviconCache {
                     FaviconFetches.failures[key] = Date()
                     return nil
                 }
-                self.store(image, for: key)
+                // A page of this host may have loaded and stored its own icon while this request ran.
+                if let fromPage = self.image(for: key) { return fromPage }
+                self.store(image, for: key, toDisk: true, provisional: true)
                 return self.image(for: key) ?? image
             }
             FaviconFetches.inFlight[key] = task

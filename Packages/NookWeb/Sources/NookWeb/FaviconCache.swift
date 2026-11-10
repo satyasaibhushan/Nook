@@ -91,7 +91,10 @@ public final class FaviconCache: @unchecked Sendable {
         store(image, for: key, toDisk: true)
     }
 
-    func store(_ image: PlatformImage, for key: String, toDisk: Bool) {
+    /// A `provisional` icon came from a request made without the page's login, which for a site
+    /// behind sign-in is the sign-in page's icon. Its file is dated as stale, so the first loaded
+    /// page of that host replaces it instead of trusting it for a day.
+    func store(_ image: PlatformImage, for key: String, toDisk: Bool, provisional: Bool = false) {
         let image = Self.boundedForCache(image)
         insert(image, for: key)
         guard toDisk else { return }
@@ -100,6 +103,8 @@ public final class FaviconCache: @unchecked Sendable {
         let url = fileURL(key)
         queue.async(flags: .barrier) {
             try? png.write(to: url)
+            guard provisional else { return }
+            try? FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: url.path)
         }
     }
 
