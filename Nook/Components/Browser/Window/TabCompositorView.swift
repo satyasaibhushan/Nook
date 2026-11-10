@@ -319,7 +319,10 @@ class TabCompositorManager: ObservableObject {
             guard let lastAccess = lastAccessTimes[session.itemID] else { return true }
             return now.timeIntervalSince(lastAccess) > gracePeriod
         }
-        let toUnload = eligible.sorted { importance($0) < importance($1) }.prefix(max(0, loaded.count - maxTabs))
+        let toUnload = eligible.map { (session: $0, importance: importance($0)) }
+            .sorted { $0.importance < $1.importance }
+            .prefix(max(0, loaded.count - maxTabs))
+            .map(\.session)
         Self.log.notice(
             "budget: cap \(maxTabs, privacy: .public), unloadable \(loaded.count, privacy: .public), evicting \(toUnload.count, privacy: .public)")
         toUnload.forEach { evict($0, reason: .budget) }
