@@ -48,7 +48,7 @@ struct PinnedGrid: View {
         let items: [Item] = effectiveSpaceID.map { tabs.favorites(of: $0) } ?? []
         let colsCount: Int = columnCount(for: width, itemCount: items.count)
 
-        let shouldAnimate = (windowRegistry.activeWindow?.id == windowState.id) && !browserManager.isSwitchingSpace
+        let shouldAnimate = (windowRegistry.activeWindow?.id == windowState.id) && !windowState.isSwitchingSpace
 
         if let spaceID = effectiveSpaceID {
             let zone = DropZoneID.favorites(spaceID: spaceID)
@@ -117,7 +117,7 @@ struct PinnedGrid: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .animation(shouldAnimate ? NookDesign.Motion.standard : nil, value: colsCount)
                 .animation(shouldAnimate ? NookDesign.Motion.standard : nil, value: items.count)
-                .allowsHitTesting(!browserManager.isSwitchingSpace)
+                .allowsHitTesting(!windowState.isSwitchingSpace)
             }
         }
     }

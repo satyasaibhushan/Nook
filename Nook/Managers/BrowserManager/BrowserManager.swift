@@ -349,13 +349,10 @@ final class Persistence {
 class BrowserManager: ObservableObject {
     // Legacy global state - kept for backward compatibility during transition
     /// Tracks which pinned tab tile is hovered (for middle-click → reset to pinned URL)
-    @Published var hoveredPinnedTabId: UUID? = nil
-    @Published var sidebarWidth: CGFloat = SidebarWidth.standard
-    @Published var sidebarContentWidth: CGFloat = 234
+    var hoveredPinnedTabId: UUID? = nil
     @Published var isSidebarVisible: Bool = true
     @Published var isCommandPaletteVisible: Bool = false
     // Frame of the URL bar within the window; used to anchor the mini palette precisely
-    @Published var urlBarFrame: CGRect = .zero
     @Published var shouldShowZoomPopup: Bool = false
     /// The website data store of the active window's space. Not @Published: a switch must not
     /// redraw every view observing BrowserManager.
@@ -372,8 +369,7 @@ class BrowserManager: ObservableObject {
 
     /// True for the length of a space change, so views do not animate content from the old space
     /// into the new one.
-    @Published var isSwitchingSpace: Bool = false
-    private var transitionEndTask: Task<Void, Never>?
+    private var transitionEndTasks: [UUID: Task<Void, Never>] = [:]
     // Tab closure undo notification
     @Published var showTabClosureToast: Bool = false
     @Published var tabClosureToastCount: Int = 0
@@ -614,23 +610,23 @@ class BrowserManager: ObservableObject {
     /// follow it. Only the active window's space sets the app-wide managers.
     func windowSpaceChanged(_ windowState: BrowserWindowState) {
         guard !windowState.isIncognito else { return }
+        windowState.isSwitchingSpace = true
+        transitionEndTasks[windowState.id]?.cancel()
+        transitionEndTasks[windowState.id] = Task { [weak windowState] in
+            try? await Task.sleep(for: .seconds(Self.spaceSwitchDuration))
+            guard !Task.isCancelled else { return }
+            windowState?.isSwitchingSpace = false
+        }
         guard windowRegistry?.activeWindow == nil || windowRegistry?.activeWindow?.id == windowState.id else { return }
         guard let spaceID = windowState.spaceID, let profile = tabs.profile(forSpace: spaceID),
               currentProfile?.id != profile.id else { return }
 
-        isSwitchingSpace = true
         currentProfile = profile
         // No animation transaction: one here made the window render mid-switch. Settings loads
         // the cookie and data lists when it opens; reading them here stalled the switch.
         cookieManager.switchDataStore(profile.dataStore, profileId: profile.id, eagerLoad: false)
         cacheManager.switchDataStore(profile.dataStore, profileId: profile.id, eagerLoad: false)
         historyManager.switchProfile(profile.id)
-        transitionEndTask?.cancel()
-        transitionEndTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.spaceSwitchDuration))
-            guard !Task.isCancelled else { return }
-            self?.isSwitchingSpace = false
-        }
     }
 
     private static let spaceSwitchDuration: TimeInterval = 0.2
@@ -640,9 +636,7 @@ class BrowserManager: ObservableObject {
             updateSidebarWidth(width, for: activeWindow)
             return
         }
-        sidebarWidth = width
         savedSidebarWidth = width
-        sidebarContentWidth = max(width - 16, 0)
     }
 
     func updateSidebarWidth(_ width: CGFloat, for windowState: BrowserWindowState) {
@@ -650,10 +644,8 @@ class BrowserManager: ObservableObject {
         windowState.savedSidebarWidth = width
         windowState.sidebarContentWidth = max(width - 16, 0)
         if windowRegistry?.activeWindow?.id == windowState.id {
-            sidebarWidth = width
-            savedSidebarWidth = width
-            sidebarContentWidth = max(width - 16, 0)
-        }
+                savedSidebarWidth = width
+            }
     }
 
     func saveSidebarWidthToDefaults() {
@@ -680,9 +672,7 @@ class BrowserManager: ObservableObject {
         if !windowState.isSidebarVisible { sidebarPiPSidebarHidden(in: windowState) }
         if windowRegistry?.activeWindow?.id == windowState.id {
             isSidebarVisible = windowState.isSidebarVisible
-            sidebarWidth = windowState.sidebarWidth
             savedSidebarWidth = windowState.savedSidebarWidth
-            sidebarContentWidth = windowState.sidebarContentWidth
         }
         saveSidebarSettings()
     }
@@ -854,13 +844,10 @@ class BrowserManager: ObservableObject {
             // A width saved under an older, smaller minimum would hide the history buttons.
             savedSidebarWidth = min(min(max(savedWidth, SidebarWidth.min), SidebarWidth.max), SidebarWidth.max)
             // Kept while hidden: showing the sidebar does not restore it, and the hover overlay uses it.
-            sidebarWidth = savedSidebarWidth
         } else {
             // First launch: ensure sidebar is visible with default width
             savedSidebarWidth = SidebarWidth.standard
-            sidebarWidth = SidebarWidth.standard
         }
-        sidebarContentWidth = max(sidebarWidth - 16, 0)
 
         // On first launch, default to visible sidebar
         isSidebarVisible = isFirstLaunch ? true : savedVisibility
@@ -984,14 +971,13 @@ class BrowserManager: ObservableObject {
     /// split from TabsController (an unclaimed saved window record when there is one), then its
     /// selected page. The first regular window also reopens the other saved windows.
     func setupWindowState(_ windowState: BrowserWindowState) {
-        windowState.sidebarWidth = sidebarWidth
-        windowState.sidebarContentWidth = max(sidebarWidth - 16, 0)
+        windowState.sidebarWidth = savedSidebarWidth
+        windowState.sidebarContentWidth = max(savedSidebarWidth - 16, 0)
         windowState.isSidebarVisible = isSidebarVisible
         windowState.savedSidebarWidth = savedSidebarWidth
         windowState.isCommandPaletteVisible = false
         windowState.sidebarPiPController = SidebarPiPController(windowState: windowState)
         // NSWindow reference is set by WindowFocusBridge.attach in ContentView
-        windowState.urlBarFrame = urlBarFrame
 
         tabs.attach(window: windowState)
         guard !windowState.isIncognito else { return }
@@ -1006,11 +992,8 @@ class BrowserManager: ObservableObject {
     func setActiveWindowState(_ windowState: BrowserWindowState) {
         // DO NOT call windowRegistry?.setActive(windowState) here - that would cause infinite recursion!
         // This method is called FROM the onActiveWindowChange callback
-        sidebarWidth = windowState.sidebarWidth
         savedSidebarWidth = windowState.savedSidebarWidth
-        sidebarContentWidth = windowState.sidebarContentWidth
         isSidebarVisible = windowState.isSidebarVisible
-        urlBarFrame = windowState.urlBarFrame
         // Regular windows get their space accent from WindowView; private windows keep their own look.
         if windowState.isIncognito {
             gradientColorManager.setImmediate(.incognito)
