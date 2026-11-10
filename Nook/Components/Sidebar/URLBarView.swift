@@ -561,10 +561,6 @@ struct URLBarView: View {
             }
         }
         
-        // Hide toast after 2 seconds
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            windowState.isShowingCopyURLToast = false
-        }
     }
 }
 

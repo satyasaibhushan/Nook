@@ -158,10 +158,6 @@ extension BrowserManager {
             NotificationCenter.default.post(name: .miniWindowCopiedURL, object: page)
         } else if let state {
             state.isShowingCopyURLToast = true
-            Task { [weak state] in
-                try? await Task.sleep(for: .seconds(2))
-                state?.isShowingCopyURLToast = false
-            }
         }
     }
 

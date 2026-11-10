@@ -50,11 +50,6 @@ extension BrowserManager {
         guard let windowState = windowRegistry?.activeWindow else { return }
         windowState.copyToastText = text
         windowState.isShowingCopyURLToast = true
-        Task { [weak windowState] in
-            try? await Task.sleep(for: .seconds(2))
-            windowState?.isShowingCopyURLToast = false
-            windowState?.copyToastText = nil
-        }
     }
 
     /// The element's on-screen part as a PNG in Caches/DevPicks; picks older than a day are deleted.

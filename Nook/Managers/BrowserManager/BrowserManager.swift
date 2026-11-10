@@ -1228,9 +1228,8 @@ class BrowserManager: ObservableObject {
         tabClosureToastCount = tabCount
         showTabClosureToast = true
 
-        // Auto-hide the toast after 3 seconds
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            self.hideTabClosureToast()
+        ToastLifetime.restart(for: self, after: 3) { [weak self] in
+            self?.hideTabClosureToast()
         }
     }
 
