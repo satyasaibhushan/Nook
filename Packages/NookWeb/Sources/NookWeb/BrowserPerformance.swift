@@ -31,7 +31,7 @@ public enum BrowserPerformance {
     #endif
 
     public static let signposter = OSSignposter(
-        subsystem: Bundle.main.bundleIdentifier ?? "Nook", category: "Performance")
+        subsystem: "Nook.Perf", category: "Performance")
 }
 
 /// Launch to first paint, the headline startup number. Measured from the kernel's process start
