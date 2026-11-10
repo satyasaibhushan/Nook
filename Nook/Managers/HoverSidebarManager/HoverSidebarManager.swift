@@ -34,6 +34,7 @@ final class HoverSidebarManager: ObservableObject {
     weak var nookSettings: NookSettingsService?
 
     // MARK: - Monitors
+    private static weak var monitorOwner: HoverSidebarManager?
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var isActive: Bool = false
@@ -63,6 +64,18 @@ final class HoverSidebarManager: ObservableObject {
         self.browserManager = browserManager
     }
 
+    func updateMonitoring(for state: BrowserWindowState) {
+        let eligible = NSApp.isActive && windowRegistry?.activeWindow?.id == state.id
+            && !state.isSidebarVisible && !state.showsFullscreenPage
+        guard eligible else { stop(); return }
+        if Self.monitorOwner !== self {
+            Self.monitorOwner?.stop()
+            Self.monitorOwner = self
+        }
+        start()
+        scheduleHandleMouseMovement()
+    }
+
     func start() {
         guard !isActive else { return }
         isActive = true
@@ -81,6 +94,7 @@ final class HoverSidebarManager: ObservableObject {
 
     func stop() {
         isActive = false
+        if Self.monitorOwner === self { Self.monitorOwner = nil }
         if let token = localMonitor { NSEvent.removeMonitor(token); localMonitor = nil }
         if let token = globalMonitor { NSEvent.removeMonitor(token); globalMonitor = nil }
         DispatchQueue.main.async { [weak self] in self?.isOverlayVisible = false }
