@@ -39,12 +39,21 @@ extension PageSession {
         const token = crypto.randomUUID();
         let last = null;
         let lastReport = 0;
+        // Live collections: asking them costs nothing when the document has no media, where a
+        // selector query walks the whole page every time.
+        const audio = document.getElementsByTagName('audio');
+        const video = document.getElementsByTagName('video');
+        function elementPlaying(list) {
+            for (const element of list) {
+                if (!element.paused && !element.ended && element.readyState >= 2) return true;
+            }
+            return false;
+        }
         function report(forceStopped = false) {
-            const playing = !forceStopped && (
-                Array.from(document.querySelectorAll('audio, video')).some(element =>
-                    !element.paused && !element.ended && element.readyState >= 2) ||
+            const playing = !forceStopped && (elementPlaying(audio) || elementPlaying(video) ||
                 navigator.mediaSession?.playbackState === 'playing');
-            if (playing !== last || Date.now() - lastReport >= 10000) {
+            // Only a playing frame needs to keep saying so; a silent one is already counted as stopped.
+            if (playing !== last || (playing && Date.now() - lastReport >= 10000)) {
                 last = playing;
                 lastReport = Date.now();
                 window.webkit?.messageHandlers?.nookActivityMedia?.postMessage({document: token, playing});
@@ -55,8 +64,11 @@ extension PageSession {
         window.addEventListener('pagehide', () => report(true));
         window.addEventListener('pageshow', () => report());
         // Media Session has no playbackstatechange event; also expire removed frames natively.
-        setInterval(report, 1000);
-        report();
+        // A frame with nothing playing is checked less often, so idle tabs wake less.
+        (function poll() {
+            report();
+            setTimeout(poll, last ? 1000 : 5000);
+        })();
     })();
     """
 }
