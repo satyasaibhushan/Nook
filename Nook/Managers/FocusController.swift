@@ -75,10 +75,11 @@ final class FocusController {
             let descriptor = open(path.path, O_EVTONLY)
             guard descriptor >= 0 else { continue }
             let monitor = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: .main)
-            monitor.setEventHandler { [weak self] in
+            monitor.setEventHandler { [weak self, weak monitor] in
                 MainActor.assumeIsolated {
                     self?.reconcileFiles()
-                    if index == 0 { self?.watchFiles() }
+                    // A replaced file leaves this descriptor on the old one.
+                    if index == 0 || monitor?.data.isDisjoint(with: [.rename, .delete]) == false { self?.watchFiles() }
                 }
             }
             monitor.setCancelHandler { close(descriptor) }
