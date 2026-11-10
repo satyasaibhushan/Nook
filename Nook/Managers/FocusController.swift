@@ -67,6 +67,9 @@ final class FocusController {
     }
 
     private func watchFiles() {
+        let perfID = OSSignpostID(log: BrowserPerformance.activity)
+        os_signpost(.begin, log: BrowserPerformance.activity, name: "FocusWatchFiles", signpostID: perfID)
+        defer { os_signpost(.end, log: BrowserPerformance.activity, name: "FocusWatchFiles", signpostID: perfID) }
         fileMonitors.forEach { $0.cancel() }
         fileMonitors.removeAll()
         let files = labeller.files
@@ -89,6 +92,9 @@ final class FocusController {
     }
 
     private func reconcileFiles() {
+        let perfID = OSSignpostID(log: BrowserPerformance.activity)
+        os_signpost(.begin, log: BrowserPerformance.activity, name: "FocusReconcileFiles", signpostID: perfID)
+        defer { os_signpost(.end, log: BrowserPerformance.activity, name: "FocusReconcileFiles", signpostID: perfID) }
         labeller.reloadIfChanged()
         reloadModesIfChanged()
     }

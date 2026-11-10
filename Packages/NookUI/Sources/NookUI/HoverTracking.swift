@@ -7,6 +7,8 @@
 // (MultiViewResponder.containsGlobalPoints) on every mouse move.
 // NSTrackingArea delegates hover detection to AppKit, bypassing the traversal.
 
+import OSLog
+import NookWeb
 import SwiftUI
 #if os(macOS)
 import AppKit
@@ -79,6 +81,7 @@ final class HoverTrackingNSView: NSView {
 
     private func setHover(_ value: Bool) {
         guard !HoverResync.isMenuTracking, value != isHovered else { return }
+        os_signpost(.event, log: BrowserPerformance.hover, name: "HoverChanged", "%{public}d", value ? 1 : 0)
         isHovered = value
         onHover?(value)
     }
@@ -105,10 +108,24 @@ private final class HoverActivationRegistry {
         observers.append(center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] notification in
             MainActor.assumeIsolated {
                 guard let self, let window = notification.object as? NSWindow else { return }
-                for view in self.views.allObjects where view.window === window && !view.always {
+                let perfID = OSSignpostID(log: BrowserPerformance.hover)
+                os_signpost(.begin, log: BrowserPerformance.hover, name: "HoverActivationScan", signpostID: perfID)
+                let recording = os_signpost_enabled(BrowserPerformance.hover)
+                var visited = 0, matching = 0, changed = 0, queued = 0
+                for view in self.views.allObjects {
+                    if recording { visited += 1 }
+                    guard view.window === window && !view.always else { continue }
+                    if recording { matching += 1 }
                     let point = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-                    if view.isHovered || view.visibleRect.contains(point) { view.resyncHover() }
+                    let inside = recording || !view.isHovered ? view.visibleRect.contains(point) : false
+                    if recording && inside != view.isHovered { changed += 1 }
+                    if view.isHovered || inside {
+                        if recording { queued += 1 }
+                        view.resyncHover()
+                    }
                 }
+                os_signpost(.end, log: BrowserPerformance.hover, name: "HoverActivationScan", signpostID: perfID,
+                            "visited=%{public}d matching=%{public}d changed=%{public}d queued=%{public}d", visited, matching, changed, queued)
             }
         })
         observers.append(center.addObserver(forName: HoverResync.notification, object: nil, queue: .main) { [weak self] _ in
