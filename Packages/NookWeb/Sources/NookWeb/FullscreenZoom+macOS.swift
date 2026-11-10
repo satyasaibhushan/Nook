@@ -316,7 +316,20 @@ final class FullscreenZoom {
         leaving = false
         run += 1
         CATransaction.begin()
-        CATransaction.setCompletionBlock { cover.removeFromSuperview() }
+        CATransaction.setCompletionBlock { [weak webView] in
+            cover.removeFromSuperview()
+            BrowserPerformance.signposter.emitEvent("FullscreenCoverRemoved")
+            guard let webView, !webView.isHiddenOrHasHiddenAncestor,
+                  let window = webView.window, window.isKeyWindow else { return }
+            let location = window.mouseLocationOutsideOfEventStream
+            guard webView.visibleRect.contains(webView.convert(location, from: nil)),
+                  let event = NSEvent.mouseEvent(
+                    with: .mouseMoved, location: location, modifierFlags: NSEvent.modifierFlags,
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
+            else { return }
+            webView.mouseMoved(with: event)
+        }
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = 1
         fade.toValue = 0

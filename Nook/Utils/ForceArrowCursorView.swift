@@ -33,7 +33,6 @@ private final class ForceArrowCursorNSView: NSView {
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .arrow)
-        NSCursor.arrow.set()
     }
 
     override func mouseEntered(with event: NSEvent) {
