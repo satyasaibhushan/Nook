@@ -131,23 +131,18 @@ public final class FaviconCache: @unchecked Sendable {
 
     // MARK: - Private
 
+    /// Evicts from memory only. The disk copy stays: saved and pinned rows with no live page have
+    /// no other source, and deleting it lost their icons once 200 hosts had been visited.
     private func insert(_ image: PlatformImage, for key: String) {
-        var evicted: [String] = []
         lock.withLock {
             memory[key] = image
             order.removeAll { $0 == key }
             order.append(key)
             if memory.count > Self.maxMemoryEntries {
                 let count = memory.count - Self.maxMemoryEntries + 20
-                evicted = Array(order.prefix(count))
-                for old in evicted { memory.removeValue(forKey: old) }
+                for old in order.prefix(count) { memory.removeValue(forKey: old) }
                 order.removeFirst(min(count, order.count))
             }
-        }
-        guard !evicted.isEmpty else { return }
-        let urls = evicted.map(fileURL)
-        queue.async(flags: .barrier) {
-            for url in urls { try? FileManager.default.removeItem(at: url) }
         }
     }
 

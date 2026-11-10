@@ -32,7 +32,8 @@ extension TabsController {
 
 // MARK: - Favicon
 
-/// A row or tile favicon: the live page's, else the cached one for the item's host, else a globe.
+/// A row or tile favicon: the live page's, else the cached one for the item's host, else one
+/// fetched from the site for a row with no page, else a globe.
 public struct ItemFavicon: View {
     let item: Item
     let session: PageSession?
@@ -51,8 +52,13 @@ public struct ItemFavicon: View {
             // the row, and the cached icon must be loaded then.
             .task(id: "\(item.url.flatMap(FaviconCache.key) ?? "")|\(session == nil)") {
                 session?.ensureFaviconLoaded()
-                guard let host = item.url.flatMap(FaviconCache.key),
-                      let image = await FaviconCache.shared.cachedImage(for: host) else { return }
+                guard let url = item.url, let host = FaviconCache.key(for: url) else { return }
+                // A live page fetches its own icon, with its private-window rules; only a saved or
+                // pinned row with no page goes to the network here.
+                let image = session == nil
+                    ? await FaviconCache.shared.image(fetchingIfMissing: url)
+                    : await FaviconCache.shared.cachedImage(for: host)
+                guard let image, !Task.isCancelled else { return }
                 cached = Image(platformImage: image)
             }
     }
