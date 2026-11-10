@@ -64,6 +64,7 @@ final class HoverSidebarManager: ObservableObject {
         self.browserManager = browserManager
     }
 
+    @MainActor
     func updateMonitoring(for state: BrowserWindowState) {
         let eligible = NSApp.isActive && windowRegistry?.activeWindow?.id == state.id
             && !state.isSidebarVisible && !state.showsFullscreenPage
