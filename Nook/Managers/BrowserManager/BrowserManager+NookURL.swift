@@ -33,6 +33,9 @@ extension BrowserManager {
             // Like recording, a Focus command never brings Nook forward.
             if let name { focus.start(named: name) } else { focus.end() }
             return
+        case .report(let days):
+            openActivityReport(days: days)
+            return
         case .open, .search, .switchSpace:
             break
         case .reopen(let id):
@@ -106,7 +109,7 @@ extension BrowserManager {
             guard let template = nookSettings?.resolvedSearchEngineTemplate,
                   let url = NookURLCommand.searchURL(for: query, template: template) else { return }
             openFromLauncher(url, reuse: false, space: spaceID, explicit: command.space != nil, in: window)
-        case .recording, .focus, .close, .pin, .unpin, .reload, .move, .select, .reopen, .folder, .rename, .favorite, .unfavorite:
+        case .recording, .focus, .report, .close, .pin, .unpin, .reload, .move, .select, .reopen, .folder, .rename, .favorite, .unfavorite:
             break
         }
     }
@@ -185,7 +188,7 @@ extension BrowserManager {
             }
             guard let window = openBrowserWindow(), !window.isIncognito else { return }
             tabs.select(id, in: window)
-        case .recording, .focus, .open, .search, .switchSpace, .reopen, .folder:
+        case .recording, .focus, .report, .open, .search, .switchSpace, .reopen, .folder:
             break
         }
     }

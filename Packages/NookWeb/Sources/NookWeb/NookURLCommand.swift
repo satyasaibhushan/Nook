@@ -21,6 +21,8 @@ public struct NookURLCommand: Equatable, Sendable {
         case recording(RecordingState)
         /// A mode name as typed, matched case-insensitively later; nil ends the running mode.
         case focus(String?)
+        /// Days counted back from today, today included.
+        case report(days: Int)
         case switchSpace
         case close(UUID)
         case pin(UUID)
@@ -74,6 +76,13 @@ public struct NookURLCommand: Equatable, Sendable {
         case "focus":
             guard let mode = take("mode") else { return nil }
             action = .focus(mode.lowercased() == "off" ? nil : mode)
+        case "report":
+            var days = 1
+            if params["days"] != nil {
+                guard let raw = take("days"), let value = Int(raw), (1...366).contains(value) else { return nil }
+                days = value
+            }
+            action = .report(days: days)
         case "open":
             guard let raw = take("url"), let url = webURL(raw) else { return nil }
             action = .open(url, reuse: take("reuse") == "1")

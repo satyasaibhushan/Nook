@@ -41,6 +41,13 @@ struct NookURLCommandCheck {
             precondition(parse("nook://focus\(suffix)") == nil)
         }
 
+        precondition(parse("nook://report")?.action == .report(days: 1))
+        precondition(parse("nook://report?days=7")?.action == .report(days: 7))
+        precondition(parse("nook://report?days=366")?.action == .report(days: 366))
+        for days in ["", "0", "-1", "367", "two", "1.5"] {
+            precondition(parse("nook://report?days=\(days)") == nil, days)
+        }
+
         // Hostile or malformed
         for bad in [
             "nook://open", "nook://open?url=", "nook://open?url=file:///etc/passwd",
