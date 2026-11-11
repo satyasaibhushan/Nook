@@ -671,9 +671,6 @@ class BrowserManager: ObservableObject {
     }
 
     func toggleSidebar(for windowState: BrowserWindowState) {
-        let perfID = OSSignpostID(log: BrowserPerformance.sidebar)
-        os_signpost(.begin, log: BrowserPerformance.sidebar, name: "ToggleSidebar", signpostID: perfID, "show=%{public}d", windowState.isSidebarVisible ? 0 : 1)
-        defer { os_signpost(.end, log: BrowserPerformance.sidebar, name: "ToggleSidebar", signpostID: perfID) }
         let container = webViewCoordinator?.compositorContainerView(for: windowState.id) as? TabCompositorContainerView
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let canHoldWidth = !splitManager.isSplit(for: windowState.id) && !windowState.showsFullscreenPage && !reduceMotion
@@ -687,12 +684,8 @@ class BrowserManager: ObservableObject {
         } completion: { [weak container] in
             if let holdID { container?.finishSidebarTransition(holdID) }
         }
-        os_signpost(.event, log: BrowserPerformance.sidebar, name: "SidebarVisibility", "%{public}d", windowState.isSidebarVisible ? 1 : 0)
         if !windowState.isSidebarVisible {
-            let pipID = OSSignpostID(log: BrowserPerformance.sidebar)
-            os_signpost(.begin, log: BrowserPerformance.sidebar, name: "SidebarPiPHide", signpostID: pipID)
             sidebarPiPSidebarHidden(in: windowState)
-            os_signpost(.end, log: BrowserPerformance.sidebar, name: "SidebarPiPHide", signpostID: pipID)
         }
         if windowRegistry?.activeWindow?.id == windowState.id {
             isSidebarVisible = windowState.isSidebarVisible
@@ -1013,9 +1006,6 @@ class BrowserManager: ObservableObject {
     /// Set the active window state (called when a window gains focus)
     /// NOTE: This is called BY the WindowRegistry callback, so we don't call setActive again
     func setActiveWindowState(_ windowState: BrowserWindowState) {
-        let perfID = OSSignpostID(log: BrowserPerformance.activation)
-        os_signpost(.begin, log: BrowserPerformance.activation, name: "SetActiveWindowState", signpostID: perfID)
-        defer { os_signpost(.end, log: BrowserPerformance.activation, name: "SetActiveWindowState", signpostID: perfID) }
         // DO NOT call windowRegistry?.setActive(windowState) here - that would cause infinite recursion!
         // This method is called FROM the onActiveWindowChange callback
         savedSidebarWidth = windowState.savedSidebarWidth

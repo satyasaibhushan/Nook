@@ -6,12 +6,10 @@
 //  The window and sidebar fill for a space: its theme when it has one, else the accent gradient.
 //
 
-import OSLog
 import SwiftUI
 #if os(macOS)
 import AppKit
 #endif
-import NookWeb
 import NookDesign
 import NookTabsCore
 
@@ -79,9 +77,6 @@ private struct BehindWindowBlur: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSVisualEffectView, context: Context) {
-        let perfID = OSSignpostID(log: BrowserPerformance.material)
-        os_signpost(.begin, log: BrowserPerformance.material, name: "MaterialAppearanceUpdate", signpostID: perfID)
-        defer { os_signpost(.end, log: BrowserPerformance.material, name: "MaterialAppearanceUpdate", signpostID: perfID) }
         // A theme's forced light or dark mode has to reach the material too.
         view.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
     }

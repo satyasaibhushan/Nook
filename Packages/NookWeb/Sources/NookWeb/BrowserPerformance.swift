@@ -4,32 +4,6 @@ import OSLog
 
 /// Shared Instruments intervals. Payloads never contain browsing URLs or titles.
 public enum BrowserPerformance {
-    public static let activation = OSLog(subsystem: "Nook.Perf", category: "Activation")
-    public static let hover = OSLog(subsystem: "Nook.Perf", category: "Hover")
-    public static let sidebar = OSLog(subsystem: "Nook.Perf", category: "Sidebar")
-    public static let compositor = OSLog(subsystem: "Nook.Perf", category: "Compositor")
-    public static let housekeeping = OSLog(subsystem: "Nook.Perf", category: "Housekeeping")
-    public static let activity = OSLog(subsystem: "Nook.Perf", category: "Activity")
-    public static let extensions = OSLog(subsystem: "Nook.Perf", category: "Extensions")
-    public static let material = OSLog(subsystem: "Nook.Perf", category: "Material")
-    public static let mainRunLoop = OSLog(subsystem: "Nook.Perf", category: "MainRunLoop")
-
-    #if os(macOS)
-    @MainActor private static var runLoopObserver: CFRunLoopObserver?
-
-    /// Wall-time awake intervals include AppKit, SwiftUI and nested work, not CPU time.
-    @MainActor public static func observeMainRunLoop() {
-        guard runLoopObserver == nil else { return }
-        let activities = CFRunLoopActivity.afterWaiting.rawValue | CFRunLoopActivity.beforeWaiting.rawValue
-        let observer = CFRunLoopObserverCreateWithHandler(nil, activities, true, 0) { _, activity in
-            os_signpost(activity == .afterWaiting ? .begin : .end, log: mainRunLoop,
-                        name: "MainRunLoopAwake", signpostID: .exclusive)
-        }
-        runLoopObserver = observer
-        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
-    }
-    #endif
-
     public static let signposter = OSSignposter(
         subsystem: "Nook.Perf", category: "Performance")
 }

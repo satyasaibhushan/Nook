@@ -73,10 +73,6 @@ final class ActivityRecorder {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    os_signpost(.event, log: BrowserPerformance.activity, name: "ActivityNotification",
-                                "reason=%{public}d", name == NSApplication.didBecomeActiveNotification ? 0 :
-                                name == NSWindow.didBecomeKeyNotification ? 1 :
-                                name == NSApplication.didResignActiveNotification ? 2 : 3)
                     self.closeStretches()
                     self.refresh()
                 }
@@ -149,9 +145,6 @@ final class ActivityRecorder {
     }
 
     private func closeStretches() {
-        let perfID = OSSignpostID(log: BrowserPerformance.activity)
-        os_signpost(.begin, log: BrowserPerformance.activity, name: "ActivityCloseStretches", signpostID: perfID)
-        defer { os_signpost(.end, log: BrowserPerformance.activity, name: "ActivityCloseStretches", signpostID: perfID) }
         let closed = accounting.update(at: Date(), pages: [], lastInput: lastInput, mode: modeProvider())
         writer.write(closed: closed, open: [])
         lastCheckpoint = Date()
@@ -173,9 +166,6 @@ final class ActivityRecorder {
     }
 
     private func refresh() {
-        let perfID = OSSignpostID(log: BrowserPerformance.activity)
-        os_signpost(.begin, log: BrowserPerformance.activity, name: "ActivityRefresh", signpostID: perfID)
-        defer { os_signpost(.end, log: BrowserPerformance.activity, name: "ActivityRefresh", signpostID: perfID) }
         let now = Date()
         let hasPlayingMedia = tabs.sessions.contains { $0.activityMediaPlaying }
         updateTimer(needed: NSApp.isActive || hasPlayingMedia)

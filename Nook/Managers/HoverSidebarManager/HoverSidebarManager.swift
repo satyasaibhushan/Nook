@@ -6,7 +6,6 @@
 //  Created by Jonathan Caudill on 2025-09-13.
 //
 
-import OSLog
 import SwiftUI
 import AppKit
 import NookSettings
@@ -17,12 +16,7 @@ import NookWeb
 /// beyond the window's left boundary.
 final class HoverSidebarManager: ObservableObject {
     // MARK: - Published State
-    @Published var isOverlayVisible: Bool = false {
-        willSet {
-            os_signpost(.event, log: BrowserPerformance.hover, name: "OverlayVisibilityWrite",
-                        "old=%{public}d new=%{public}d", isOverlayVisible ? 1 : 0, newValue ? 1 : 0)
-        }
-    }
+    @Published var isOverlayVisible: Bool = false
 
     // MARK: - Configuration
     /// Width inside the window that triggers reveal when hovered.
@@ -72,9 +66,6 @@ final class HoverSidebarManager: ObservableObject {
 
     @MainActor
     func updateMonitoring(for state: BrowserWindowState) {
-        let perfID = OSSignpostID(log: BrowserPerformance.hover)
-        os_signpost(.begin, log: BrowserPerformance.hover, name: "UpdateMonitoring", signpostID: perfID)
-        defer { os_signpost(.end, log: BrowserPerformance.hover, name: "UpdateMonitoring", signpostID: perfID) }
         let eligible = NSApp.isActive && state.isActive
             && !state.isSidebarVisible && !state.showsFullscreenPage
         guard eligible else { stop(); return }
@@ -103,7 +94,6 @@ final class HoverSidebarManager: ObservableObject {
     }
 
     func stop() {
-        os_signpost(.event, log: BrowserPerformance.hover, name: "HoverMonitoringStop")
         isActive = false
         if Self.monitorOwner === self { Self.monitorOwner = nil }
         if let token = localMonitor { NSEvent.removeMonitor(token); localMonitor = nil }
@@ -118,10 +108,7 @@ final class HoverSidebarManager: ObservableObject {
     deinit { stop() }
 
     // MARK: - Mouse Logic
-    /// Re-evaluates the overlay against where the pointer is now.
-    func checkPointer() { scheduleHandleMouseMovement() }
-
-    private func scheduleHandleMouseMovement() {
+    func scheduleHandleMouseMovement() {
         // Ensure main-actor work since we touch NSApp/window and main-actor BrowserManager
         DispatchQueue.main.async { [weak self] in
             self?.handleMouseMovementOnMain()
@@ -130,9 +117,6 @@ final class HoverSidebarManager: ObservableObject {
 
     @MainActor
     private func handleMouseMovementOnMain() {
-        let perfID = OSSignpostID(log: BrowserPerformance.hover)
-        os_signpost(.begin, log: BrowserPerformance.hover, name: "HoverMouseCheck", signpostID: perfID)
-        defer { os_signpost(.end, log: BrowserPerformance.hover, name: "HoverMouseCheck", signpostID: perfID) }
         guard browserManager != nil,
               let registry = windowRegistry,
               let activeState = registry.activeWindow else { return }

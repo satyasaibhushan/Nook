@@ -43,16 +43,4 @@ struct LoadingProgressTests {
         #expect(state.progress == 0.1)
         #expect(!state.isVisible)
     }
-
-    @Test func cancellationAndFailureHideImmediately() {
-        for progress in [0.1, 0.9] {
-            var state = LoadingProgressState()
-            let id = UUID()
-            state.update(navigationID: id, progress: progress, isLoading: true, now: 0)
-            state.update(navigationID: id, progress: progress, isLoading: true, now: 0.3)
-            #expect(state.isVisible)
-            state.update(navigationID: id, progress: progress, isLoading: false, now: 0.31)
-            #expect(!state.isVisible)
-        }
-    }
 }

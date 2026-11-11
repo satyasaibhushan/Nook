@@ -237,8 +237,6 @@ extension TabsController {
                 if let previous, tree.item(previous.itemID) != nil { device.stampActive(previous.itemID, at: now) }
             }
         }
-        let switchInterval = BrowserPerformance.signposter.beginInterval(
-            "TabSwitch", id: BrowserPerformance.signposter.makeSignpostID())
         let compositorVersion = window.compositorVersion
         // The latest window to select a page takes its live view; others show a placeholder.
         takeControl(itemID, in: window)
@@ -268,7 +266,6 @@ extension TabsController {
         // takeControl already redrew every window showing the item; this covers one it has not.
         if window.compositorVersion == compositorVersion { window.refreshCompositor() }
         AfterFrame.run {
-            BrowserPerformance.signposter.endInterval("TabSwitch", switchInterval)
             afterFrame?()
         }
     }

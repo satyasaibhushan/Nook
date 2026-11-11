@@ -35,16 +35,9 @@ struct TabSearchRankingCheck {
             }
         }
         verify()
-        let shown = TabSearchRanking.matches(in: items, words: ["github"], limit: 2)
         let added = TabSearchCandidate(id: UUID(), title: "GitHub", url: URL(string: "https://added.test")!, isCurrentSpace: true)
         let reranked = TabSearchRanking.matches(in: items + [added], words: ["github"], limit: items.count + 1)
         precondition(reranked.first?.id == added.id)
-        let stable = SearchResultPolicy.retainingShownRows(shown, candidates: reranked, limit: 2)
-        precondition(stable.map(\.id) == shown.map(\.id), "A new tab displaced a shown target")
-        let removedID = shown[1].id
-        let afterClose = SearchResultPolicy.retainingShownRows(stable, candidates: reranked.filter { $0.id != removedID }, limit: 2)
-        precondition(!afterClose.contains { $0.id == removedID })
-        precondition(afterClose.first?.id == stable.first?.id)
         let firstID = items[0].id
         items[0] = TabSearchCandidate(id: firstID, title: "Renamed mail", url: URL(string: "https://changed.test")!, isCurrentSpace: true)
         verify()

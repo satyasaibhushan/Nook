@@ -17,7 +17,6 @@
 #if os(macOS)
 import AppKit
 import ObjectiveC
-import OSLog
 import WebKit
 
 extension WKWebView {
@@ -79,7 +78,6 @@ private enum InWindowFullscreen {
     private static let exit: Exit = { _, info in
         guard let info else { return }
         MainActor.assumeIsolated {
-            BrowserPerformance.signposter.emitEvent("FullscreenExitCallback")
             webViewRef(info).zoom.pageWillExit()
             webViewRef(info).watchFrame()
         }
@@ -94,7 +92,6 @@ private enum InWindowFullscreen {
             let ref = webViewRef(info)
             ref.afterRedraw {
                 step.finish()
-                BrowserPerformance.signposter.emitEvent("FullscreenHeldStepFinished")
                 ref.zoom.pageExited()
             }
         }

@@ -6,7 +6,6 @@
 //  Created by Maciek Bagiński on 28/07/2025.
 //
 
-import OSLog
 import SwiftUI
 import WebKit
 import AppKit
@@ -609,7 +608,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
         // Coordinator → frameObserver token → closure → Coordinator
         containerView.refit = { [weak containerView, weak coord] in
             guard let containerView, let coord else { return }
-            updateCompositor(containerView, reason: 3)
+            updateCompositor(containerView)
             coord.lastSize = containerView.bounds.size
         }
         coord.frameObserver = NotificationCenter.default.addObserver(
@@ -626,7 +625,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
             if let container = cv as? TabCompositorContainerView, container.isHoldingSidebarWidth {
                 container.layoutHeldPage()
             } else {
-                updateCompositor(cv, reason: 0)
+                updateCompositor(cv)
             }
             coord?.lastSize = newSize
         }
@@ -657,13 +656,6 @@ struct TabCompositorWrapper: NSViewRepresentable {
 
         if needsRebuild {
             let previousCurrentId = context.coordinator.lastCurrentId
-            let sizeOnly = BrowserPerformance.compositor.signpostsEnabled &&
-                context.coordinator.lastIsSplit == isSplit &&
-                context.coordinator.lastLeftId == leftId && context.coordinator.lastRightId == rightId &&
-                context.coordinator.lastCurrentId == currentId &&
-                abs(CGFloat(context.coordinator.lastFraction) - CGFloat(splitFraction)) <= 0.0001 &&
-                context.coordinator.lastVersion == compositorVersion &&
-                context.coordinator.lastFullscreenInWindow == fullscreenInWindow
             let container = nsView as? TabCompositorContainerView
             let samePage = context.coordinator.lastCurrentId == currentId &&
                 context.coordinator.lastIsSplit == isSplit &&
@@ -674,7 +666,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
                 container?.layoutHeldPage()
             } else {
                 container?.cancelSidebarTransition()
-                updateCompositor(nsView, reason: sizeOnly ? 1 : 2)
+                updateCompositor(nsView)
             }
             context.coordinator.lastIsSplit = isSplit
             context.coordinator.lastLeftId = leftId
@@ -709,10 +701,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
         // Mark the selected page as accessed (resets its unload timer)
         if let session = browserManager.tabs.selectedSession(in: windowState) {
             browserManager.compositorManager.markTabAccessed(session.itemID)
-            let hoverID = OSSignpostID(log: BrowserPerformance.compositor)
-            os_signpost(.begin, log: BrowserPerformance.compositor, name: "HoverCallbacksReattach", signpostID: hoverID)
             setupHoverCallbacks(for: session)
-            os_signpost(.end, log: BrowserPerformance.compositor, name: "HoverCallbacksReattach", signpostID: hoverID)
         }
     }
 
@@ -721,12 +710,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
         coordinator.browserManager?.webViewCoordinator?.removeCompositorContainerView(for: coordinator.windowState.id)
     }
 
-    // Reason: 0 is the size observer, 1 is a size-only SwiftUI update, 2 is other input,
-    // 3 is the final refit after holding the page width through a sidebar animation.
-    private func updateCompositor(_ containerView: NSView, reason: Int) {
-        let perfID = OSSignpostID(log: BrowserPerformance.compositor)
-        os_signpost(.begin, log: BrowserPerformance.compositor, name: "UpdateCompositor", signpostID: perfID, "reason=%{public}d width=%{public}.2f height=%{public}.2f", reason, containerView.bounds.width, containerView.bounds.height)
-        defer { os_signpost(.end, log: BrowserPerformance.compositor, name: "UpdateCompositor", signpostID: perfID) }
+    private func updateCompositor(_ containerView: NSView) {
         // Non-destructive compositor: avoid removing/re-adding WKWebViews that are
         // already correctly positioned. Removing a WKWebView from its superview
         // disconnects its GPU video surface, causing black flashes during playback.
@@ -867,9 +851,6 @@ struct TabCompositorWrapper: NSViewRepresentable {
             }
         }
 
-        os_signpost(.event, log: BrowserPerformance.compositor, name: "WebViewFrameAssignment",
-                    "web=%{public}d equal=%{public}d width=%{public}.2f height=%{public}.2f", desired is WKWebView ? 1 : 0,
-                    desired.frame == containerView.bounds ? 1 : 0, containerView.bounds.width, containerView.bounds.height)
         desired.frame = containerView.bounds
         desired.autoresizingMask = [.width, .height]
         desired.isHidden = false
