@@ -175,7 +175,7 @@ struct SpaceView: View {
                         ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                             rowView(row, zone: zone, split: split, isDropTarget: position == DropPosition(zone: zone, index: index, placement: .into))
                                 .padding(.leading, CGFloat(row.depth) * NookDesign.Spacing.folderIndent)
-                                .transition(.asymmetric(insertion: .identity, removal: .opacity))
+                                .transition(.asymmetric(insertion: .identity, removal: showsTail && !reduceMotion && !dragSession.isDragging ? .opacity.animation(.easeOut(duration: 0.05)) : .opacity))
                                 // Zen keeps a dimmed source in place while its floating card
                                 // follows the pointer freely; only the insertion marker moves.
                                 .opacity(preview.containsDraggedRow(id: row.id) ? (dragSession.isFinishingDrag ? 0 : 0.3) : 1)
@@ -187,6 +187,10 @@ struct SpaceView: View {
                     }
                     if dragSession.isDragging {
                         VStack(spacing: 0) { content }
+                    } else if showsTail {
+                        // Lazy stacks retain the closing row's gap during its fade.
+                        VStack(spacing: 0) { content }
+                            .animation(reduceMotion ? nil : NookDesign.Motion.tabClose, value: rows.map(\.id))
                     } else {
                         LazyVStack(spacing: 0) { content }
                             // Keep row identities stable so remaining tabs slide into the gap.
