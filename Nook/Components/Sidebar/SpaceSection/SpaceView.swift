@@ -17,6 +17,40 @@ import NookTabsCore
 import NookWeb
 import NookUI
 
+/// Refresh selection before SwiftUI retains a removed row for its fade.
+/// The tab model and page switch have already completed; only row presentation waits.
+private struct ClosingTabRows<Content: View>: View {
+    let rows: [Row]
+    let deferRemoval: Bool
+    @ViewBuilder let content: ([Row]) -> Content
+    @State private var presentedRows: [Row]
+    @State private var revision = 0
+
+    init(rows: [Row], deferRemoval: Bool, @ViewBuilder content: @escaping ([Row]) -> Content) {
+        self.rows = rows
+        self.deferRemoval = deferRemoval
+        self.content = content
+        _presentedRows = State(initialValue: rows)
+    }
+
+    var body: some View {
+        content(presentedRows)
+            .onChange(of: rows) { oldRows, newRows in
+                revision += 1
+                let currentRevision = revision
+                let remaining = Set(newRows.map(\.id))
+                guard deferRemoval, oldRows.contains(where: { !remaining.contains($0.id) }) else {
+                    presentedRows = newRows
+                    return
+                }
+                DispatchQueue.main.async {
+                    guard revision == currentRevision else { return }
+                    presentedRows = newRows
+                }
+            }
+    }
+}
+
 struct SpaceView: View {
     let spaceID: UUID
     let isActive: Bool
@@ -110,86 +144,88 @@ struct SpaceView: View {
     private func sectionList(_ section: Parent, rows allRows: [Row], split: SplitPair?, showsTail: Bool) -> some View {
         // The pair is one row at its anchor; the other half's own row is hidden.
         let rows = split.map { split in allRows.filter { !split.contains($0.id) || $0.id == split.anchorID } } ?? allRows
-        let zone = DropZoneID.section(section)
-        let position = dragSession.dropPosition?.zone == zone ? dragSession.dropPosition : nil
-        let isSource = dragSession.isDragging && dragSession.sourceZone == zone
-        let isDestination = position != nil || (isSource && dragSession.dropPosition == nil && dragSession.activeZone == zone)
-        let boundary = position.map { $0.index + ($0.placement == .after ? 1 : 0) }
-        let preview = TabReorderPreview(
-            rows: rows, draggedID: dragSession.draggedItem?.tabId ?? spaceID,
-            destinationBoundary: boundary, sourceInThisSection: isSource,
-            isDestination: isDestination, isIntoFolder: position?.placement == .into
-        )
-        return NookDropZoneHostView(
-            zoneID: zone,
-            layout: .rows(rows),
-            manager: dragSession,
-            onDrop: { itemID, position in
-                let group = tabs.selectedItems(in: windowState)
-                let land = { tabs.drop(itemID, at: position, section: section, rows: rows) }
-                if group.contains(itemID) {
-                    tabs.dropGroup(group, dragged: itemID, drop: land)
-                    windowState.multiSelection.clear()
-                } else {
-                    land()
-                }
-            }
-        ) {
-            VStack(spacing: 0) {
-                let content = Group {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                        rowView(row, zone: zone, split: split, isDropTarget: position == DropPosition(zone: zone, index: index, placement: .into))
-                            .padding(.leading, CGFloat(row.depth) * NookDesign.Spacing.folderIndent)
-                            .transition(.identity)
-                            // Zen keeps a dimmed source in place while its floating card
-                            // follows the pointer freely; only the insertion marker moves.
-                            .opacity(preview.containsDraggedRow(id: row.id) ? (dragSession.isFinishingDrag ? 0 : 0.3) : 1)
-                            // Only release makes the neighboring rows move aside, in sync
-                            // with the native floating card's 100ms landing animation.
-                            .offset(y: dragSession.isFinishingDrag ? CGFloat(preview.rowOffset(for: row.id)) * NookDesign.Tab.stride : 0)
-                            .animation(reduceMotion ? nil : NookDesign.Motion.tabReorder, value: dragSession.isFinishingDrag)
+        return ClosingTabRows(rows: rows, deferRemoval: !reduceMotion && !dragSession.isDragging) { rows in
+            let zone = DropZoneID.section(section)
+            let position = dragSession.dropPosition?.zone == zone ? dragSession.dropPosition : nil
+            let isSource = dragSession.isDragging && dragSession.sourceZone == zone
+            let isDestination = position != nil || (isSource && dragSession.dropPosition == nil && dragSession.activeZone == zone)
+            let boundary = position.map { $0.index + ($0.placement == .after ? 1 : 0) }
+            let preview = TabReorderPreview(
+                rows: rows, draggedID: dragSession.draggedItem?.tabId ?? spaceID,
+                destinationBoundary: boundary, sourceInThisSection: isSource,
+                isDestination: isDestination, isIntoFolder: position?.placement == .into
+            )
+            return NookDropZoneHostView(
+                zoneID: zone,
+                layout: .rows(rows),
+                manager: dragSession,
+                onDrop: { itemID, position in
+                    let group = tabs.selectedItems(in: windowState)
+                    let land = { tabs.drop(itemID, at: position, section: section, rows: rows) }
+                    if group.contains(itemID) {
+                        tabs.dropGroup(group, dragged: itemID, drop: land)
+                        windowState.multiSelection.clear()
+                    } else {
+                        land()
                     }
                 }
-                if dragSession.isDragging {
-                    VStack(spacing: 0) { content }
-                } else {
-                    LazyVStack(spacing: 0) { content }
-                        // Keep row identities stable so remaining tabs slide into the gap.
-                        // Apply the same layout animation to temporary and pinned rows.
-                        .animation(reduceMotion ? nil : NookDesign.Motion.tabClose, value: rows.map(\.id))
-                }
-                if dragSession.isFinishingDrag, !isSource, isDestination, preview.gapIndex != nil, !rows.isEmpty {
-                    Color.clear.frame(height: NookDesign.Tab.stride)
-                }
+            ) {
+                VStack(spacing: 0) {
+                    let content = Group {
+                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                            rowView(row, zone: zone, split: split, isDropTarget: position == DropPosition(zone: zone, index: index, placement: .into))
+                                .padding(.leading, CGFloat(row.depth) * NookDesign.Spacing.folderIndent)
+                                .transition(.asymmetric(insertion: .identity, removal: .opacity))
+                                // Zen keeps a dimmed source in place while its floating card
+                                // follows the pointer freely; only the insertion marker moves.
+                                .opacity(preview.containsDraggedRow(id: row.id) ? (dragSession.isFinishingDrag ? 0 : 0.3) : 1)
+                                // Only release makes the neighboring rows move aside, in sync
+                                // with the native floating card's 100ms landing animation.
+                                .offset(y: dragSession.isFinishingDrag ? CGFloat(preview.rowOffset(for: row.id)) * NookDesign.Tab.stride : 0)
+                                .animation(reduceMotion ? nil : NookDesign.Motion.tabReorder, value: dragSession.isFinishingDrag)
+                        }
+                    }
+                    if dragSession.isDragging {
+                        VStack(spacing: 0) { content }
+                    } else {
+                        LazyVStack(spacing: 0) { content }
+                            // Keep row identities stable so remaining tabs slide into the gap.
+                            // Apply the same layout animation to temporary and pinned rows.
+                            .animation(reduceMotion ? nil : NookDesign.Motion.tabClose, value: rows.map(\.id))
+                    }
+                    if dragSession.isFinishingDrag, !isSource, isDestination, preview.gapIndex != nil, !rows.isEmpty {
+                        Color.clear.frame(height: NookDesign.Tab.stride)
+                    }
 
-                if allRows.isEmpty, !showsTail {
-                    emptySectionSlot(isActive: dragSession.activeZone == zone)
-                }
+                    if allRows.isEmpty, !showsTail {
+                        emptySectionSlot(isActive: dragSession.activeZone == zone)
+                    }
 
-                if showsTail {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .conditionalWindowDrag()
-                        .frame(minHeight: NookDesign.Size.dropTail, maxHeight: .infinity)
+                    if showsTail {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .conditionalWindowDrag()
+                            .frame(minHeight: NookDesign.Size.dropTail, maxHeight: .infinity)
+                    }
                 }
-            }
-            .frame(minWidth: 0, maxWidth: innerWidth, alignment: .leading)
-            .overlay(alignment: .topLeading) {
-                if !dragSession.isFinishingDrag, let gap = boundary, preview.gapIndex != nil {
-                    dropLine
-                        .padding(.leading, dropLineIndent)
-                        .offset(y: CGFloat(gap) * NookDesign.Tab.stride)
-                        .animation(reduceMotion ? nil : NookDesign.Motion.tabReorder, value: gap)
-                        .allowsHitTesting(false)
+                .frame(minWidth: 0, maxWidth: innerWidth, alignment: .leading)
+                .overlay(alignment: .topLeading) {
+                    if !dragSession.isFinishingDrag, let gap = boundary, preview.gapIndex != nil {
+                        dropLine
+                            .padding(.leading, dropLineIndent)
+                            .offset(y: CGFloat(gap) * NookDesign.Tab.stride)
+                            .animation(reduceMotion ? nil : NookDesign.Motion.tabReorder, value: gap)
+                            .allowsHitTesting(false)
+                    }
                 }
-            }
-            .contentShape(Rectangle())
-            // Rows have their own menus; this one covers the gaps and the tail of the section.
-            .contextMenu {
-                Button {
-                    tabs.createFolderForRename(in: section, after: tabs.children(of: section).last?.id)
-                } label: {
-                    Label("New Folder", systemImage: "folder.badge.plus")
+                .contentShape(Rectangle())
+                // Rows have their own menus; this one covers the gaps and the tail of the section.
+                .contextMenu {
+                    Button {
+                        tabs.createFolderForRename(in: section, after: tabs.children(of: section).last?.id)
+                    } label: {
+                        Label("New Folder", systemImage: "folder.badge.plus")
+                    }
                 }
             }
         }
