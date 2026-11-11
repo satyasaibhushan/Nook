@@ -1079,7 +1079,7 @@ def main():
         args.out.with_suffix(".md").write_text(markdown(result))
         (args.out.parent/"BLOCKERS.md").write_text("# UI benchmark blockers and discarded measurements\n\n"+"\n".join(f"- {b}" for b in blockers)+"\n")
     if not all(permissions.values()):
-        reason = f"macOS permission missing: {permissions}"
+        reason = "macOS desktop is locked" if permissions.get("unlocked") is False else f"macOS permission missing: {permissions}"
         result["browsers"] = {name:{"status":"blocked","reason":reason} for name in names}
         blockers.append(reason); save(); return 1
     server = bench.DualStackServer(("::", bench.PORT), Handler)
