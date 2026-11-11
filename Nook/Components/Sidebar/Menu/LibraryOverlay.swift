@@ -108,7 +108,11 @@ struct LibraryPushContainer<Content: View>: View {
                 // As in Arc, the window buttons go with the sidebar over the first half of the pull
                 // and come back with the library over the second; at rest they belong to whichever
                 // is showing.
-                TrafficLights(visible: lightsVisible || progress > 0, alpha: abs(1 - 2 * progress))
+                TrafficLights(
+                    visible: !windowState.showsFullscreenPage,
+                    alpha: (lightsVisible || progress > 0 ? 1 : 0) * abs(1 - 2 * progress),
+                    sidebarOffset: onRight || lightsVisible ? 0 : -windowState.sidebarWidth * (1 - progress)
+                )
                     .frame(width: 0, height: 0)
                 LibraryPanel(width: width, shown: shown)
                 content
