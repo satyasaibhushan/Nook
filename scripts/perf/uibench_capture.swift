@@ -68,7 +68,7 @@ func ownsKeyboard(_ action: [String: Any]) -> Bool {
 func perform(_ action: [String: Any]) -> Double {
     let kind = action["kind"] as? String ?? "key"
     if ["key", "text"].contains(kind), !ownsKeyboard(action) { return now() }
-    let stamp = now()
+    var stamp = now()
     if kind == "activate", let pid = action["pid"] as? Int32 {
         NSRunningApplication(processIdentifier: pid)?.activate(options: [])
     } else if kind == "key" {
@@ -86,6 +86,7 @@ func perform(_ action: [String: Any]) -> Double {
         for down in [true, false] {
             let event = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: down)!
             event.flags = f
+            if down { stamp = Double(event.timestamp) / 1_000_000_000 }
             event.post(tap: .cghidEventTap)
         }
         for (flag, code) in modifiers.reversed() where f.contains(flag) {
@@ -133,6 +134,8 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     var windowID: CGWindowID?
     var attribute = false
     var regionByPixel: [UInt8] = []
+    var probes: [(String, CGRect)] = []
+    var probeLast: [String: [UInt8]] = [:]
     var strips: [CGImage] = []
     var lastStrip = -Double.infinity
     var streamError: String?
@@ -222,6 +225,23 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             }
             frame["analysis_ms"] = (now()-t)*1000 - (frame["delivery_lag_ms"] as! Double)
         }
+        for (name, rect) in probes {
+            let sx = Double(width) / captureRect.width, sy = Double(height) / captureRect.height
+            let box = rect.offsetBy(dx: -captureRect.minX, dy: -captureRect.minY).applying(CGAffineTransform(scaleX: sx, y: sy)).integral
+            var rgb: [UInt8] = []
+            for y in max(0,Int(box.minY))..<min(height,Int(box.maxY)) {
+                for x in max(0,Int(box.minX))..<min(width,Int(box.maxX)) {
+                    let i = y*stride+x*4
+                    rgb.append(contentsOf: [ptr[i+2],ptr[i+1],ptr[i]])
+                }
+            }
+            let previous = probeLast[name]
+            let delta = previous.map { old in zip(old,rgb).filter { abs(Int($0)-Int($1)) > 10 }.count } ?? 0
+            frame[name+"_changed_bytes"] = delta
+            frame[name+"_rgb"] = Data(rgb).base64EncodedString()
+            frame[name+"_size"] = [Int(box.width),Int(box.height)]
+            probeLast[name] = rgb
+        }
         if signatures { frame["pixels"] = Data(pixels).base64EncodedString() }
         frames.append(frame)
         last = pixels
@@ -291,7 +311,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             let a = Array(CommandLine.arguments.dropFirst())
             guard let command = a.first else { throw NSError(domain: "missing command", code: 1) }
             if command == "permissions" {
-                emit(["screen": CGPreflightScreenCaptureAccess(), "accessibility": AXIsProcessTrusted(), "post_events": CGPreflightPostEventAccess()]); return
+                let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+                let unlocked = session != nil && session?["CGSSessionScreenIsLocked"] as? Bool != true
+                emit(["screen": CGPreflightScreenCaptureAccess(), "accessibility": AXIsProcessTrusted(), "post_events": CGPreflightPostEventAccess(), "unlocked": unlocked]); return
             }
             if command == "front" {
                 emit(["pid": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1]); return
@@ -462,6 +484,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             capture.windowID = requestedWindow
             let wr = (spec["window_rect"] as? [Double]) ?? [rect.minX, rect.minY, rect.width, rect.height]
             capture.windowRect = CGRect(x: wr[0], y: wr[1], width: wr[2], height: wr[3])
+            capture.probes = (spec["probes"] as? [[String: Any]] ?? []).compactMap { item in
+                guard let name = item["name"] as? String, let r = item["rect"] as? [Double], r.count == 4 else { return nil }
+                return (name, CGRect(x:r[0],y:r[1],width:r[2],height:r[3]))
+            }
             capture.attribute = spec["attribute"] as? Bool ?? false
             capture.regionRects = (spec["regions"] as? [[String: Any]] ?? []).compactMap { item in
                 guard let name = item["name"] as? String, let r = item["rect"] as? [Double], r.count == 4 else { return nil }

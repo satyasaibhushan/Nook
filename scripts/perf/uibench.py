@@ -238,6 +238,13 @@ class Handler(bench.Handler):
             id:new URLSearchParams(location.search).get('id'),kind:'video',wall:Date.now(),
             current:v.currentTime,paused:v.paused,hidden:document.hidden,ready:v.readyState}));},500)</script>"""
         script = ""
+        if kind == "long":
+            script = """let tracing=false, frames=[], wheel=[];
+            addEventListener('wheel',e=>wheel.push([performance.now(),e.deltaY,e.deltaMode]),{passive:true});
+            addEventListener('scroll',()=>{if(tracing)return;tracing=true;
+              function tick(t){frames.push([t,scrollY]);if(frames.length<240)requestAnimationFrame(tick);
+              else navigator.sendBeacon('/ui-event',JSON.stringify({id:ID,kind:'scrolltrace',wall:Date.now(),origin:performance.timeOrigin,frames,wheel}));}
+              requestAnimationFrame(tick);},{passive:true});"""
         if kind == "validate":
             script = """document.body.onclick=()=>setTimeout(()=>{
               document.body.style.background='#269454';
@@ -294,7 +301,7 @@ class Browser:
                 raise Invalid("test Nook already running; refusing to interfere")
             self.app.defaults()
             args = [str(self.app.exe),"-NookStateDir",self.temp.name,"-NookDevMCPPort",str(bench.MCP_PORT),
-                    "-ApplePersistenceIgnoreState","YES"]
+                    "-ApplePersistenceIgnoreState","YES", "-settings.hideWebContentBorder", os.environ.get("M3_HIDE_BORDER","NO"), "-settings.showLinkStatusBar", os.environ.get("M3_LINK_STATUS","YES")]
             launched = spec_call("launch",{"app":str(self.path),"args":args})
             if launched["pid"] in initial:
                 raise Invalid("launch reused a pre-existing instance; refusing to drive or terminate it")
@@ -663,10 +670,11 @@ def scenario(browser, name, index, record):
         actions, target = [{"kind": "activate", "pid": browser.pid, "at": .5}], "red"
     elif name == "link":
         browser.page()
+        time.sleep(.8)
         actions = [browser.click(browser.locate("Open next local page", {"AXLink"}), at=.5)]
         target = "blue"
     elif name == "scroll":
-        browser.page(kind="long")
+        scroll_ident = browser.page(kind="long")
         bounds = window(browser.pid)["kCGWindowBounds"]
         act({"kind":"move","x":bounds["X"]+bounds["Width"]*.7,"y":bounds["Y"]+bounds["Height"]*.7})
         actions = [{"kind": "scroll", "dy": -24, "at": .5+i/60} for i in range(180)]
@@ -693,6 +701,9 @@ def scenario(browser, name, index, record):
     bounds = window(browser.pid)["kCGWindowBounds"] if name != "activate" else bounds
     window_rect = [bounds[k] for k in ("X","Y","Width","Height")]
     attribution = None
+    if name in ("navigate", "link") and browser.name == "nook":
+        glyph = browser.locate("Reload", {"AXButton"})["rect"]
+        attribution = {"probes":[{"name":"glyph","rect":glyph}]}
     if name == "activate":
         # The lower-right blank page contains no fixture links or browser controls.
         pointer = {"kind":"move","x":bounds["X"]+bounds["Width"]*.85,"y":bounds["Y"]+bounds["Height"]*.75}
@@ -746,6 +757,7 @@ def scenario(browser, name, index, record):
         if not resized and labels(sidebar_before) == labels(sidebar_after):
             raise Invalid("shortcut did not change the page viewport or sidebar menu state")
         raw["sidebar_validation"] = {"before":before,"after":after,"menu_before":sorted(labels(sidebar_before)),"menu_after":sorted(labels(sidebar_after))}
+    raw["load1"] = os.getloadavg()[0]
     raw["window_frame"] = bounds
     raw["pointer_park"] = pointer
     if name in ("activate", "sidebar_show", "sidebar_hide"):
@@ -785,6 +797,7 @@ def scenario(browser, name, index, record):
                                 for f in frames if f["t"] > matches[0] and f.get("regions")]
         raw["region_definitions"] = attribution["regions"]
     if name == "scroll":
+        raw["fixture_id"] = scroll_ident
         end = browser.resources()
         moving = [f["t"] for f in raw["frames"] if raw["events"][0]["t"] <= f["t"] <= raw["events"][0]["t"]+3 and f.get("changed",0) >= .0015]
         raw["frame_intervals"] = [{"start":a,"end":b,"ms":(b-a)*1000} for a,b in zip(moving,moving[1:])]
@@ -1116,6 +1129,7 @@ def main():
                     save()
                 log(f"{name}: launching isolated benchmark session")
                 browser.launch()
+                data["launch_overrides"] = {"hideWebContentBorder":os.environ.get("M3_HIDE_BORDER","NO"),"showLinkStatusBar":os.environ.get("M3_LINK_STATUS","YES")} if name == "nook" else {}
                 data.update({"version": browser.version, "pid": browser.pid, "profile": "existing Arc, benchmark tabs only" if name == "arc" else "throwaway"})
                 if not calibrated:
                     data["validation"] = validation(browser, args.record_dir/name/"calibration" if args.record_dir else None)
@@ -1193,6 +1207,7 @@ def main():
     finally:
         if trace:
             trace.terminate(); trace.wait(timeout=5); trace_file.close()
+        args.out.with_name(args.out.stem+"-beacons.json").write_text(json.dumps(list(Handler.events.values()),indent=2)+"\n")
         server.shutdown()
         bench.forget_favicons([bench.PORT])
     print(markdown(result))
