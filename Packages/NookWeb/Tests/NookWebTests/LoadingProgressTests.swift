@@ -16,6 +16,22 @@ struct LoadingProgressTests {
         #expect(!state.isVisible)
     }
 
+    @Test func stopControlUsesDelayedVisibilityAndRealLoading() {
+        var state = LoadingProgressState()
+        let id = UUID()
+        state.update(navigationID: id, progress: 0.1, isLoading: true, now: 0)
+        #expect(!state.showsStopLoading(isLoading: true))
+        state.update(navigationID: id, progress: 0.2, isLoading: true, now: LoadingProgressState.showDelay - 0.001)
+        #expect(!state.showsStopLoading(isLoading: true))
+        state.update(navigationID: id, progress: 0.3, isLoading: true, now: LoadingProgressState.showDelay)
+        #expect(state.showsStopLoading(isLoading: true))
+        #expect(!state.showsStopLoading(isLoading: false))
+        state.update(navigationID: id, progress: 1, isLoading: false, now: 0.13)
+        #expect(!state.showsStopLoading(isLoading: false))
+        state.update(navigationID: UUID(), progress: 0.1, isLoading: true, now: 0.14)
+        #expect(!state.showsStopLoading(isLoading: true))
+    }
+
     @Test func progressOnlyResetsForAnotherNavigation() {
         var state = LoadingProgressState()
         let id = UUID()

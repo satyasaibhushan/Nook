@@ -141,16 +141,7 @@ struct TopBarView: View {
                 )
             }
 
-            Button {
-                if session?.isLoading == true {
-                    session?.stop()
-                } else {
-                    refreshCurrentTab()
-                }
-            } label: {
-                // No `.symbolEffect(.replace)` here: it held the main thread about 130 ms at each end of a load.
-                Image(systemName: session?.isLoading == true ? "xmark" : "arrow.clockwise")
-            }
+            ReloadButton(session: session)
             .labelStyle(.iconOnly)
             .buttonStyle(NookIconButtonStyle())
             .foregroundStyle(navButtonColor)
@@ -242,10 +233,6 @@ struct TopBarView: View {
 
     private func goForward() {
         if let webView = windowWebView { webView.goForward() } else { session?.goForward() }
-    }
-
-    private func refreshCurrentTab() {
-        session?.refresh()
     }
 
     // Determine if we should animate color changes (within same tab) or snap (tab switch)

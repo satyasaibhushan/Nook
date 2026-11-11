@@ -11,6 +11,10 @@ public struct LoadingProgressState {
 
     public init() {}
 
+    public func showsStopLoading(isLoading: Bool) -> Bool {
+        isLoading && isVisible
+    }
+
     public mutating func update(navigationID: UUID, progress: Double, isLoading: Bool, now: TimeInterval) {
         if self.navigationID != navigationID {
             self = Self()
