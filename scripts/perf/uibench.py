@@ -39,6 +39,34 @@ class Invalid(RuntimeError):
     pass
 
 
+class ForeignWindow(Invalid):
+    pass
+
+
+def visible_obstructions(pid, rows):
+    """CGWindow rows are ordered front to back; only windows ahead can cover us."""
+    target = next((i for i, row in enumerate(rows)
+                   if row.get("kCGWindowOwnerPID") == pid and row.get("kCGWindowLayer") == 0
+                   and row["kCGWindowBounds"]["Width"] > 300
+                   and row["kCGWindowBounds"]["Height"] > 300), None)
+    if target is None:
+        raise Invalid("benchmark window is not on screen")
+    bounds = rows[target]["kCGWindowBounds"]
+    def overlaps(other):
+        return (min(bounds["X"]+bounds["Width"], other["X"]+other["Width"]) > max(bounds["X"], other["X"])
+                and min(bounds["Y"]+bounds["Height"], other["Y"]+other["Height"]) > max(bounds["Y"], other["Y"]))
+    return [row for row in rows[:target] if row.get("kCGWindowOwnerPID") != pid
+            and row.get("kCGWindowAlpha", 1) > 0 and overlaps(row["kCGWindowBounds"])]
+
+
+def reject_obstruction(pid):
+    obstructions = visible_obstructions(pid, helper("windows"))
+    if obstructions:
+        identities = [(r.get("kCGWindowOwnerPID"), r.get("kCGWindowOwnerName"),
+                       r.get("kCGWindowBounds")) for r in obstructions]
+        raise ForeignWindow(f"foreign window overlaps the benchmark window: {identities}")
+
+
 class OwnedProcess:
     """A responsibility-isolated child spawned by the native helper."""
     def __init__(self, pid):
@@ -102,6 +130,8 @@ def guarded(actions):
 
 
 def act(*actions):
+    if KEYBOARD_OWNER and any(a.get("kind") in {"key", "text", "click", "scroll"} for a in actions):
+        reject_obstruction(KEYBOARD_OWNER)
     return spec_call("action", guarded(actions))
 
 
@@ -156,12 +186,22 @@ def leave_arc_running(path):
 
 
 def capture(pid, actions=(), duration=2, record=None, ocr=None, signatures=False, native=False, region=None, attribution=None):
+    if not (attribution or {}).get("full_display"):
+        reject_obstruction(pid)
     visible = window(pid)
     result = spec_call("capture", {"pid": pid, "window_id": visible["kCGWindowNumber"] if visible else None,
                                    "actions": guarded(actions), "duration": duration, "ocr_needle":ocr,"signatures":signatures,
                                    "region":region,
                                    "native_resolution":native, **(attribution or {}),
                                    **({"record_dir": str(record)} if record else {})})
+    if not (attribution or {}).get("full_display"):
+        try:
+            reject_obstruction(pid)
+        except ForeignWindow:
+            if record:
+                for path in Path(record).glob("*.png"):
+                    path.unlink()
+            raise
     if len([f for f in result["frames"] if "changed" in f]) < (2 if actions else 1):
         raise Invalid("capture delivered too few complete frames")
     result["record_dir"] = str(Path(record).resolve()) if record else None
