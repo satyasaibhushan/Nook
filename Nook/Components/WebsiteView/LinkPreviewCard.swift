@@ -45,14 +45,12 @@ struct LinkPreviewHost: View {
             showTask?.cancel()
             if let target {
                 hideTask?.cancel()
-                if shown?.url == target.url, !HoverResync.isMenuTracking {
+                if shown?.url == target.url {
                     shown = target
                     return
                 }
-                let delay = shown?.url == target.url ? .zero : rest
                 showTask = Task {
-                    if delay != .zero { try? await Task.sleep(for: delay) }
-                    await HoverResync.waitForMenuTracking()
+                    try? await Task.sleep(for: rest)
                     guard !Task.isCancelled, session.linkPreview == target else { return }
                     withAnimation(NookDesign.Motion.quick) { shown = target }
                 }
@@ -66,7 +64,6 @@ struct LinkPreviewHost: View {
         hideTask?.cancel()
         hideTask = Task {
             try? await Task.sleep(for: linger)
-            await HoverResync.waitForMenuTracking()
             guard !Task.isCancelled, !isOnCard, session.linkPreview == nil else { return }
             withAnimation(NookDesign.Motion.quick) { shown = nil }
         }

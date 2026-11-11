@@ -17,7 +17,6 @@ let package = Package(
         .package(path: "../NookWeb"),
     ],
     targets: [
-        .testTarget(name: "NookUITests", dependencies: ["NookUI"]),
         .target(
             name: "NookUI",
             dependencies: [
