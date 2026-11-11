@@ -56,6 +56,11 @@ def visible_obstructions(pid, rows):
         return (min(bounds["X"]+bounds["Width"], other["X"]+other["Width"]) > max(bounds["X"], other["X"])
                 and min(bounds["Y"]+bounds["Height"], other["Y"]+other["Height"]) > max(bounds["Y"], other["Y"]))
     return [row for row in rows[:target] if row.get("kCGWindowOwnerPID") != pid
+            and row.get("kCGWindowOwnerName") != "Wispr Flow"
+            # ScreenCaptureKit excludes the cursor from these captures.
+            and not (row.get("kCGWindowOwnerName") == "Window Server"
+                     and row.get("kCGWindowName") == "Cursor"
+                     and row.get("kCGWindowLayer") == 2147483630)
             and row.get("kCGWindowAlpha", 1) > 0 and overlaps(row["kCGWindowBounds"])]
 
 
@@ -121,12 +126,19 @@ def key(name, *flags, at=0.5):
     return {"kind": "key", "code": KEYS[name], "flags": list(flags), "at": at}
 
 
+def scroll_actions():
+    """Three seconds of phased, continuous pixel input at 120 Hz, 1440 px/s."""
+    return ([{"kind":"scroll", "dy":0, "phase":1, "at":.5}] +
+            [{"kind":"scroll", "dy":-12, "phase":2, "at":.5+i/120} for i in range(1,361)] +
+            [{"kind":"scroll", "dy":0, "phase":4, "at":3.5+1/120}])
+
+
 # The browser the benchmark launched; keyboard events are dropped unless it holds focus.
 KEYBOARD_OWNER = None
 
 
 def guarded(actions):
-    return [{**a, "guard": KEYBOARD_OWNER} if KEYBOARD_OWNER and a.get("kind") in ("key", "text") else a for a in actions]
+    return [{**a, "guard": KEYBOARD_OWNER} if KEYBOARD_OWNER and a.get("kind") in ("key", "text", "click", "move", "scroll") else a for a in actions]
 
 
 def act(*actions):
@@ -270,7 +282,9 @@ class Handler(bench.Handler):
         dest = f"/ui/page?color=blue&id={ident}-next"
         extra = ""
         if kind == "long":
-            extra = "".join(f"<section style='height:120px;background:hsl({i*31%360},65%,40%)'>Row {i}: {bench.words(20,i)}</section>" for i in range(600))
+            # Real English avoids browser translation offers for placeholder Latin.
+            words = "This local page repeats colored rows so the benchmark can measure smooth continuous scrolling and track each displayed frame precisely."
+            extra = "".join(f"<section style='height:120px;background:hsl({i*31%360},65%,40%)'>Row {i}: {words}</section>" for i in range(600))
         if kind == "video":
             extra = """<button onclick="document.querySelector('video').play()">Start local video</button><br>
             <video autoplay muted loop playsinline controls width=640 src='/ui/video.mp4'></video>
@@ -283,14 +297,16 @@ class Handler(bench.Handler):
             addEventListener('wheel',e=>wheel.push([performance.now(),e.deltaY,e.deltaMode]),{passive:true});
             addEventListener('scroll',()=>{if(tracing)return;tracing=true;
               function tick(t){frames.push([t,scrollY]);if(frames.length<240)requestAnimationFrame(tick);
-              else navigator.sendBeacon('/ui-event',JSON.stringify({id:ID,kind:'scrolltrace',wall:Date.now(),origin:performance.timeOrigin,frames,wheel}));}
+              else navigator.sendBeacon('/ui-event',JSON.stringify({id:ID,kind:'scrolltrace',wall:Date.now(),origin:performance.timeOrigin,frames,wheel,
+                sectionTop:document.querySelector('section').offsetTop,sectionHeight:document.querySelector('section').offsetHeight,
+                viewport:[innerWidth,innerHeight],dpr:devicePixelRatio}));}
               requestAnimationFrame(tick);},{passive:true});"""
         if kind == "validate":
             script = """document.body.onclick=()=>setTimeout(()=>{
               document.body.style.background='#269454';
               navigator.sendBeacon('/ui-event',JSON.stringify({id:ID,kind:'color',wall:Date.now()}));
             },500);"""
-        body = """<!doctype html><html><head><meta charset=utf-8><title>UIBENCH IDENT</title>
+        body = """<!doctype html><html lang=en><head><meta charset=utf-8><title>UIBENCH IDENT</title>
         <style>*{box-sizing:border-box}body{min-height:100vh;margin:0;background:COLOR;color:white;font:24px system-ui}
         header{padding:40px}a{color:white;display:block;padding:28px;background:#172c46}section{padding:20px}</style>
         </head><body><header>UIBENCH IDENT<br>Local browser benchmark</header>
@@ -718,7 +734,7 @@ def scenario(browser, name, index, record):
         scroll_ident = browser.page(kind="long")
         bounds = window(browser.pid)["kCGWindowBounds"]
         act({"kind":"move","x":bounds["X"]+bounds["Width"]*.7,"y":bounds["Y"]+bounds["Height"]*.7})
-        actions = [{"kind": "scroll", "dy": -24, "at": .5+i/60} for i in range(180)]
+        actions = scroll_actions()
         duration = 4.1
     if name in ("sidebar_hide", "sidebar_show"):
         def sidebar_visible(rows):

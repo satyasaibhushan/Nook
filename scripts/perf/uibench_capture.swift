@@ -67,7 +67,7 @@ func ownsKeyboard(_ action: [String: Any]) -> Bool {
 }
 func perform(_ action: [String: Any]) -> Double {
     let kind = action["kind"] as? String ?? "key"
-    if ["key", "text"].contains(kind), !ownsKeyboard(action) { return now() }
+    if ["key", "text", "click", "move", "scroll"].contains(kind), !ownsKeyboard(action) { return now() }
     var stamp = now()
     if kind == "activate", let pid = action["pid"] as? Int32 {
         NSRunningApplication(processIdentifier: pid)?.activate(options: [])
@@ -119,8 +119,20 @@ func perform(_ action: [String: Any]) -> Double {
                     mouseButton: right ? .right : .left)?.post(tap: .cghidEventTap)
         }
     } else if kind == "scroll" {
-        CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
-                wheel1: Int32(action["dy"] as? Int ?? -24), wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)
+        let delta = Int32(action["dy"] as? Int ?? -24)
+        if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                               wheel1: delta, wheel2: 0, wheel3: 0) {
+            if let phase = action["phase"] as? Int64 {
+                event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+                event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+                event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
+                event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: Int64(delta))
+                event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: Double(delta))
+            }
+            event.timestamp = UInt64(now() * 1_000_000_000)
+            stamp = Double(event.timestamp) / 1_000_000_000
+            event.post(tap: .cghidEventTap)
+        }
     }
     return stamp
 }
@@ -138,6 +150,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     var attribute = false
     var regionByPixel: [UInt8] = []
     var probes: [(String, CGRect)] = []
+    var scrollScan: [Double]?
     var probeLast: [String: [UInt8]] = [:]
     var strips: [CGImage] = []
     var lastStrip = -Double.infinity
@@ -244,6 +257,20 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             frame[name+"_rgb"] = Data(rgb).base64EncodedString()
             frame[name+"_size"] = [Int(box.width),Int(box.height)]
             probeLast[name] = rgb
+        }
+        if let scan = scrollScan {
+            let sx = Double(width) / captureRect.width, sy = Double(height) / captureRect.height
+            let x = Int((scan[0] - captureRect.minX) * sx)
+            let y0 = Int((scan[1] - captureRect.minY) * sy)
+            let count = Int(scan[2] * sy)
+            if x >= 0, x < width, y0 >= 0, y0 + count <= height {
+                var rgb: [UInt8] = []
+                for y in y0..<(y0 + count) {
+                    let i = y * stride + x * 4
+                    rgb.append(contentsOf: [ptr[i+2], ptr[i+1], ptr[i]])
+                }
+                frame["scroll_scan_rgb"] = Data(rgb).base64EncodedString()
+            }
         }
         if signatures { frame["pixels"] = Data(pixels).base64EncodedString() }
         frames.append(frame)
@@ -485,6 +512,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                                   width: rect.width*scale, height: rect.height*scale).integral
             capture.captureRect = rect
             capture.windowID = requestedWindow
+            capture.scrollScan = spec["scroll_scan"] as? [Double]
             let wr = (spec["window_rect"] as? [Double]) ?? [rect.minX, rect.minY, rect.width, rect.height]
             capture.windowRect = CGRect(x: wr[0], y: wr[1], width: wr[2], height: wr[3])
             capture.probes = (spec["probes"] as? [[String: Any]] ?? []).compactMap { item in
