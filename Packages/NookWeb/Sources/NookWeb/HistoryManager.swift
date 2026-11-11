@@ -110,7 +110,7 @@ public final class HistoryManager {
         enqueue { store in
             await store.clear(days: days, profile: profile)
             // Page text goes with its history row, whichever space cleared it.
-            if let pageText { await pageText.retain(only: await store.allURLs()) }
+            if let pageText, await pageText.exists() { await pageText.retain(only: await store.allURLs()) }
         }
     }
 

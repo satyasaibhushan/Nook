@@ -2,6 +2,8 @@
 
 import Foundation
 
+private let activityTrackingNames: Set<String> = ["fbclid", "gclid", "si", "ref", "ref_src", "igshid", "mc_cid", "mc_eid"]
+
 public func normalizedActivityURL(_ url: URL) -> URL? {
     guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
           ["http", "https", "file"].contains(parts.scheme?.lowercased() ?? "")
@@ -10,10 +12,9 @@ public func normalizedActivityURL(_ url: URL) -> URL? {
     parts.scheme = parts.scheme?.lowercased()
     parts.host = parts.host?.lowercased()
     parts.fragment = nil
-    let tracking: Set<String> = ["fbclid", "gclid", "si", "ref", "ref_src", "igshid", "mc_cid", "mc_eid"]
     let query = parts.queryItems?.filter {
         let name = $0.name.lowercased()
-        return !name.hasPrefix("utm_") && !tracking.contains(name)
+        return !name.hasPrefix("utm_") && !activityTrackingNames.contains(name)
     }
     parts.queryItems = query?.isEmpty == false ? query : nil
     if parts.percentEncodedPath.count > 1, parts.percentEncodedPath.hasSuffix("/") {

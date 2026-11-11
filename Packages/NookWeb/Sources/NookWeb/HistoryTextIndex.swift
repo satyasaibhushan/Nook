@@ -51,6 +51,9 @@ public actor HistoryTextIndex {
         run(db, "DELETE FROM pages WHERE url = ?") { sqlite3_bind_text($0, 1, url, -1, Self.transient) }
     }
 
+    /// False while no index file exists, so callers can skip collecting what it would be compared with.
+    public func exists() -> Bool { open(create: false) != nil }
+
     /// Drops every row whose URL is not in `urls`, so text never outlives its history row.
     public func retain(only urls: Set<String>) {
         guard let db = open(create: false) else { return }
