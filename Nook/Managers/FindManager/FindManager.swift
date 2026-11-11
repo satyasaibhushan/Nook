@@ -121,6 +121,4 @@ class FindManager: ObservableObject {
             search(for: searchText, in: session)
         }
     }
-
-    deinit { cleanupTask?.cancel() }
 }

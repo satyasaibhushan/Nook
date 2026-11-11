@@ -35,7 +35,7 @@ struct SidebarHoverOverlayView: View {
                     .onHoverTracking { isIn in
                         // The hotspot can report an enter from a frame it only holds while the
                         // sidebar animates away, so the manager confirms the pointer is at the edge.
-                        if isIn { hoverManager.checkPointer() }
+                        if isIn { hoverManager.scheduleHandleMouseMovement() }
                         NSCursor.arrow.set()
                     }
 

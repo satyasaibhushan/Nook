@@ -68,7 +68,6 @@ struct ReloadButton: View {
             Image(systemName: showsStop ? "xmark" : "arrow.clockwise")
                 .contentTransition(.identity)
         }
-        .labelStyle(.iconOnly)
         .accessibilityLabel(showsStop ? "Stop Loading" : "Reload")
         .animation(nil, value: showsStop)
     }

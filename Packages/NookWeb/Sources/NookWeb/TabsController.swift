@@ -187,9 +187,6 @@ public final class TabsController {
     }
 
     private func finishHousekeeping() {
-        let perfID = OSSignpostID(log: BrowserPerformance.housekeeping)
-        os_signpost(.begin, log: BrowserPerformance.housekeeping, name: "ActivationHousekeeping", signpostID: perfID)
-        defer { os_signpost(.end, log: BrowserPerformance.housekeeping, name: "ActivationHousekeeping", signpostID: perfID) }
         guard housekeepingPending else { return }
         housekeepingPending = false
         refreshLiveFolders()

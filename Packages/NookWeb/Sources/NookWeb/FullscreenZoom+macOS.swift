@@ -16,7 +16,6 @@
 
 #if os(macOS)
 import AppKit
-import OSLog
 import WebKit
 
 @MainActor
@@ -184,16 +183,10 @@ final class FullscreenZoom {
         zoomEnds = Date(timeIntervalSinceNow: Self.duration)
         afterResize { [weak self] in
             guard let self else { return }
-            BrowserPerformance.signposter.emitEvent("FullscreenShrinkStart")
             self.animate(shot, "bounds", to: CGRect(origin: .zero, size: origin.element.size))
             if origin.corner > 0 { self.animate(shot, "cornerRadius", to: origin.corner) }
             self.animate(cover.scene, "transform", to: CATransform3DIdentity)
             self.zoomEnds = Date(timeIntervalSinceNow: Self.duration)
-            let run = self.run
-            DispatchQueue.main.asyncAfter(deadline: .now() + self.zoomEnds.timeIntervalSinceNow) { [weak self] in
-                guard let self, self.run == run else { return }
-                BrowserPerformance.signposter.emitEvent("FullscreenShrinkEnd")
-            }
         }
     }
 
@@ -310,7 +303,6 @@ final class FullscreenZoom {
 
     private func uncover() {
         guard let cover, let layer = cover.layer else { return }
-        BrowserPerformance.signposter.emitEvent("FullscreenUncoverStart")
         self.cover = nil
         entering = nil
         leaving = false
@@ -318,7 +310,6 @@ final class FullscreenZoom {
         CATransaction.begin()
         CATransaction.setCompletionBlock { [weak webView] in
             cover.removeFromSuperview()
-            BrowserPerformance.signposter.emitEvent("FullscreenCoverRemoved")
             guard let webView, !webView.isHiddenOrHasHiddenAncestor,
                   let window = webView.window, window.isKeyWindow else { return }
             let location = window.mouseLocationOutsideOfEventStream

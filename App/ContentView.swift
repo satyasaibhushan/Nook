@@ -7,7 +7,6 @@
 //  Updated by Aether Aurelia on 15/11/2025.
 //
 
-import OSLog
 import SwiftUI
 import AppKit
 import NookWeb
@@ -109,7 +108,6 @@ private struct WindowFocusBridge: NSViewRepresentable {
                 windowState.window = window
             }
 
-            MainActor.assumeIsolated { BrowserPerformance.observeMainRunLoop() }
             window.setUpAsPageWindow()
 
             keyObserver = NotificationCenter.default.addObserver(
@@ -117,11 +115,8 @@ private struct WindowFocusBridge: NSViewRepresentable {
                 object: window,
                 queue: .main
             ) { [weak self] _ in
-                os_signpost(.event, log: BrowserPerformance.activation, name: "WindowDidBecomeKey")
                 guard let self else { return }
-                os_signpost(.event, log: BrowserPerformance.activation, name: "ActivationTaskQueued")
                 Task { @MainActor in
-                    os_signpost(.event, log: BrowserPerformance.activation, name: "ActivationTaskRun")
                     self.windowRegistry.setActive(self.windowState)
                 }
             }
