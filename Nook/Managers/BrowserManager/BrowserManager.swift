@@ -675,14 +675,14 @@ class BrowserManager: ObservableObject {
         os_signpost(.begin, log: BrowserPerformance.sidebar, name: "ToggleSidebar", signpostID: perfID, "show=%{public}d", windowState.isSidebarVisible ? 0 : 1)
         defer { os_signpost(.end, log: BrowserPerformance.sidebar, name: "ToggleSidebar", signpostID: perfID) }
         let container = webViewCoordinator?.compositorContainerView(for: windowState.id) as? TabCompositorContainerView
-        let canHoldWidth = !splitManager.isSplit(for: windowState.id) && !windowState.showsFullscreenPage &&
-            !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let canHoldWidth = !splitManager.isSplit(for: windowState.id) && !windowState.showsFullscreenPage && !reduceMotion
         let pageInset = nookSettings?.hideWebContentBorder == true ? 0 : NookDesign.Chrome.pageInset
         let holdID = canHoldWidth ? container?.beginSidebarTransition(
             extraWidth: windowState.isSidebarVisible ? windowState.sidebarWidth - pageInset : 0,
             pinnedToRight: nookSettings?.sidebarPosition == .right
         ) : nil
-        withAnimation(.easeInOut(duration: canHoldWidth ? 0.15 : 0.1), completionCriteria: .removed) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: canHoldWidth ? 0.15 : 0.1), completionCriteria: .removed) {
             windowState.isSidebarVisible.toggle()
         } completion: { [weak container] in
             if let holdID { container?.finishSidebarTransition(holdID) }
