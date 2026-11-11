@@ -62,11 +62,14 @@ struct ReloadButton: View {
 
     var body: some View {
         let showsStop = session?.loadingProgress.state.showsStopLoading(isLoading: session?.isLoading == true) == true
-        Button(showsStop ? "Stop Loading" : "Reload",
-               systemImage: showsStop ? "xmark" : "arrow.clockwise") {
+        Button {
             if showsStop { session?.stop() } else { session?.refresh() }
+        } label: {
+            Image(systemName: showsStop ? "xmark" : "arrow.clockwise")
+                .contentTransition(.identity)
         }
         .labelStyle(.iconOnly)
+        .accessibilityLabel(showsStop ? "Stop Loading" : "Reload")
         .transaction { $0.animation = nil }
     }
 }
