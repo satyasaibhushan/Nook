@@ -584,7 +584,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(browserManager: browserManager, windowState: windowState) }
 
     func makeNSView(context: Context) -> NSView {
-        let containerView = ContainerView()
+        let containerView = TabCompositorContainerView()
         containerView.wantsLayer = true
         // Use windowBackgroundColor instead of clear to prevent black flashes during
         // video playback when the WKWebView's GPU compositing layer briefly shows through.
@@ -607,6 +607,11 @@ struct TabCompositorWrapper: NSViewRepresentable {
         let coord = context.coordinator
         // MEMORY LEAK FIX: Capture coord weakly to break potential retain cycle
         // Coordinator → frameObserver token → closure → Coordinator
+        containerView.refit = { [weak containerView, weak coord] in
+            guard let containerView, let coord else { return }
+            updateCompositor(containerView, reason: 3)
+            coord.lastSize = containerView.bounds.size
+        }
         coord.frameObserver = NotificationCenter.default.addObserver(
             forName: NSView.frameDidChangeNotification,
             object: containerView,
@@ -618,7 +623,11 @@ struct TabCompositorWrapper: NSViewRepresentable {
             // a compositor rebuild that could interrupt video playback.
             let newSize = cv.bounds.size
             guard coord?.lastSize != newSize else { return }
-            updateCompositor(cv, reason: 0)
+            if let container = cv as? TabCompositorContainerView, container.isHoldingSidebarWidth {
+                container.layoutHeldPage()
+            } else {
+                updateCompositor(cv, reason: 0)
+            }
             coord?.lastSize = newSize
         }
 
@@ -655,7 +664,18 @@ struct TabCompositorWrapper: NSViewRepresentable {
                 abs(CGFloat(context.coordinator.lastFraction) - CGFloat(splitFraction)) <= 0.0001 &&
                 context.coordinator.lastVersion == compositorVersion &&
                 context.coordinator.lastFullscreenInWindow == fullscreenInWindow
-            updateCompositor(nsView, reason: sizeOnly ? 1 : 2)
+            let container = nsView as? TabCompositorContainerView
+            let samePage = context.coordinator.lastCurrentId == currentId &&
+                context.coordinator.lastIsSplit == isSplit &&
+                context.coordinator.lastLeftId == leftId && context.coordinator.lastRightId == rightId &&
+                context.coordinator.lastVersion == compositorVersion &&
+                context.coordinator.lastFullscreenInWindow == fullscreenInWindow
+            if container?.isHoldingSidebarWidth == true, samePage {
+                container?.layoutHeldPage()
+            } else {
+                container?.cancelSidebarTransition()
+                updateCompositor(nsView, reason: sizeOnly ? 1 : 2)
+            }
             context.coordinator.lastIsSplit = isSplit
             context.coordinator.lastLeftId = leftId
             context.coordinator.lastRightId = rightId
@@ -697,10 +717,12 @@ struct TabCompositorWrapper: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        (nsView as? TabCompositorContainerView)?.cancelSidebarTransition()
         coordinator.browserManager?.webViewCoordinator?.removeCompositorContainerView(for: coordinator.windowState.id)
     }
 
-    // Reason: 0 is the size observer, 1 is a size-only SwiftUI update, 2 is other input.
+    // Reason: 0 is the size observer, 1 is a size-only SwiftUI update, 2 is other input,
+    // 3 is the final refit after holding the page width through a sidebar animation.
     private func updateCompositor(_ containerView: NSView, reason: Int) {
         let perfID = OSSignpostID(log: BrowserPerformance.compositor)
         os_signpost(.begin, log: BrowserPerformance.compositor, name: "UpdateCompositor", signpostID: perfID, "reason=%{public}d width=%{public}.2f height=%{public}.2f", reason, containerView.bounds.width, containerView.bounds.height)
@@ -740,7 +762,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
         if isCurrentPane, let leftId, let rightId,
            let leftSession = tabs.ensureSession(for: leftId),
            let rightSession = tabs.ensureSession(for: rightId) {
-            (containerView as? ContainerView)?.showsSplit = true
+            (containerView as? TabCompositorContainerView)?.showsSplit = true
             let gap = NookDesign.Chrome.splitGap
             let total = containerView.bounds
             let leftWidth = floor(total.width * split.dividerFraction(for: windowState.id))
@@ -794,7 +816,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
                 pane.show(pageView(for: session, reusing: pane.content.subviews))
             }
         } else {
-            (containerView as? ContainerView)?.showsSplit = false
+            (containerView as? TabCompositorContainerView)?.showsSplit = false
             containerView.subviews.compactMap { $0 as? SplitDividerView }.forEach { $0.isHidden = true }
             // Single tab (most common path during video playback)
             if let session = selected, !session.isUnloaded {
@@ -849,7 +871,7 @@ struct TabCompositorWrapper: NSViewRepresentable {
                     "web=%{public}d equal=%{public}d width=%{public}.2f height=%{public}.2f", desired is WKWebView ? 1 : 0,
                     desired.frame == containerView.bounds ? 1 : 0, containerView.bounds.width, containerView.bounds.height)
         desired.frame = containerView.bounds
-        desired.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
+        desired.autoresizingMask = [.width, .height]
         desired.isHidden = false
     }
 
@@ -1041,7 +1063,72 @@ private final class SplitDividerView: NSView {
     }
 }
 
-private class ContainerView: NSView {
+final class TabCompositorContainerView: NSView {
+    private struct SidebarHold {
+        let id: UUID
+        let width: CGFloat
+        let pinnedToRight: Bool
+        weak var page: WKWebView?
+    }
+
+    private var sidebarHold: SidebarHold?
+    private var resizeObserver: NSObjectProtocol?
+    var refit: (() -> Void)?
+    var isHoldingSidebarWidth: Bool { sidebarHold != nil }
+
+    /// Expand before hide, or keep the hidden width through show. Only the container
+    /// moves and clips during the animation; WebKit gets no intermediate widths.
+    func beginSidebarTransition(extraWidth: CGFloat, pinnedToRight: Bool) -> UUID? {
+        guard !showsSplit, let page = subviews.compactMap({ $0 as? WKWebView }).first else { return nil }
+        let id = UUID()
+        let width = sidebarHold?.width ?? (bounds.width + extraWidth)
+        sidebarHold = SidebarHold(id: id, width: width, pinnedToRight: pinnedToRight, page: page)
+        page.autoresizingMask = []
+        layoutHeldPage()
+        return id
+    }
+
+    func finishSidebarTransition(_ id: UUID) {
+        guard sidebarHold?.id == id else { return }
+        cancelSidebarTransition()
+        refit?()
+    }
+
+    /// The caller already rebuilding the compositor owns the refit on cancellation.
+    func cancelSidebarTransition() {
+        sidebarHold?.page?.autoresizingMask = [.width, .height]
+        sidebarHold = nil
+    }
+
+    func layoutHeldPage() {
+        guard let hold = sidebarHold, let page = hold.page else { return }
+        let frame = NSRect(x: hold.pinnedToRight ? bounds.width - hold.width : 0,
+                           y: bounds.minY, width: hold.width, height: bounds.height)
+        if page.frame != frame { page.frame = frame }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
+        resizeObserver = nil
+        if isHoldingSidebarWidth {
+            cancelSidebarTransition()
+            refit?()
+        }
+        guard let window else { return }
+        resizeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.isHoldingSidebarWidth else { return }
+            self.cancelSidebarTransition()
+            self.refit?()
+        }
+    }
+
+    deinit {
+        if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
+    }
+
     var showsSplit = false {
         didSet { if showsSplit != oldValue { updateBackground() } }
     }
