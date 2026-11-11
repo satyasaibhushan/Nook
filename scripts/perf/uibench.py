@@ -545,13 +545,14 @@ class Browser:
 def validation(browser, record):
     ident = browser.page(kind="validate")
     w = window(browser.pid)["kCGWindowBounds"]
-    wall_offset = time.time()-time.monotonic()
     raw = capture(browser.pid, [{"kind": "click", "x": w["X"]+w["Width"]*.7,
                                 "y": w["Y"]+w["Height"]*.7, "at": .5}], 2, record)
     event = Handler.events.get((ident, "color"))
     if not event:
         raise Invalid("synthetic color-change beacon missing")
-    known = event["wall"]/1000-wall_offset
+    # Python's monotonic clock includes sleep on macOS; capture uses host time.
+    clock = raw["clock"]
+    known = event["wall"]/1000 + clock["host_seconds"] - clock["wall_seconds"]
     first = next((f["t"] for f in raw["frames"] if f.get("green", 0) > .2), None)
     delta = (first-known)*1000 if first else None
     delay = (known-raw["events"][0]["t"])*1000

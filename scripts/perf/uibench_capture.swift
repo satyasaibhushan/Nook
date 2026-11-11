@@ -86,6 +86,9 @@ func perform(_ action: [String: Any]) -> Double {
         for down in [true, false] {
             let event = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: down)!
             event.flags = f
+            // Synthetic events start with timestamp zero on some macOS releases.
+            // Stamp the posted event so NSEvent and capture share the host clock.
+            event.timestamp = UInt64(now() * 1_000_000_000)
             if down { stamp = Double(event.timestamp) / 1_000_000_000 }
             event.post(tap: .cghidEventTap)
         }
