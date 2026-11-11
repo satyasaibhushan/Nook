@@ -22,10 +22,13 @@ struct HistoryTextIndexCheck {
         do { let r = await index.search("anything", limit: 3); precondition(r.isEmpty) }
         await index.delete(url: "https://a.example/")
         precondition(!FileManager.default.fileExists(atPath: index.fileURL.path))
+        do { let e = await index.exists(); precondition(!e) }
 
         let old = Date(timeIntervalSince1970: 1_700_000_000)
         await index.record(url: "https://a.example/", title: "Kettle review", body: "The thermostat holds water at eighty degrees. Café crème.", visitedAt: old)
         await index.record(url: "https://b.example/", title: "Bikes", body: "Gear ratios and the thermostat of nothing.", visitedAt: old.addingTimeInterval(60))
+
+        do { let e = await index.exists(); precondition(e) }
 
         // Every word is a prefix term, in any order, diacritics folded.
         do { let r = await index.search("thermo", limit: 5); precondition(r.count == 2) }
