@@ -682,7 +682,7 @@ class BrowserManager: ObservableObject {
             extraWidth: windowState.isSidebarVisible ? windowState.sidebarWidth - pageInset : 0,
             pinnedToRight: nookSettings?.sidebarPosition == .right
         ) : nil
-        withAnimation(.easeInOut(duration: 0.1), completionCriteria: .removed) {
+        withAnimation(.easeInOut(duration: canHoldWidth ? 0.15 : 0.1), completionCriteria: .removed) {
             windowState.isSidebarVisible.toggle()
         } completion: { [weak container] in
             if let holdID { container?.finishSidebarTransition(holdID) }
