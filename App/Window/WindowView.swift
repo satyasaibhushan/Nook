@@ -472,33 +472,39 @@ struct TrafficLights: NSViewRepresentable, Animatable {
     /// Fades them with whatever they belong to at the moment (the sidebar, then the library).
     var alpha: CGFloat = 1
 
-    /// So the library's spring fades them frame by frame instead of jumping at the end.
-    var animatableData: CGFloat {
-        get { alpha }
-        set { alpha = newValue }
+    // Native window buttons need the same translation as the SwiftUI sidebar.
+    var sidebarOffset: CGFloat = 0
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(alpha, sidebarOffset) }
+        set {
+            alpha = newValue.first
+            sidebarOffset = newValue.second
+        }
     }
 
     func makeNSView(context: Context) -> TrafficLightsView { TrafficLightsView() }
     func updateNSView(_ view: TrafficLightsView, context: Context) {
-        view.visible = visible
-        view.alpha = alpha
+        view.update(visible: visible, alpha: alpha, sidebarOffset: sidebarOffset)
     }
 }
 
 /// The only code that shows or hides the window buttons. Leaving full screen paints a frame with
 /// them at the bare inset before the toolbar is back, so they stay hidden until the exit ends.
 final class TrafficLightsView: NSView {
-    var visible = true {
-        didSet { if visible != oldValue { apply() } }
+    private var visible = true
+    private var alpha: CGFloat = 1
+    private var sidebarOffset: CGFloat = 0
+    private var buttonOrigins: [NSWindow.ButtonType: CGFloat] = [:]
+    private var appliedSidebarOffset: CGFloat = 0
+
+    func update(visible: Bool, alpha: CGFloat, sidebarOffset: CGFloat) {
+        self.visible = visible
+        self.alpha = alpha
+        self.sidebarOffset = sidebarOffset
+        apply()
     }
-    var alpha: CGFloat = 1 {
-        didSet {
-            guard alpha != oldValue else { return }
-            for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-                window?.standardWindowButton(type)?.alphaValue = alpha
-            }
-        }
-    }
+
     private var exitingFullScreen = false
     private var observers: [any NSObjectProtocol] = []
 
@@ -506,6 +512,7 @@ final class TrafficLightsView: NSView {
         super.viewDidMoveToWindow()
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
+        buttonOrigins.removeAll()
         guard let window else { return }
         let center = NotificationCenter.default
         observers = [
@@ -530,8 +537,17 @@ final class TrafficLightsView: NSView {
 
     private func apply() {
         for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window?.standardWindowButton(type)?.isHidden = !visible || exitingFullScreen
-            window?.standardWindowButton(type)?.alphaValue = alpha
+            guard let button = window?.standardWindowButton(type) else { continue }
+            var origin = buttonOrigins[type] ?? button.frame.minX
+            // AppKit repositions these when the toolbar or full-screen window changes.
+            if abs(button.frame.minX - origin - appliedSidebarOffset) > 0.5 {
+                origin = button.frame.minX
+            }
+            buttonOrigins[type] = origin
+            button.setFrameOrigin(NSPoint(x: origin + sidebarOffset, y: button.frame.minY))
+            button.isHidden = !visible || exitingFullScreen || alpha <= 0
+            button.alphaValue = alpha
         }
+        appliedSidebarOffset = sidebarOffset
     }
 }

@@ -70,6 +70,6 @@ struct ReloadButton: View {
         }
         .labelStyle(.iconOnly)
         .accessibilityLabel(showsStop ? "Stop Loading" : "Reload")
-        .transaction { $0.animation = nil }
+        .animation(nil, value: showsStop)
     }
 }
