@@ -59,28 +59,39 @@ final class HoverTrackingNSView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil { HoverActivationRegistry.shared.register(self) }
+        NotificationCenter.default.removeObserver(self, name: HoverResync.notification, object: nil)
+        if let window {
+            NotificationCenter.default.addObserver(self, selector: #selector(resyncRequested), name: HoverResync.notification, object: nil)
+            HoverActivationRegistry.shared.register(self)
+        }
         resyncHover()
     }
 
+    @objc private func resyncRequested() { resyncHover() }
+
     /// Derives hover from where the pointer actually is, for the cases no enter/exit arrives.
     fileprivate func resyncHover() {
-        // Layout can request this while SwiftUI is updating. Read the final geometry on the queue.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            guard let window = self.window, self.always || window.isKeyWindow else {
-                self.setHover(false)
-                return
-            }
-            let point = self.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            self.setHover(self.visibleRect.contains(point))
+        guard let window, always || window.isKeyWindow else {
+            setHover(false, deferred: true)
+            return
         }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setHover(bounds.contains(point), deferred: true)
     }
 
-    private func setHover(_ value: Bool) {
-        guard !HoverResync.isMenuTracking, value != isHovered else { return }
+    /// `deferred` keeps a resync out of the layout pass that triggered it; real enter and exit
+    /// events stay synchronous so hover never lags a frame behind the pointer.
+    private func setHover(_ value: Bool, deferred: Bool = false) {
+        guard value != isHovered else { return }
         isHovered = value
-        onHover?(value)
+        guard deferred else {
+            onHover?(value)
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isHovered == value else { return }
+            self.onHover?(value)
+        }
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -96,13 +107,10 @@ final class HoverTrackingNSView: NSView {
 private final class HoverActivationRegistry {
     static let shared = HoverActivationRegistry()
     private let views = NSHashTable<HoverTrackingNSView>.weakObjects()
-    private var observers: [NSObjectProtocol] = []
-    fileprivate var trackingMenus = Set<ObjectIdentifier>()
-    fileprivate var menuWaiters: [CheckedContinuation<Void, Never>] = []
+    private var observer: NSObjectProtocol?
 
     private init() {
-        let center = NotificationCenter.default
-        observers.append(center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] notification in
+        observer = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] notification in
             MainActor.assumeIsolated {
                 guard let self, let window = notification.object as? NSWindow else { return }
                 for view in self.views.allObjects where view.window === window && !view.always {
@@ -110,33 +118,7 @@ private final class HoverActivationRegistry {
                     if view.isHovered || view.visibleRect.contains(point) { view.resyncHover() }
                 }
             }
-        })
-        observers.append(center.addObserver(forName: HoverResync.notification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.views.allObjects.forEach { $0.resyncHover() }
-            }
-        })
-        observers.append(center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] notification in
-            MainActor.assumeIsolated {
-                guard let menu = notification.object as? NSMenu else { return }
-                self?.trackingMenus.insert(ObjectIdentifier(menu))
-            }
-        })
-        observers.append(center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] notification in
-            MainActor.assumeIsolated {
-                guard let self, let menu = notification.object as? NSMenu else { return }
-                self.trackingMenus.remove(ObjectIdentifier(menu))
-                guard self.trackingMenus.isEmpty else { return }
-                center.post(name: HoverResync.notification, object: nil)
-                // Reconcile tile and card hover before a delayed dismissal checks its holds.
-                DispatchQueue.main.async {
-                    guard self.trackingMenus.isEmpty else { return }
-                    let waiters = self.menuWaiters
-                    self.menuWaiters.removeAll()
-                    waiters.forEach { $0.resume() }
-                }
-            }
-        })
+        }
     }
 
     func register(_ view: HoverTrackingNSView) { views.add(view) }
@@ -145,17 +127,7 @@ private final class HoverActivationRegistry {
 /// Rows that slide under a resting pointer get no enter event (`.inVisibleRect` areas move
 /// without `updateTrackingAreas`), so a close asks every hover view to check the pointer again.
 public enum HoverResync {
-    public static let notification = Notification.Name("NookHoverResync")
-
-    @MainActor public static var isMenuTracking: Bool {
-        !HoverActivationRegistry.shared.trackingMenus.isEmpty
-    }
-
-    /// A delayed hover card must keep its current state until native menus finish tracking.
-    @MainActor public static func waitForMenuTracking() async {
-        guard isMenuTracking else { return }
-        await withCheckedContinuation { HoverActivationRegistry.shared.menuWaiters.append($0) }
-    }
+    static let notification = Notification.Name("NookHoverResync")
 
     @MainActor public static func request(after delay: TimeInterval) {
         // Once when the slide should be done, once more for a frame that landed late.

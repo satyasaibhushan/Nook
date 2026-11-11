@@ -10,7 +10,6 @@ import SwiftUI
 import AppKit
 import NookSettings
 import NookWeb
-import NookUI
 
 /// Manages reveal/hide of the overlay sidebar when the real sidebar is collapsed.
 /// Uses a global mouse-move monitor to handle edge hover, including slight overshoot
@@ -36,9 +35,6 @@ final class HoverSidebarManager: ObservableObject {
 
     // MARK: - Monitors
     private static weak var monitorOwner: HoverSidebarManager?
-    private static let resyncObserver = NotificationCenter.default.addObserver(forName: HoverResync.notification, object: nil, queue: .main) { _ in
-        monitorOwner?.scheduleHandleMouseMovement()
-    }
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var isActive: Bool = false
@@ -70,7 +66,6 @@ final class HoverSidebarManager: ObservableObject {
 
     @MainActor
     func updateMonitoring(for state: BrowserWindowState) {
-        _ = Self.resyncObserver
         let eligible = NSApp.isActive && state.isActive
             && !state.isSidebarVisible && !state.showsFullscreenPage
         guard eligible else { stop(); return }
@@ -103,10 +98,9 @@ final class HoverSidebarManager: ObservableObject {
         if Self.monitorOwner === self { Self.monitorOwner = nil }
         if let token = localMonitor { NSEvent.removeMonitor(token); localMonitor = nil }
         if let token = globalMonitor { NSEvent.removeMonitor(token); globalMonitor = nil }
-        Task { @MainActor [weak self] in
-            await HoverResync.waitForMenuTracking()
+        DispatchQueue.main.async { [weak self] in
             // An unchanged write still redraws every view observing the manager.
-            guard let self, !self.isActive, self.isOverlayVisible else { return }
+            guard let self, self.isOverlayVisible else { return }
             self.isOverlayVisible = false
         }
     }
@@ -123,7 +117,7 @@ final class HoverSidebarManager: ObservableObject {
 
     @MainActor
     private func handleMouseMovementOnMain() {
-        guard isActive, !HoverResync.isMenuTracking, browserManager != nil,
+        guard browserManager != nil,
               let registry = windowRegistry,
               let activeState = registry.activeWindow else { return }
 
