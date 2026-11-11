@@ -140,10 +140,7 @@ struct SpaceView: View {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                         rowView(row, zone: zone, split: split, isDropTarget: position == DropPosition(zone: zone, index: index, placement: .into))
                             .padding(.leading, CGFloat(row.depth) * NookDesign.Spacing.folderIndent)
-                            .transition(.asymmetric(
-                                insertion: .identity,
-                                removal: .opacity
-                            ))
+                            .transition(.identity)
                             // Zen keeps a dimmed source in place while its floating card
                             // follows the pointer freely; only the insertion marker moves.
                             .opacity(preview.containsDraggedRow(id: row.id) ? (dragSession.isFinishingDrag ? 0 : 0.3) : 1)
