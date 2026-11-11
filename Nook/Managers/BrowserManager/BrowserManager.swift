@@ -682,8 +682,7 @@ class BrowserManager: ObservableObject {
             extraWidth: windowState.isSidebarVisible ? windowState.sidebarWidth - pageInset : 0,
             pinnedToRight: nookSettings?.sidebarPosition == .right
         ) : nil
-        // easeOut puts visible travel in the first frame; easeInOut's slow start read as dead time.
-        withAnimation(canHoldWidth ? .easeOut(duration: 0.15) : .easeInOut(duration: 0.1), completionCriteria: .removed) {
+        withAnimation(.easeInOut(duration: canHoldWidth ? 0.15 : 0.1), completionCriteria: .removed) {
             windowState.isSidebarVisible.toggle()
         } completion: { [weak container] in
             if let holdID { container?.finishSidebarTransition(holdID) }
