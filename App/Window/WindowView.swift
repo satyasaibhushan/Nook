@@ -472,7 +472,7 @@ struct TrafficLights: View, Animatable {
     /// Fades them with whatever they belong to at the moment (the sidebar, then the library).
     var alpha: CGFloat = 1
 
-    // The toolbar must clear the native buttons before they can fade in.
+    /// How far the sidebar they sit in is from its resting place.
     var sidebarOffset: CGFloat = 0
 
     var animatableData: AnimatablePair<CGFloat, CGFloat> {
@@ -543,15 +543,15 @@ final class TrafficLightsView: NSView {
     }
 
     private func apply() {
-        guard let window, let contentView = window.contentView else { return }
+        guard let window else { return }
         let buttonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
         let buttons = buttonTypes.compactMap { window.standardWindowButton($0) }
-        let rightEdge = buttons.map { contentView.convert($0.bounds, from: $0).maxX }.max() ?? 0
-        let clearance = max(NookDesign.SidebarChrome.trafficLightsInset - rightEdge, 1)
-        let opacity = alpha * max(0, 1 - abs(sidebarOffset) / clearance)
+        // They ride with the sidebar, so they never sit over the page or pop in after the slide.
+        let travel = CGAffineTransform(translationX: sidebarOffset, y: 0)
         for button in buttons {
-            button.isHidden = !visible || exitingFullScreen || opacity <= 0
-            button.alphaValue = opacity
+            button.isHidden = !visible || exitingFullScreen || alpha <= 0
+            button.alphaValue = alpha
+            button.layer?.setAffineTransform(travel)
         }
     }
 }

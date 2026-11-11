@@ -3,7 +3,7 @@ import Foundation
 
 /// Progress belongs to one navigation. The clock is supplied so short loads need no timer in tests.
 public struct LoadingProgressState {
-    public static let showDelay: TimeInterval = 0.12
+    public static let showDelay: TimeInterval = 0.07
     public private(set) var navigationID: UUID?
     public private(set) var progress: Double = 0
     public private(set) var isVisible = false
