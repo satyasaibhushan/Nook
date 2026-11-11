@@ -93,8 +93,16 @@ def key(name, *flags, at=0.5):
     return {"kind": "key", "code": KEYS[name], "flags": list(flags), "at": at}
 
 
+# The browser the benchmark launched; keyboard events are dropped unless it holds focus.
+KEYBOARD_OWNER = None
+
+
+def guarded(actions):
+    return [{**a, "guard": KEYBOARD_OWNER} if KEYBOARD_OWNER and a.get("kind") in ("key", "text") else a for a in actions]
+
+
 def act(*actions):
-    return spec_call("action", list(actions))
+    return spec_call("action", guarded(actions))
 
 
 def text(value):
@@ -150,7 +158,7 @@ def leave_arc_running(path):
 def capture(pid, actions=(), duration=2, record=None, ocr=None, signatures=False, native=False, region=None, attribution=None):
     visible = window(pid)
     result = spec_call("capture", {"pid": pid, "window_id": visible["kCGWindowNumber"] if visible else None,
-                                   "actions": list(actions), "duration": duration, "ocr_needle":ocr,"signatures":signatures,
+                                   "actions": guarded(actions), "duration": duration, "ocr_needle":ocr,"signatures":signatures,
                                    "region":region,
                                    "native_resolution":native, **(attribution or {}),
                                    **({"record_dir": str(record)} if record else {})})
@@ -308,6 +316,8 @@ class Browser:
             self.launch_time = launched["start"]
             self.proc = OwnedProcess(launched["pid"])
             self.pid = self.proc.pid
+        global KEYBOARD_OWNER
+        KEYBOARD_OWNER = self.pid
         deadline = time.monotonic() + 30
         self.activate()
         if self.name == "arc":

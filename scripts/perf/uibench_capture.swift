@@ -57,9 +57,18 @@ func flags(_ names: [String]) -> CGEventFlags {
     }
     return f
 }
+/// Keyboard events go to whichever app has focus, so they are posted only while the
+/// benchmark's own browser holds it. A dropped event fails the trial instead of typing elsewhere.
+func ownsKeyboard(_ action: [String: Any]) -> Bool {
+    guard let owner = action["guard"] as? Int32 else { return true }
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier == owner { return true }
+    FileHandle.standardError.write(Data("keyboard event dropped: pid \(owner) lost focus\n".utf8))
+    return false
+}
 func perform(_ action: [String: Any]) -> Double {
-    let stamp = now()
     let kind = action["kind"] as? String ?? "key"
+    if ["key", "text"].contains(kind), !ownsKeyboard(action) { return now() }
+    let stamp = now()
     if kind == "activate", let pid = action["pid"] as? Int32 {
         NSRunningApplication(processIdentifier: pid)?.activate(options: [])
     } else if kind == "key" {
@@ -88,6 +97,7 @@ func perform(_ action: [String: Any]) -> Double {
         let chars = Array((action["text"] as? String ?? "").utf16)
         for offset in stride(from: 0, to: chars.count, by: 16) {
             let chunk = Array(chars[offset..<min(chars.count, offset+16)])
+            if offset > 0, !ownsKeyboard(action) { break }
             for down in [true, false] {
                 let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)!
                 event.flags = []
