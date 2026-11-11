@@ -467,12 +467,12 @@ struct WindowView: View {
     }
 }
 
-struct TrafficLights: NSViewRepresentable, Animatable {
+struct TrafficLights: View, Animatable {
     let visible: Bool
     /// Fades them with whatever they belong to at the moment (the sidebar, then the library).
     var alpha: CGFloat = 1
 
-    // Native window buttons need the same translation as the SwiftUI sidebar.
+    // The toolbar must clear the native buttons before they can fade in.
     var sidebarOffset: CGFloat = 0
 
     var animatableData: AnimatablePair<CGFloat, CGFloat> {
@@ -482,6 +482,16 @@ struct TrafficLights: NSViewRepresentable, Animatable {
             sidebarOffset = newValue.second
         }
     }
+
+    var body: some View {
+        TrafficLightsBridge(visible: visible, alpha: alpha, sidebarOffset: sidebarOffset)
+    }
+}
+
+private struct TrafficLightsBridge: NSViewRepresentable {
+    let visible: Bool
+    let alpha: CGFloat
+    let sidebarOffset: CGFloat
 
     func makeNSView(context: Context) -> TrafficLightsView { TrafficLightsView() }
     func updateNSView(_ view: TrafficLightsView, context: Context) {
@@ -495,8 +505,6 @@ final class TrafficLightsView: NSView {
     private var visible = true
     private var alpha: CGFloat = 1
     private var sidebarOffset: CGFloat = 0
-    private var buttonOrigins: [NSWindow.ButtonType: CGFloat] = [:]
-    private var appliedSidebarOffset: CGFloat = 0
 
     func update(visible: Bool, alpha: CGFloat, sidebarOffset: CGFloat) {
         self.visible = visible
@@ -512,7 +520,6 @@ final class TrafficLightsView: NSView {
         super.viewDidMoveToWindow()
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
-        buttonOrigins.removeAll()
         guard let window else { return }
         let center = NotificationCenter.default
         observers = [
@@ -536,18 +543,15 @@ final class TrafficLightsView: NSView {
     }
 
     private func apply() {
-        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            guard let button = window?.standardWindowButton(type) else { continue }
-            var origin = buttonOrigins[type] ?? button.frame.minX
-            // AppKit repositions these when the toolbar or full-screen window changes.
-            if abs(button.frame.minX - origin - appliedSidebarOffset) > 0.5 {
-                origin = button.frame.minX
-            }
-            buttonOrigins[type] = origin
-            button.setFrameOrigin(NSPoint(x: origin + sidebarOffset, y: button.frame.minY))
-            button.isHidden = !visible || exitingFullScreen || alpha <= 0
-            button.alphaValue = alpha
+        guard let window, let contentView = window.contentView else { return }
+        let buttonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        let buttons = buttonTypes.compactMap { window.standardWindowButton($0) }
+        let rightEdge = buttons.map { contentView.convert($0.bounds, from: $0).maxX }.max() ?? 0
+        let clearance = max(NookDesign.SidebarChrome.trafficLightsInset - rightEdge, 1)
+        let opacity = alpha * max(0, 1 - abs(sidebarOffset) / clearance)
+        for button in buttons {
+            button.isHidden = !visible || exitingFullScreen || opacity <= 0
+            button.alphaValue = opacity
         }
-        appliedSidebarOffset = sidebarOffset
     }
 }
