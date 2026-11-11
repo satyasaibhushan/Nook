@@ -370,6 +370,9 @@ class Browser:
             args = [str(self.exe)]
             if self.name == "chrome":
                 args += [f"--user-data-dir={self.temp.name}", "--no-first-run", "--no-default-browser-check"]
+                if os.environ.get("M3_SMALL_CACHE") == "1":
+                    args += ["--disk-cache-size=1048576", "--media-cache-size=1048576",
+                             "--disable-gpu-shader-disk-cache"]
             if self.name == "zen":
                 (Path(self.temp.name)/"user.js").write_text('user_pref("browser.shell.checkDefaultBrowser", false);\nuser_pref("zen.welcome-screen.seen", true);\nuser_pref("browser.startup.homepage_override.mstone", "ignore");\n')
                 args += ["-profile", self.temp.name, "-no-remote", "-new-instance"]

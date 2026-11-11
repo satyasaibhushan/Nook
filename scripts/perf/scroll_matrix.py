@@ -197,6 +197,7 @@ def trial(condition, attempt):
     u.KEYBOARD_OWNER = None
     os.environ['M3_HIDE_BORDER'] = 'YES' if condition == 'border' else 'NO'
     os.environ['M3_LINK_STATUS'] = 'NO' if condition == 'status' else 'YES'
+    os.environ['M3_SMALL_CACHE'] = '1'
     if condition == 'plain':
         b = Plain('plain', OUT/'Plain.app')
     elif condition == 'chrome':
@@ -205,6 +206,7 @@ def trial(condition, attempt):
         b = u.Browser('nook', H/'variants/m3/Nook.app')
     stem = f'scroll-r{ROUND:02d}-{condition}-a{attempt}'
     record = {'round':ROUND, 'condition':condition, 'attempt':attempt, 'status':'discarded'}
+    raw = beacon = None
     try:
         retry(b.launch)
         record.update({'pid':b.pid, 'identity':b.proc.identity, 'profile':b.temp.name,
@@ -224,25 +226,33 @@ def trial(condition, attempt):
         u.act({'kind':'move', 'x':bounds['X']+bounds['Width']*.7, 'y':bounds['Y']+400})
         time.sleep(.4)
         start_load = os.getloadavg()[0]
-        raw = retry(u.capture, b.pid, actions(), 5.1, OUT/(stem+'-rec') if ROUND == 1 else None,
+        raw = retry(u.capture, b.pid, actions(), 5.1, OUT/(stem+'-rec') if ROUND == 5 else None,
                     attribution={'scroll_scan':[bounds['X']+bounds['Width']-32, scan_y, scan_height]})
         raw.update({'fixture_id':ident, 'scan_page_y':scan_y,
                     'load_start':start_load, 'load_end':os.getloadavg()[0]})
-        save(OUT/(stem+'-raw.json'), raw)
         deadline = time.monotonic()+4
         while (ident, 'scrolltrace') not in u.Handler.events and time.monotonic() < deadline:
             time.sleep(.05)
         beacon = u.Handler.events.get((ident, 'scrolltrace'))
         if not beacon:
             raise u.Invalid('page-side rAF trace missing')
-        save(OUT/(stem+'-beacon.json'), beacon)
         record.update(metrics(raw, beacon))
         record.update({'status':'valid', 'load_start':start_load, 'load_end':raw['load_end'],
                        'noisy':max(start_load, raw['load_end'])>4, 'raw':stem+'-raw.json', 'beacon':stem+'-beacon.json'})
-    except u.Invalid as error:
+    except (u.Invalid, OSError) as error:
         record['reason'] = str(error)
     finally:
+        if b.proc:
+            record.setdefault('pid',b.pid)
+            record.setdefault('identity',b.proc.identity)
+            record.setdefault('profile',b.temp.name)
         cleanup(b, record)
+        # Persist after releasing the app's temporary footprint. Capturing into
+        # memory must not lose a completed trial when the volume is nearly full.
+        if raw is not None:
+            save(OUT/(stem+'-raw.json'), raw)
+        if beacon is not None:
+            save(OUT/(stem+'-beacon.json'), beacon)
         save(OUT/(stem+'-result.json'), record)
         print(json.dumps({k:v for k,v in record.items() if k not in ('presented','movement','raf','owned_processes','launch_command')}), flush=True)
     return record
@@ -281,7 +291,7 @@ if __name__ == '__main__':
         checks()
         raise SystemExit(0)
     ROUND = args.round
-    assert ROUND is not None and 1 <= ROUND <= 10
+    assert ROUND is not None and 1 <= ROUND <= 14
     DEADLINE = time.monotonic()+480
     u.HELPER = OUT/'scroll-capture'
     original_act = u.act
