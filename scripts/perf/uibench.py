@@ -312,7 +312,7 @@ class Handler(bench.Handler):
         </head><body><header>UIBENCH IDENT<br>Local browser benchmark</header>
         <a id=next href='DEST'>Open next local page</a>EXTRA<script>
         const ID='IDENT';
-        window.onload=()=>navigator.sendBeacon('/ui-event',JSON.stringify({id:ID,kind:'load',wall:Date.now()}));
+        window.onload=()=>navigator.sendBeacon('/ui-event',JSON.stringify({id:ID,kind:'load',wall:Date.now(),viewport:[innerWidth,innerHeight]}));
         SCRIPT
         </script></body></html>"""
         for token, value in [("COLOR", COLORS[color]), ("DEST", dest), ("EXTRA", extra), ("SCRIPT", script), ("IDENT", ident)]:

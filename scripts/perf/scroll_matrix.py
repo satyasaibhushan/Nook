@@ -90,6 +90,8 @@ def metrics(raw, beacon):
     page = [p for p in page if t0 <= p['t'] <= t0+3]
     raf_gaps = [b['page_ms']-a['page_ms'] for a,b in zip(page,page[1:])]
     wheel = beacon['wheel']
+    if beacon['viewport'] != [930,750]:
+        raise u.Invalid(f'content viewport mismatch: {beacon["viewport"]}')
     if not wheel or any(mode != 0 or delta < 0 or abs(delta/12-round(delta/12)) > .01 for _,delta,mode in wheel) or abs(sum(e[1] for e in wheel)-4320) > 1:
         raise u.Invalid('page did not receive the complete pixel-precise scroll gesture')
     if abs(points[-1]['y']-4320) > 2 or abs(beacon['frames'][-1][1]-4320) > 2:
@@ -117,8 +119,16 @@ class Plain(u.Browser):
         time.sleep(1)
 
     def page(self, **kw):
-        if (self.ident, 'load') not in u.Handler.events:
-            raise u.Invalid('plain fixture load beacon missing')
+        # The first document can load before AX window normalization finishes.
+        u.Handler.events.pop((self.ident,'load'),None)
+        u.KEYS['r'] = 15
+        u.act(u.key('r','cmd'))
+        deadline = time.monotonic()+5
+        while (self.ident,'load') not in u.Handler.events and time.monotonic() < deadline:
+            time.sleep(.05)
+        if (self.ident,'load') not in u.Handler.events:
+            raise u.Invalid('plain fixture reload beacon missing')
+        time.sleep(.35)
         return self.ident
 
 
@@ -205,12 +215,16 @@ def trial(condition, attempt):
             save(OUT/'scroll-calibration.json', retry(u.validation, b, OUT/'scroll-calibration-rec'))
         ident = retry(b.page, kind='long')
         bounds = u.window(b.pid)['kCGWindowBounds']
+        viewport = u.Handler.events[(ident,'load')]['viewport']
+        u.helper('resize',b.pid,bounds['X'],bounds['Y'],bounds['Width']+930-viewport[0],bounds['Height']+750-viewport[1])
+        time.sleep(.5)
+        bounds = u.window(b.pid)['kCGWindowBounds']
         scan_y = bounds['Y']+240
         scan_height = 300
         u.act({'kind':'move', 'x':bounds['X']+bounds['Width']*.7, 'y':bounds['Y']+400})
         time.sleep(.4)
         start_load = os.getloadavg()[0]
-        raw = retry(u.capture, b.pid, actions(), 5.1, OUT/(stem+'-rec'),
+        raw = retry(u.capture, b.pid, actions(), 5.1, OUT/(stem+'-rec') if ROUND == 1 else None,
                     attribution={'scroll_scan':[bounds['X']+bounds['Width']-32, scan_y, scan_height]})
         raw.update({'fixture_id':ident, 'scan_page_y':scan_y,
                     'load_start':start_load, 'load_end':os.getloadavg()[0]})
