@@ -21,7 +21,6 @@ struct CommandPaletteView: View {
     @EnvironmentObject var gradientColorManager: GradientColorManager
     @State private var searchManager = SearchManager()
     @Environment(\.nookSettings) var nookSettings
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var text: String = ""
     @State private var selectedSuggestionID: SearchManager.SearchSuggestion.ID?
@@ -235,9 +234,7 @@ struct CommandPaletteView: View {
 
         }
         .allowsHitTesting(isVisible)
-        .animation(isVisible && !reduceMotion ? .easeOut(duration: 0.09) : nil) { content in
-            content.opacity(isVisible ? 1.0 : 0.0)
-        }
+        .opacity(isVisible ? 1.0 : 0.0)
         .onChange(of: commandPalette.focusRequest, initial: true) { _, _ in
             guard commandPalette.isVisible else { return }
             searchManager.setTabs(browserManager.tabs, window: windowState)
