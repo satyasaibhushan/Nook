@@ -107,7 +107,11 @@ public final class PageSession: NSObject, Identifiable {
     }
 
     public internal(set) var loadingNavigationID = UUID()
-    public var loadingState: LoadingState = .idle
+    public var loadingState: LoadingState = .idle {
+        didSet {
+            os_signpost(.event, log: BrowserPerformance.measurement, name: "LoadingWrite", "old=%{public}d new=%{public}d state=%{public}s item=%{public}s", oldValue.isLoading ? 1 : 0, loadingState.isLoading ? 1 : 0, loadingState.description, itemID.uuidString)
+        }
+    }
     public var isLoading: Bool { loadingState.isLoading }
     public var canGoBack: Bool = false
     public var canGoForward: Bool = false

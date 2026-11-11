@@ -655,7 +655,10 @@ struct TabCompositorWrapper: NSViewRepresentable {
                 abs(CGFloat(context.coordinator.lastFraction) - CGFloat(splitFraction)) <= 0.0001 &&
                 context.coordinator.lastVersion == compositorVersion &&
                 context.coordinator.lastFullscreenInWindow == fullscreenInWindow
+            os_signpost(.event, log: BrowserPerformance.measurement, name: "CompositorSwapBegin")
             updateCompositor(nsView, reason: sizeOnly ? 1 : 2)
+            os_signpost(.event, log: BrowserPerformance.measurement, name: "CompositorSwapEnd")
+            BrowserPerformance.measureNextCommit()
             context.coordinator.lastIsSplit = isSplit
             context.coordinator.lastLeftId = leftId
             context.coordinator.lastRightId = rightId

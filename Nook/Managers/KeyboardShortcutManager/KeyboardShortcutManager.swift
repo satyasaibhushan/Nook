@@ -214,6 +214,7 @@ class KeyboardShortcutManager {
     // MARK: - Shortcut Execution
 
     func executeShortcut(_ event: NSEvent) -> Bool {
+        os_signpost(.event, log: BrowserPerformance.measurement, name: "ShortcutEntry", "event_seconds=%{public}.9f code=%{public}d", event.timestamp, event.keyCode)
         // Prevent re-entrancy when forwarding events to WebView
         guard !isForwardingEvent else {
             return false
@@ -533,8 +534,12 @@ class KeyboardShortcutManager {
         if action == .toggleSidebar {
             os_signpost(.event, log: BrowserPerformance.sidebar, name: "ActionQueued")
         }
+        os_signpost(.event, log: BrowserPerformance.measurement, name: "ShortcutQueued", "action=%{public}s", action.rawValue)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            let measurementID = OSSignpostID(log: BrowserPerformance.measurement)
+            os_signpost(.begin, log: BrowserPerformance.measurement, name: "ShortcutAction", signpostID: measurementID, "action=%{public}s", action.rawValue)
+            defer { os_signpost(.end, log: BrowserPerformance.measurement, name: "ShortcutAction", signpostID: measurementID) }
             if action == .toggleSidebar {
                 os_signpost(.event, log: BrowserPerformance.sidebar, name: "ActionRun")
             }

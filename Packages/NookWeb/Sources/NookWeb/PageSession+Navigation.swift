@@ -20,6 +20,7 @@ extension PageSession: WKNavigationDelegate {
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
         loadingNavigationID = UUID()
+        os_signpost(.event, log: BrowserPerformance.measurement, name: "NavigationStart", "item=%{public}s", itemID.uuidString)
         loadingState = .didStartProvisionalNavigation
         blockedURL = nil
         controller?.tabEvents?.tabPropertiesChanged(self, properties: [.loading])
@@ -49,6 +50,7 @@ extension PageSession: WKNavigationDelegate {
         _ webView: WKWebView,
         didCommit navigation: WKNavigation!
     ) {
+        os_signpost(.event, log: BrowserPerformance.measurement, name: "NavigationCommit", "item=%{public}s", itemID.uuidString)
         loadingState = .didCommit
         navigationRewrites = 0
         linkPreview = nil
@@ -93,6 +95,7 @@ extension PageSession: WKNavigationDelegate {
         _ webView: WKWebView,
         didFinish navigation: WKNavigation!
     ) {
+        os_signpost(.event, log: BrowserPerformance.measurement, name: "NavigationFinish", "item=%{public}s", itemID.uuidString)
         loadingState = .didFinish
         pdfLoadStateChanged(webView)
         controller?.tabEvents?.tabPropertiesChanged(self, properties: [.loading])

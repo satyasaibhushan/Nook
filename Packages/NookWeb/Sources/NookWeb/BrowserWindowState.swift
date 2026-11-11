@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import OSLog
 import NookTabsCore
 import SwiftUI
 
@@ -199,7 +200,13 @@ public class BrowserWindowState {
     public var spaceSwipe: SpaceSwipe?
 
     /// The selected item per space in this window.
-    var selectedItemBySpace: [UUID: UUID] = [:]
+    var selectedItemBySpace: [UUID: UUID] = [:] {
+        didSet {
+            if oldValue != selectedItemBySpace {
+                os_signpost(.event, log: BrowserPerformance.measurement, name: "SelectionMutation")
+            }
+        }
+    }
 
     /// Items this window selected in each space, most recent last. Closing the selected item
     /// returns to the one before it. In memory only.

@@ -1,9 +1,27 @@
 // Licensed under GPL-3.0. See LICENSE.
 import Foundation
 import OSLog
+import QuartzCore
+import ObjectiveC
 
 /// Shared Instruments intervals. Payloads never contain browsing URLs or titles.
 public enum BrowserPerformance {
+    public static let measurement = OSLog(subsystem: "Nook.Perf", category: "Measurement")
+
+    /// Diagnostic post-commit hook. Phase 2 is QuartzCore's post-commit observer phase.
+    @MainActor public static func measureNextCommit() {
+        let selector = NSSelectorFromString("addCommitHandler:forPhase:")
+        guard let method = class_getClassMethod(CATransaction.self, selector) else {
+            os_signpost(.event, log: measurement, name: "CommitHookUnavailable")
+            return
+        }
+        typealias Handler = @convention(block) () -> Void
+        typealias Add = @convention(c) (AnyClass, Selector, Handler, UInt32) -> Void
+        let add = unsafeBitCast(method_getImplementation(method), to: Add.self)
+        let handler: Handler = { os_signpost(.event, log: measurement, name: "CAPostCommit") }
+        add(CATransaction.self, selector, handler, 2)
+    }
+
     public static let activation = OSLog(subsystem: "Nook.Perf", category: "Activation")
     public static let hover = OSLog(subsystem: "Nook.Perf", category: "Hover")
     public static let sidebar = OSLog(subsystem: "Nook.Perf", category: "Sidebar")
