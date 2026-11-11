@@ -22,6 +22,7 @@ struct WindowView: View {
     @Environment(CommandPalette.self) private var commandPalette
     @Environment(WindowRegistry.self) private var windowRegistry
     @Environment(\.colorScheme) private var systemColorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(AIService.self) private var aiService
     @Environment(TabOrganizerManager.self) private var tabOrganizerManager
     @Environment(\.nookSettings) var nookSettings
@@ -354,6 +355,9 @@ struct WindowView: View {
                 .environment(windowState)
                 .environment(commandPalette)
                 .environmentObject(browserManager.gradientColorManager)
+                .transition(!reduceMotion && !windowState.showsFullscreenPage && !browserManager.splitManager.isSplit(for: windowState.id)
+                    ? .move(edge: nookSettings.sidebarPosition == .left ? .leading : .trailing)
+                    : .opacity)
         }
     }
 
