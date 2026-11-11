@@ -29,11 +29,7 @@ struct SidebarHistoryButtons: View {
                 .contextMenu {
                     NavigationHistoryContextMenu(historyType: .forward, windowState: windowState)
                 }
-            Button(action: reloadOrStop) {
-                Image(systemName: session?.isLoading == true ? "xmark" : "arrow.clockwise")
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .accessibilityLabel(session?.isLoading == true ? "Stop Loading" : "Reload")
+            ReloadButton(session: session)
         }
         .nookSidebarIconButtons()
     }
@@ -58,8 +54,19 @@ struct SidebarHistoryButtons: View {
     private func goForward() {
         if let webView = windowWebView { webView.goForward() } else { session?.goForward() }
     }
+}
 
-    private func reloadOrStop() {
-        if session?.isLoading == true { session?.stop() } else { session?.refresh() }
+/// The displayed glyph owns the action, including during the progress show delay.
+struct ReloadButton: View {
+    let session: PageSession?
+
+    var body: some View {
+        let showsStop = session?.loadingProgress.state.showsStopLoading(isLoading: session?.isLoading == true) == true
+        Button(showsStop ? "Stop Loading" : "Reload",
+               systemImage: showsStop ? "xmark" : "arrow.clockwise") {
+            if showsStop { session?.stop() } else { session?.refresh() }
+        }
+        .labelStyle(.iconOnly)
+        .transaction { $0.animation = nil }
     }
 }

@@ -106,8 +106,13 @@ public final class PageSession: NSObject, Identifiable {
         }
     }
 
-    public internal(set) var loadingNavigationID = UUID()
-    public var loadingState: LoadingState = .idle
+    public let loadingProgress = WebViewLoadingObserver()
+    public internal(set) var loadingNavigationID = UUID() {
+        didSet { loadingProgress.refresh() }
+    }
+    public var loadingState: LoadingState = .idle {
+        didSet { loadingProgress.refresh() }
+    }
     public var isLoading: Bool { loadingState.isLoading }
     public var canGoBack: Bool = false
     public var canGoForward: Bool = false
@@ -249,7 +254,9 @@ public final class PageSession: NSObject, Identifiable {
 
     // MARK: - Web View Ownership
 
-    var primaryWebView: WKWebView?
+    var primaryWebView: WKWebView? {
+        didSet { loadingProgress.attach(to: self) }
+    }
     /// The window that owns the primary web view; nil until a window displays the page.
     @ObservationIgnored var primaryWindowId: UUID?
 
