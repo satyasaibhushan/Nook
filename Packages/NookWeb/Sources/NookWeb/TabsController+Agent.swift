@@ -35,6 +35,9 @@ public final class AgentCaller {
     @ObservationIgnored public var callsInFlight = 0
     /// Set while its pages are out of the window for being idle.
     @ObservationIgnored public var isParked = false
+    /// The size its pages render at, in points; nil follows the window. A window showing the
+    /// Agent space renders them at its own size.
+    @ObservationIgnored public var viewport: CGSize?
     @ObservationIgnored public var idleTask: Task<Void, Never>?
 
     init(id: String, label: String, logins: String?, folderID: UUID, profile: Profile) {

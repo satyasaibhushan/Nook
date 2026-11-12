@@ -32,6 +32,27 @@ extension DevMCPServer {
         ),
     ]
 
+    static let checkTools: [AIToolDefinition] = [
+        AIToolDefinition(
+            name: "expect",
+            description: "Wait until the selected tab meets every condition given, checking every 0.1 s, then answer PASS, or FAIL with the actual values when timeout seconds (default 5, at most 20) pass first. url and title: the page's. state, text, value, count: of the element with ref or selector (the page body for text when neither is given; count is how many match selector). state: visible, hidden (also when absent), attached, detached, enabled, disabled, checked, unchecked or focused. Texts match when they contain the expected one, or equal it with exact: true.",
+            parameters: ["type": "object", "properties": [
+                "url": ["type": "string"], "title": ["type": "string"],
+                "ref": ["type": "string"], "selector": ["type": "string"],
+                "state": ["type": "string", "enum": ["visible", "hidden", "attached", "detached", "enabled", "disabled", "checked", "unchecked", "focused"]],
+                "text": ["type": "string"], "value": ["type": "string"], "count": ["type": "integer"],
+                "exact": ["type": "boolean"], "timeout": ["type": "number"],
+            ]]
+        ),
+        AIToolDefinition(
+            name: "viewport",
+            description: "Render this connection's tabs at width x height CSS pixels at 100% zoom, for responsive layouts; reset: true follows the window again. A window showing the Agent space keeps its own size. The user agent stays a desktop one.",
+            parameters: ["type": "object", "properties": [
+                "width": ["type": "integer"], "height": ["type": "integer"], "reset": ["type": "boolean"],
+            ]]
+        ),
+    ]
+
     static let dialogsProperty: [String: Any] = [
         "type": "string", "enum": ["accept", "dismiss"],
         "description": "How to answer a confirm or prompt the action opens (default dismiss). Alerts are always closed. Either way the report lists them.",
@@ -182,6 +203,87 @@ extension DevMCPServer {
                      "arrowright": "ArrowRight", "right": "ArrowRight", "home": "Home", "end": "End",
                      "pageup": "PageUp", "pagedown": "PageDown"]
         return names[last.lowercased()].map { ($0, mods) }
+    }
+
+    // MARK: Expect
+
+    func expect(_ args: [String: Any], session: PageSession) async -> [String: Any] {
+        let exact = args["exact"] as? Bool == true
+        let spec = Self.targetSpec(args.filter { $0.key != "text" })
+        let state = args["state"] as? String
+        let count = (args["count"] as? NSNumber).map(\.intValue)
+        let wantText = args["text"] as? String, wantValue = args["value"] as? String
+        let wantURL = args["url"] as? String, wantTitle = args["title"] as? String
+        guard wantURL != nil || wantTitle != nil || state != nil || wantText != nil || wantValue != nil || count != nil else {
+            return text("Pass at least one of url, title, state, text, value or count.", error: true)
+        }
+        if (state != nil || wantValue != nil) && spec.isEmpty {
+            return text("state and value need ref or selector.", error: true)
+        }
+        if count != nil && spec["selector"] == nil { return text("count needs selector.", error: true) }
+        let timeout = min(max((args["timeout"] as? NSNumber)?.doubleValue ?? 5, 0), 20)
+        let probes = state != nil || wantText != nil || wantValue != nil || count != nil
+
+        func matches(_ actual: String?, _ wanted: String) -> Bool {
+            guard let actual else { return false }
+            return exact ? actual.trimmingCharacters(in: .whitespacesAndNewlines) == wanted : actual.contains(wanted)
+        }
+        let deadline = ContinuousClock.now + .seconds(timeout)
+        var failures: [String] = []
+        repeat {
+            failures = []
+            let url = session.webView?.url?.absoluteString ?? session.url.absoluteString
+            let title = session.webView?.title ?? session.title
+            if let wantURL, !matches(url, wantURL) { failures.append("url is \(url)") }
+            if let wantTitle, !matches(title, wantTitle) { failures.append("title is \"\(title)\"") }
+            if probes {
+                // Throws while a navigation swaps the document; the next round reads the new one.
+                let probe = (try? await session.agentScript("return __nookAgent.probe(spec)", arguments: ["spec": spec])) as? [String: Any]
+                if let probe {
+                    failures += Self.probeFailures(probe, state: state, text: wantText, value: wantValue, count: count, matches: matches)
+                } else {
+                    failures.append("the page could not be read (loading)")
+                }
+            }
+            if failures.isEmpty { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        } while ContinuousClock.now < deadline
+        let wanted = [wantURL.map { "url \(exact ? "=" : "contains") \($0)" }, wantTitle.map { "title \(exact ? "=" : "contains") \"\($0)\"" },
+                      state.map { "\(spec.values.first ?? "") \($0)" }, wantText.map { "text \(exact ? "=" : "contains") \"\($0)\"" },
+                      wantValue.map { "value \(exact ? "=" : "contains") \"\($0)\"" }, count.map { "count = \($0)" }].compactMap { $0 }
+        if failures.isEmpty { return text("PASS: " + wanted.joined(separator: "; ")) }
+        return text("FAIL after \(timeout.formatted())s, wanted \(wanted.joined(separator: "; ")):\n" + failures.joined(separator: "\n"), error: true)
+    }
+
+    private static func probeFailures(_ p: [String: Any], state: String?, text: String?, value: String?, count: Int?,
+                                      matches: (String?, String) -> Bool) -> [String] {
+        let found = p["count"] as? Int ?? 0
+        let element = p["element"] as? String ?? "the element"
+        var out: [String] = []
+        if let count, found != count { out.append("\(found) elements match") }
+        if let state {
+            let flag: (String) -> Bool = { p[$0] as? Bool == true }
+            let ok: Bool
+            switch state {
+            case "visible": ok = flag("visible")
+            case "hidden": ok = !flag("visible")
+            case "attached": ok = found > 0
+            case "detached": ok = found == 0
+            case "enabled": ok = found > 0 && flag("enabled")
+            case "disabled": ok = found > 0 && !flag("enabled")
+            case "checked": ok = flag("checked")
+            case "unchecked": ok = found > 0 && !flag("checked")
+            default: ok = flag("focused")
+            }
+            if !ok { out.append(found == 0 ? "no element matches" : "\(element) is not \(state)") }
+        }
+        if let text, !matches(p["text"] as? String, text) {
+            out.append(found == 0 ? "no element matches" : "text is \"\(String((p["text"] as? String ?? "").prefix(300)))\"")
+        }
+        if let value, !matches(p["value"] as? String, value) {
+            out.append(found == 0 ? "no element matches" : "value is \((p["value"] as? String).map { "\"\($0)\"" } ?? "none")")
+        }
+        return Array(NSOrderedSet(array: out)) as? [String] ?? out
     }
 
     // MARK: Report

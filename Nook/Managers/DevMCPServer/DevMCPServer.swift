@@ -407,8 +407,8 @@ final class DevMCPServer {
         ),
         AIToolDefinition(
             name: "pages",
-            description: "Every live page in every window: url, WebContent pid, loaded, on screen, in a window, document.visibilityState.",
-            parameters: ["type": "object", "properties": [:] as [String: Any]]
+            description: "This connection's live pages: url, WebContent pid, loaded, on screen, in a window, document.visibilityState. all: true lists every page in every window instead.",
+            parameters: ["type": "object", "properties": ["all": ["type": "boolean"]]]
         ),
         AIToolDefinition(
             name: "clear_page_cache",
@@ -420,7 +420,7 @@ final class DevMCPServer {
     /// `executeJavaScript` is not advertised: over this server it is only an old name for
     /// `evaluate` (see callTool), and the chat's description of it is wrong for that behaviour.
     /// The alias stays so an agent registered against the old name keeps working.
-    private static let toolList: [[String: Any]] = (BrowserTools.allTools.filter { $0.name != "executeJavaScript" } + devTools + actionTools).map {
+    private static let toolList: [[String: Any]] = (BrowserTools.allTools.filter { $0.name != "executeJavaScript" } + devTools + actionTools + checkTools).map {
         ["name": $0.name, "description": $0.name == "clickElement" ? clickDescription : $0.description,
          "inputSchema": agentSchema($0)]
     }
@@ -428,7 +428,7 @@ final class DevMCPServer {
     private static let actionNames: Set<String> = ["clickElement", "fill", "press"]
 
     /// Tools that act on no single tab of the connection, so they take no `tab`.
-    private static let untabbedTools: Set<String> = ["getTabList", "switchTab", "pick", "selection", "pages", "clear_page_cache", "check_urls"]
+    private static let untabbedTools: Set<String> = ["getTabList", "switchTab", "pick", "selection", "pages", "clear_page_cache", "check_urls", "viewport"]
     private static let openingTools: Set<String> = ["navigateToURL", "createTab"]
 
     /// The connection's own arguments on top of a tool's schema: `tab` on every tool that acts on
@@ -466,7 +466,7 @@ final class DevMCPServer {
     private static let pageContentTools: Set<String> = [
         "evaluate", "executeJavaScript", "selection", "pick", "snapshot", "console", "network", "blocker_log",
         "pages", "getTabList", "readPageContent", "getInteractiveElements", "extractStructuredData",
-        "searchInPage", "summarizePage", "getSelectedText", "clickElement", "fill", "press",
+        "searchInPage", "summarizePage", "getSelectedText", "clickElement", "fill", "press", "expect",
     ]
 
     private static func markPageContent(_ result: [String: Any]) -> [String: Any] {
@@ -885,8 +885,10 @@ final class DevMCPServer {
                 return text(json(scripts))
 
             case "pages":
+                let all = args["all"] as? Bool == true
+                guard all || caller != nil else { return text("This connection has no tabs. all: true lists every page in Nook.") }
                 var pages: [[String: Any]] = []
-                for page in bm.tabs.sessions {
+                for page in bm.tabs.sessions where all || order.contains(page.itemID) {
                     var entry: [String: Any] = [
                         "url": page.url.absoluteString,
                         "loaded": !page.isUnloaded,
@@ -900,6 +902,31 @@ final class DevMCPServer {
                     pages.append(entry)
                 }
                 return text(json(pages))
+
+            case "expect":
+                guard let session else { return text("No tab. Open one with navigateToURL.", error: true) }
+                return await expect(args, session: session)
+
+            case "viewport":
+                guard let caller else { return text("No connection", error: true) }
+                if args["reset"] as? Bool == true {
+                    caller.viewport = nil
+                } else {
+                    guard let w = (args["width"] as? NSNumber).flatMap(Self.wholeNumber),
+                          let h = (args["height"] as? NSNumber).flatMap(Self.wholeNumber),
+                          (200...4_000).contains(w), (200...4_000).contains(h) else {
+                        return text("Pass width and height from 200 to 4000, or reset: true.", error: true)
+                    }
+                    caller.viewport = CGSize(width: w, height: h)
+                }
+                let hosted = bm.applyAgentViewport(caller)
+                var reply = caller.viewport.map { "Viewport \(Int($0.width))x\(Int($0.height)) for this connection's tabs." }
+                    ?? "Viewport follows the window again."
+                if !hosted { reply += " A window shows the Agent space, so its tabs keep that window's size until it shows another space." }
+                if let wv = agentView, let inner = try? await wv.evaluateJavaScript("innerWidth + 'x' + innerHeight") as? String {
+                    reply += " The current tab measures \(inner) CSS pixels."
+                }
+                return text(reply)
 
             case "clear_page_cache":
                 let all = args["all"] as? Bool ?? false

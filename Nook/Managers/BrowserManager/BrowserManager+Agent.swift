@@ -51,8 +51,12 @@ extension BrowserManager {
         guard let view = session.webView,
               let window = windowRegistry?.mostRecentRegularWindow?.window,
               let content = window.contentView else { return }
+        let viewport = tabs.agentCaller(owning: session.itemID)?.viewport
         // Already in a window that is still open; a closed one no longer renders it.
-        if let current = view.window, current === window || current.isVisible || current.isMiniaturized { return }
+        if let current = view.window, current === window || current.isVisible || current.isMiniaturized {
+            if let host = view.superview as? AgentPageHostView { Self.size(view, in: host, to: viewport) }
+            return
+        }
         let host = content.subviews.first { $0 is AgentPageHostView } ?? {
             let host = AgentPageHostView(frame: content.bounds.offsetBy(dx: -AgentPageHostView.offset, dy: 0))
             host.autoresizingMask = [.width, .height]
@@ -63,9 +67,30 @@ extension BrowserManager {
             content.addSubview(host, positioned: .below, relativeTo: nil)
             return host
         }()
-        view.frame = host.bounds
-        view.autoresizingMask = [.width, .height]
         host.addSubview(view)
+        Self.size(view, in: host, to: viewport)
+    }
+
+    /// Resizes `caller`'s hosted pages to its viewport. False when a window shows the Agent
+    /// space, whose pages keep that window's size.
+    @discardableResult
+    func applyAgentViewport(_ caller: AgentCaller) -> Bool {
+        var hosted = true
+        for id in tabs.agentTabs(of: caller) {
+            guard let view = tabs.session(for: id)?.webView, view.window != nil else { continue }
+            if let host = view.superview as? AgentPageHostView { Self.size(view, in: host, to: caller.viewport) } else { hosted = false }
+        }
+        return hosted
+    }
+
+    private static func size(_ view: NSView, in host: NSView, to viewport: CGSize?) {
+        if let viewport {
+            view.autoresizingMask = []
+            view.frame = CGRect(origin: .zero, size: viewport)
+        } else {
+            view.frame = host.bounds
+            view.autoresizingMask = [.width, .height]
+        }
     }
 
     /// Takes `caller`'s pages out of the host once it has made no call for `agentIdleDelay`, and
