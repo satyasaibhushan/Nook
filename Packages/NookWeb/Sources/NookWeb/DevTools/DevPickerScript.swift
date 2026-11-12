@@ -248,6 +248,18 @@ enum DevPickerScript {
       const LEAF = new Set(['link', 'button', 'heading', 'img', 'textbox', 'searchbox', 'checkbox', 'radio',
         'slider', 'combobox', 'option', 'progressbar', 'switch', 'tab', 'menuitem']);
       const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'META', 'LINK']);
+      // Refs name elements for agents across snapshots: an element keeps its ref while the page lives.
+      const refOf = new WeakMap(), byRef = new Map();
+      let lastRef = 0;
+      function ref(el) {
+        let r = refOf.get(el);
+        if (!r) { r = 'e' + (++lastRef); refOf.set(el, r); byRef.set(r, new WeakRef(el)); }
+        return r;
+      }
+      function resolve(r) {
+        const el = byRef.get(r) && byRef.get(r).deref();
+        return el && el.isConnected ? el : null;
+      }
       function snapshot(selector, maxDepth, maxNodes) {
         const root = selector ? document.querySelector(selector) : document.body;
         if (!root) return null;
@@ -285,7 +297,7 @@ enum DevPickerScript {
           const role = roleOf(node);
           if (!role) { for (const c of node.childNodes) walk(c, depth); return; }
           const name = LEAF.has(role) || node.hasAttribute('aria-label') ? nameOf(node).slice(0, 80) : '';
-          if (!emit(depth, role + (name ? ' "' + name + '"' : '') + states(node, role))) return;
+          if (!emit(depth, role + (name ? ' "' + name + '"' : '') + states(node, role) + ' [ref=' + ref(node) + ']')) return;
           if (!LEAF.has(role)) for (const c of node.childNodes) walk(c, depth + 1);
         }
         walk(root, 0);
@@ -293,7 +305,7 @@ enum DevPickerScript {
         if (omitted) lines.push('- … cut at maxNodes or maxDepth; raise them or pick a narrower selector');
         return lines.join('\\n');
       }
-      window.__nookDevPicker = { start, stop, flash, snapshot };
+      window.__nookDevPicker = { start, stop, flash, snapshot, ref, resolve, roleOf, nameOf };
     })();
     """
 }
