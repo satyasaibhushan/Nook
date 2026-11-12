@@ -310,7 +310,8 @@ extension PageSession: WKNavigationDelegate {
     ) {
         // mailto:, tel: and app schemes go to the system. Only a real click on a link opens one
         // straight away; a scripted `a.click()` is also `.linkActivated`, so the gesture decides.
-        // A subframe needs that click too, and everything else asks, one sheet at a time.
+        // Everything else asks, one sheet at a time. That includes a subframe: Slack and others
+        // launch their app from a hidden iframe when the browser reads as Safari.
         // nook:// is for other apps. A page never triggers it, in any frame.
         if navigationAction.request.url?.scheme?.lowercased() == "nook" {
             decisionHandler(.cancel)
@@ -324,7 +325,7 @@ extension PageSession: WKNavigationDelegate {
             if isAgentPage { return }
             let gesture = navigationAction.nookIsUserInitiated
             let clicked = gesture && navigationAction.navigationType == .linkActivated
-            guard navigationAction.targetFrame?.isMainFrame != false || clicked, canOpenWithSystem(url) else { return }
+            guard canOpenWithSystem(url) else { return }
             if clicked || (gesture && (scheme == "mailto" || scheme == "tel")) {
                 openWithSystem(url)
             } else if !externalAppConfirmPending, !jsDialogsSuppressed, let alerts = controller?.alerts {
