@@ -58,6 +58,31 @@ import Foundation
         precondition(String(decoding: custom, as: UTF8.self).contains("research"))
         let customLabel = judge.pageLabel(from: Data(#"{"answers":[{"type":"choice","name":"profile","choice":"research","confidence":0.9,"reason":"Research paper"}]}"#.utf8), at: "now", profiles: ["research"])
         precondition(customLabel?.profiles == ["research"] && customLabel?.confidence == 0.9 && customLabel?.reason == "Research paper")
+
+        // TypeSafe Jev: questions and answers keyed by id, criteria maps, no reasons in answers.
+        let jevConfig = try decoder.decode(ActivityJudgeConfig.self, from: Data(#"{"provider":"typesafe-jev"}"#.utf8))
+        precondition(jevConfig.provider == .typeSafeJev && jevConfig.model == "jev-latest")
+        precondition(ActivityJudgeConfig().model == "gpt-6-luna" && ActivityJudgeConfig(provider: .typeSafeJev).model == "jev-latest")
+        let jev = jevConfig.provider.makeJudge()
+        precondition(jev.endpoint.absoluteString == "https://api.typesafe.ai/v1/systemone")
+        let jevGoalBody = try JSONSerialization.jsonObject(with: jev.goalBody(url: "https://judge.test", title: "Title", goal: "Ship", mode: "Focus", examples: [], config: jevConfig)) as! [String: Any]
+        let jevGoalQuestion = (jevGoalBody["questions"] as? [String: Any])?["goalFit"] as? [String: Any]
+        precondition(jevGoalBody["model"] as? String == "jev-latest" && (jevGoalBody["state"] as? [String: Any])?["goal"] as? String == "Ship")
+        precondition(jevGoalQuestion?["type"] as? String == "choice" && Set(((jevGoalQuestion?["criteria"] as? [String: Any]) ?? [:]).keys) == ["fits", "off"])
+        func jevGoal(_ choice: String, _ confidence: String) -> GoalFitDecision? {
+            jev.goalDecision(from: Data("{\"model\":\"jev-1.13.0\",\"answers\":{\"goalFit\":{\"type\":\"choice\",\"choice\":\"\(choice)\",\"confidence\":\(confidence),\"probabilities\":{}}}}".utf8), confidenceFloor: 0.6)
+        }
+        precondition(jevGoal("off", "0.59")?.choice == .fits && jevGoal("off", "0.9")?.choice == .off)
+        precondition(jevGoal("off", "0.9")?.reason.isEmpty == false && jevGoal("maybe", "0.9") == nil && jevGoal("off", "1.5") == nil)
+        let jevFeed = try JSONSerialization.jsonObject(with: jev.feedBody(posts: posts, preferences: "No spam", goal: nil, examples: [], config: jevConfig)) as! [String: Any]
+        precondition((jevFeed["questions"] as? [String: Any])?.count == 20)
+        let jevDecisions = jev.feedDecisions(from: Data(#"{"answers":{"post_1":{"type":"choice","choice":"hide","confidence":0.9},"post_0":{"type":"choice","choice":"hide","confidence":0.2},"post_2":{"type":"refusal"}}}"#.utf8), posts: posts, confidenceFloor: 0.6)
+        precondition(jevDecisions.count == 20 && jevDecisions[0].choice == .show && jevDecisions[1].choice == .hide && jevDecisions[2].choice == .show)
+        let jevLabelBody = String(decoding: try jev.labelBody(url: "https://fixed.test", title: "Title", profiles: ["Research"], config: jevConfig), as: UTF8.self)
+        precondition(jevLabelBody.contains("\"research\":null") && jevLabelBody.contains("\"building\""))
+        let jevLabel = jev.pageLabel(from: Data(#"{"answers":{"profile":{"type":"choice","choice":"research","confidence":0.5},"kind":{"type":"choice","choice":"reading","confidence":0.9}}}"#.utf8), at: "now", profiles: ["research"], confidenceFloor: 0.6)
+        precondition(jevLabel?.profiles == ["research"] && jevLabel?.kind == .reading && jevLabel?.unsure == true && jevLabel?.confidence == 0.5)
+        precondition(jev.pageLabel(from: Data(#"{"answers":{"profile":{"type":"choice","choice":"work","confidence":0.9}}}"#.utf8), at: "now", profiles: ["research"], confidenceFloor: 0.6) == nil)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("attention-check-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
         let files = ActivityFiles(directory: root)

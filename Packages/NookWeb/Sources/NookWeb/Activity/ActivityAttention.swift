@@ -5,8 +5,18 @@ import Darwin
 
 public enum ActivityJudgeProvider: String, Codable, CaseIterable, Sendable {
     case openAIDecisions = "openai-decisions"
+    case typeSafeJev = "typesafe-jev"
     public func makeJudge() -> any ActivityJudge {
-        switch self { case .openAIDecisions: return OpenAIDecisionsJudge() }
+        switch self {
+        case .openAIDecisions: return OpenAIDecisionsJudge()
+        case .typeSafeJev: return TypeSafeJevJudge()
+        }
+    }
+    public var defaultModel: String {
+        switch self {
+        case .openAIDecisions: return "gpt-6-luna"
+        case .typeSafeJev: return "jev-latest"
+        }
     }
 }
 
@@ -27,13 +37,13 @@ public struct ActivityJudgeConfig: Codable, Equatable, Sendable {
     public var model = "gpt-6-luna"
     public var confidenceFloor = 0.6
 
-    public init(provider: ActivityJudgeProvider = .openAIDecisions, model: String = "gpt-6-luna", confidenceFloor: Double = 0.6) {
-        self.provider = provider; self.model = model; self.confidenceFloor = min(1, max(0, confidenceFloor))
+    public init(provider: ActivityJudgeProvider = .openAIDecisions, model: String? = nil, confidenceFloor: Double = 0.6) {
+        self.provider = provider; self.model = model ?? provider.defaultModel; self.confidenceFloor = min(1, max(0, confidenceFloor))
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         provider = (try? c.decode(ActivityJudgeProvider.self, forKey: .provider)) ?? .openAIDecisions
-        model = (try? c.decode(String.self, forKey: .model)) ?? "gpt-6-luna"
+        model = (try? c.decode(String.self, forKey: .model)).flatMap { $0.isEmpty ? nil : $0 } ?? provider.defaultModel
         confidenceFloor = min(1, max(0, (try? c.decode(Double.self, forKey: .confidenceFloor)) ?? 0.6))
     }
 }

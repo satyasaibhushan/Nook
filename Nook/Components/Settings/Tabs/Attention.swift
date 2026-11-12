@@ -423,12 +423,6 @@ private struct AttentionRootPage: View {
     }
 }
 
-private func judgeProviderName(_ provider: ActivityJudgeProvider) -> String {
-    switch provider {
-    case .openAIDecisions: return "OpenAI Decisions"
-    }
-}
-
 // MARK: - Modes
 
 private struct AttentionModesPage: View {
@@ -1280,13 +1274,21 @@ private struct AttentionJudgePage: View {
             Section {
                 Picker("Provider", selection: Binding(
                     get: { store.preferences.judge.provider },
-                    set: { store.preferences.judge.provider = $0; store.savePreferences() }
+                    set: { provider in
+                        guard provider != store.preferences.judge.provider else { return }
+                        // Each provider has its own model names; switching starts from its default.
+                        store.preferences.judge.provider = provider
+                        store.preferences.judge.model = provider.defaultModel
+                        modelDraft = provider.defaultModel
+                        store.savePreferences()
+                    }
                 )) {
                     ForEach(ActivityJudgeProvider.allCases, id: \.self) { provider in
                         Text(judgeProviderName(provider)).tag(provider)
                     }
                 }
-                JEVKeySettingRow()
+                JEVKeySettingRow(provider: store.preferences.judge.provider)
+                    .id(store.preferences.judge.provider)
                 LabeledContent("Model") {
                     TextField("Model", text: $modelDraft)
                         .labelsHidden()
@@ -1295,7 +1297,7 @@ private struct AttentionJudgePage: View {
                         .onSubmit(commitModel)
                 }
             } footer: {
-                Text("Used only for pages and posts your own rules do not decide. Without a key, those pages are let through and feeds only hide your muted accounts and words.")
+                Text("Used only for pages and posts your own rules do not decide. Each provider keeps its own key. Without a key for the chosen provider, those pages are let through and feeds only hide your muted accounts and words.")
             }
             Section("How sure it must be") {
                 VStack(alignment: .leading, spacing: NookDesign.Spacing.xs) {
@@ -1340,7 +1342,7 @@ private struct AttentionJudgePage: View {
 
     private func commitModel() {
         let trimmed = modelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = trimmed.isEmpty ? "gpt-6-luna" : trimmed
+        let model = trimmed.isEmpty ? store.preferences.judge.provider.defaultModel : trimmed
         modelDraft = model
         store.preferences.judge.model = model
         store.savePreferences()

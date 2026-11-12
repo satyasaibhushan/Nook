@@ -8,11 +8,18 @@
 
 import SwiftUI
 import NookDesign
+import NookWeb
 
 struct JEVKeySettingRow: View {
-    @State private var hasKey = JEVKeychain.hasKey
+    let provider: ActivityJudgeProvider
+    @State private var hasKey: Bool
     @State private var draft = ""
     @State private var failed = false
+
+    init(provider: ActivityJudgeProvider) {
+        self.provider = provider
+        _hasKey = State(initialValue: JudgeKeychain.hasKey(provider))
+    }
 
     var body: some View {
         LabeledContent {
@@ -24,14 +31,14 @@ struct JEVKeySettingRow: View {
                 Button("Save", action: save)
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("Clear") {
-                    failed = !JEVKeychain.clear()
-                    hasKey = JEVKeychain.hasKey
+                    failed = !JudgeKeychain.clear(provider)
+                    hasKey = JudgeKeychain.hasKey(provider)
                 }
                 .disabled(!hasKey)
             }
         } label: {
             VStack(alignment: .leading, spacing: NookDesign.Spacing.xxs) {
-                Text("AI judge key")
+                Text("\(judgeProviderName(provider)) key")
                 Text(status)
                     .font(NookDesign.Font.caption)
                     .foregroundStyle(.secondary)
@@ -42,14 +49,21 @@ struct JEVKeySettingRow: View {
     private var status: String {
         if failed { return "Could not update the Keychain." }
         let state = hasKey ? "A key is saved in your Keychain." : "No key saved."
-        return "\(state) The AI judge decides pages and posts no rule decides, from their address and title only. Private windows are never sent."
+        return "\(state) Used for pages and posts no rule decides: page address and title, or post text and author. Private windows are never sent."
     }
 
     private func save() {
         let key = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
-        failed = !JEVKeychain.save(key)
+        failed = !JudgeKeychain.save(key, for: provider)
         draft = ""
-        hasKey = JEVKeychain.hasKey
+        hasKey = JudgeKeychain.hasKey(provider)
+    }
+}
+
+func judgeProviderName(_ provider: ActivityJudgeProvider) -> String {
+    switch provider {
+    case .openAIDecisions: return "OpenAI Decisions"
+    case .typeSafeJev: return "TypeSafe Jev"
     }
 }
