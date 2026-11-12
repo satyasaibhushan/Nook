@@ -273,6 +273,8 @@ private struct SettingsDetailPane: View {
             SettingsAppearanceTab()
         case .ai:
             SettingsAITab()
+        case .attention:
+            SettingsAttentionTab(browserManager: browserManager)
         case .privacy:
             PrivacySettingsView(
                 cookieManager: browserManager.cookieManager,
