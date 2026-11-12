@@ -44,6 +44,7 @@ struct FocusModeIndicator: View {
             }
             .popover(isPresented: $showingDetails) { details(for: mode) }
             .contextMenu {
+                Button("Open Attention") { browserManager.openAttention() }
                 Button("Wrong Allow") { browserManager.focus.wrongAllow() }
                 if let host = browserManager.focus.activePage?.url.host {
                     Button("Block This Site") { browserManager.focus.blockSite(host: host) }
@@ -80,6 +81,10 @@ struct FocusModeIndicator: View {
                 }
             }
             Divider()
+            Button("Open Attention") {
+                showingDetails = false
+                browserManager.openAttention()
+            }
             Button("End Focus") {
                 browserManager.focus.end()
                 showingDetails = false
