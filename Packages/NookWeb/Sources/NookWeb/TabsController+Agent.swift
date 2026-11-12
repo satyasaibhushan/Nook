@@ -18,10 +18,15 @@ extension TabsController {
         return tree.spaceID(of: itemID) == agent
     }
 
-    /// The Agent space, made on first use with the logins of `window`'s space.
+    /// The Agent space, made on first use with the logins of `window`'s space, and moved to that
+    /// space's logins whenever it has no tabs.
     @discardableResult
     public func ensureAgentSpace(loginsFrom window: BrowserWindowState?) -> UUID? {
-        if let existing = agentSpaceID { return existing }
+        // Every agent tool call lands here; only write the tree (and save) when something changes.
+        var probe = tree
+        if let existing = agentSpaceID, probe.ensureAgentSpace(loginsFrom: window?.spaceID)?.change.isEmpty != false {
+            return existing
+        }
         var made: UUID?
         perform(.main, "agentSpace", undoable: false) { tree in
             guard let result = tree.ensureAgentSpace(loginsFrom: window?.spaceID) else { throw TreeError.missingSpace }
