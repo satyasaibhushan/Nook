@@ -104,10 +104,18 @@ struct SpacesListItem: View {
         } else if forceDot || SpaceIcon.isDot(space.icon) {
             plainDot
         } else {
+            // Emoji ignore the foreground style, so the space shown stands out by size and the
+            // others recede; following `selection` keeps a swipe's handoff continuous.
             SpaceIcon(space.icon)
                 .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                .scaleEffect(inactiveIconScale + (1 - inactiveIconScale) * selection)
+                .opacity(inactiveIconOpacity + (1 - inactiveIconOpacity) * selection)
+                .animation(NookDesign.Motion.standard, value: isActive)
         }
     }
+
+    private let inactiveIconScale = 0.78
+    private let inactiveIconOpacity = 0.45
 
     private var plainDot: some View {
         let size = dotSize + (activeDotSize - dotSize) * selection
