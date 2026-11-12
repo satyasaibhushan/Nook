@@ -1072,6 +1072,7 @@ final class TabCompositorContainerView: NSView {
     }
 
     private var sidebarHold: SidebarHold?
+    private var sidebarSnapshot: NSImageView?
     private var resizeObserver: NSObjectProtocol?
     var refit: (() -> Void)?
     var isHoldingSidebarWidth: Bool { sidebarHold != nil }
@@ -1088,6 +1089,31 @@ final class TabCompositorContainerView: NSView {
         return id
     }
 
+    func prepareSidebarSnapshot(_ id: UUID, completion: @escaping () -> Void) {
+        guard let hold = sidebarHold, hold.id == id, let page = hold.page, !page.isHidden else {
+            completion()
+            return
+        }
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = page.bounds
+        configuration.afterScreenUpdates = true
+        page.takeSnapshot(with: configuration) { [weak self, weak page] image, _ in
+            guard let self, let page, self.sidebarHold?.id == id else { return }
+            if let image {
+                let snapshot = NSImageView(frame: page.frame)
+                snapshot.image = image
+                snapshot.imageScaling = .scaleAxesIndependently
+                snapshot.wantsLayer = true
+                snapshot.layer?.zPosition = 9_999
+                self.sidebarSnapshot?.removeFromSuperview()
+                self.sidebarSnapshot = snapshot
+                self.addSubview(snapshot)
+                page.isHidden = true
+            }
+            completion()
+        }
+    }
+
     func finishSidebarTransition(_ id: UUID) {
         guard sidebarHold?.id == id else { return }
         cancelSidebarTransition()
@@ -1096,7 +1122,10 @@ final class TabCompositorContainerView: NSView {
 
     /// The caller already rebuilding the compositor owns the refit on cancellation.
     func cancelSidebarTransition() {
+        sidebarHold?.page?.isHidden = false
         sidebarHold?.page?.autoresizingMask = [.width, .height]
+        sidebarSnapshot?.removeFromSuperview()
+        sidebarSnapshot = nil
         sidebarHold = nil
     }
 
@@ -1105,6 +1134,7 @@ final class TabCompositorContainerView: NSView {
         let frame = NSRect(x: hold.pinnedToRight ? bounds.width - hold.width : 0,
                            y: bounds.minY, width: hold.width, height: bounds.height)
         if page.frame != frame { page.frame = frame }
+        sidebarSnapshot?.frame = frame
     }
 
     override func viewDidMoveToWindow() {

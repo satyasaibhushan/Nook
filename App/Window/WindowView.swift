@@ -307,33 +307,47 @@ struct WindowView: View {
         let sidebarOnRight = nookSettings.sidebarPosition == .right
         let sidebarOnLeft = nookSettings.sidebarPosition == .left
         let bordered = !nookSettings.hideWebContentBorder && !fullscreen
+        let slide = windowState.sidebarSlide
+        let layoutSidebarVisible = sidebarVisible || slide != nil
 
-        HStack(spacing: 0) {
-            if aiAppearsOnTrailingEdge {
-                SpacesSidebar()
-                    .zIndex(10)
-                WebContent()
-                if aiVisible {
-                    AISidebar()
+        SidebarSlideHost(slide: slide, visible: slide?.showsSidebar ?? sidebarVisible, onRight: sidebarOnRight,
+                         onComplete: { id in browserManager.finishSidebarSlide(for: windowState, id: id) }) {
+            HStack(spacing: 0) {
+                if aiAppearsOnTrailingEdge {
+                    SpacesSidebar()
+                        .zIndex(10)
+                    WebContent()
+                    if aiVisible {
+                        AISidebar()
+                    }
+                } else {
+                    if aiVisible {
+                        AISidebar()
+                    }
+                    WebContent()
+                    SpacesSidebar()
+                        .zIndex(10)
                 }
-            } else {
-                if aiVisible {
-                    AISidebar()
-                }
-                WebContent()
-                SpacesSidebar()
-                    .zIndex(10)
+            }
+            .overlayPreferenceValue(DownloadsButtonAnchorKey.self) { anchor in
+                DownloadFlightOverlay(target: anchor).zIndex(8000)
+            }
+            .overlayPreferenceValue(ExtensionLibraryAnchorKey.self) { anchor in
+                ExtensionLibraryOverlay(anchor: anchor).zIndex(9000)
+            }
+            .overlayPreferenceValue(FavoritePreviewAnchorKey.self) { anchor in
+                FavoritePreviewOverlay(anchor: anchor).zIndex(7000)
             }
         }
         // Apply padding similar to regular sidebar: remove padding when sidebar/AI is visible on that side
         // When sidebar is on left, AI appears on right (trailing); when sidebar is on right, AI appears on left (leading)
-        .padding(.trailing, !bordered || (sidebarVisible && sidebarOnRight) || (aiVisible && sidebarOnLeft) ? 0 : NookDesign.Chrome.pageInset)
-        .padding(.leading, !bordered || (sidebarVisible && sidebarOnLeft) || (aiVisible && sidebarOnRight) ? 0 : NookDesign.Chrome.pageInset)
+        .padding(.trailing, !bordered || (layoutSidebarVisible && sidebarOnRight) || (aiVisible && sidebarOnLeft) ? 0 : NookDesign.Chrome.pageInset)
+        .padding(.leading, !bordered || (layoutSidebarVisible && sidebarOnLeft) || (aiVisible && sidebarOnRight) ? 0 : NookDesign.Chrome.pageInset)
     }
 
     @ViewBuilder
     private func SpacesSidebar() -> some View {
-        if windowState.isSidebarVisible, !windowState.showsFullscreenPage {
+        if windowState.isSidebarVisible || windowState.sidebarSlide != nil, !windowState.showsFullscreenPage {
             SpacesSideBarView()
                 .environment(\.nookBaseColorScheme, systemColorScheme)
                 .spaceThemeAppearance(spaceTheme)
@@ -553,5 +567,142 @@ final class TrafficLightsView: NSView {
             button.isHidden = !visible || exitingFullScreen || opacity <= 0
             button.alphaValue = opacity
         }
+    }
+}
+
+/// Keep the native page geometry fixed while the render server moves the browser.
+private struct SidebarSlideHost<Content: View>: NSViewRepresentable {
+    let slide: BrowserWindowState.SidebarSlide?
+    let visible: Bool
+    let onRight: Bool
+    let onComplete: (UUID) -> Void
+    @ViewBuilder let content: Content
+
+    final class Viewport: NSView {
+        let host: NSHostingView<AnyView>
+        var slideID: UUID?
+        var distance: CGFloat = 0
+        var offset: CGFloat = 0
+        var onRight = false
+        var visible = true
+        var onComplete: ((UUID) -> Void)?
+        var snapshot: NSImageView?
+
+        init(content: AnyView) {
+            host = NSHostingView(rootView: content)
+            super.init(frame: .zero)
+            wantsLayer = true
+            layer?.masksToBounds = true
+            host.wantsLayer = true
+            host.safeAreaRegions = []
+            host.sizingOptions = []
+            host.clipsToBounds = false
+            addSubview(host)
+        }
+
+        required init?(coder: NSCoder) { nil }
+        override var isFlipped: Bool { true }
+
+        override func layout() {
+            super.layout()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            host.frame = NSRect(x: onRight ? -distance : 0, y: 0,
+                                width: bounds.width + distance, height: bounds.height)
+            host.layer?.masksToBounds = false
+            CATransaction.commit()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let local = convert(point, from: superview)
+            guard bounds.contains(local) else { return nil }
+            let translation = (host.layer?.presentation()?.value(forKeyPath: "transform.translation.x") as? CGFloat) ?? offset
+            return host.hitTest(NSPoint(x: local.x - translation, y: local.y))
+        }
+
+        func update(slide: BrowserWindowState.SidebarSlide?, visible: Bool, onRight: Bool) {
+            let previousVisible = self.visible
+            self.visible = visible
+            self.onRight = onRight
+            distance = slide?.distance ?? 0
+            needsLayout = true
+            layoutSubtreeIfNeeded()
+            guard let layer = host.layer else { return }
+            guard let slide else {
+                slideID = nil
+                snapshot?.removeFromSuperview()
+                snapshot = nil
+                host.isHidden = false
+                offset = 0
+                layer.removeAnimation(forKey: "sidebarSlide")
+                layer.setValue(0, forKeyPath: "transform.translation.x")
+                return
+            }
+            let target: CGFloat = visible ? 0 : (onRight ? 1 : -1) * distance
+            let start = layer.animation(forKey: "sidebarSlide") == nil
+                ? (previousVisible ? 0 : (onRight ? 1 : -1) * distance)
+                : (layer.presentation()?.value(forKeyPath: "transform.translation.x") as? CGFloat) ?? offset
+            slideID = slide.id
+            offset = start
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.removeAnimation(forKey: "sidebarSlide")
+            layer.setValue(start, forKeyPath: "transform.translation.x")
+            CATransaction.commit()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.slideID == slide.id else { return }
+                self.host.layoutSubtreeIfNeeded()
+                self.host.displayIfNeeded()
+                if !visible, self.snapshot == nil,
+                   let bitmap = self.host.bitmapImageRepForCachingDisplay(in: self.host.bounds) {
+                    self.host.cacheDisplay(in: self.host.bounds, to: bitmap)
+                    if let image = bitmap.cgImage {
+                        let snapshot = NSImageView(frame: self.host.frame)
+                        snapshot.image = NSImage(cgImage: image, size: self.host.bounds.size)
+                        snapshot.imageScaling = .scaleAxesIndependently
+                        snapshot.wantsLayer = true
+                        self.addSubview(snapshot, positioned: .above, relativeTo: self.host)
+                        snapshot.layer?.setValue(start, forKeyPath: "transform.translation.x")
+                        self.snapshot = snapshot
+                        self.host.isHidden = true
+                    }
+                }
+                let animatedLayer = self.snapshot?.layer ?? layer
+                CATransaction.flush()
+                self.offset = target
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                animatedLayer.setValue(target, forKeyPath: "transform.translation.x")
+                CATransaction.setCompletionBlock { [weak self] in
+                    DispatchQueue.main.async {
+                        guard let self, self.slideID == slide.id else { return }
+                        self.onComplete?(slide.id)
+                    }
+                }
+                let animation = CABasicAnimation(keyPath: "transform.translation.x")
+                animation.fromValue = start
+                animation.toValue = target
+                animation.duration = 0.15
+                animation.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+                animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                animatedLayer.add(animation, forKey: "sidebarSlide")
+                CATransaction.commit()
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> Viewport {
+        Viewport(content: AnyView(content.environment(\.self, context.environment)
+            .animation(slide == nil ? context.transaction.animation : nil, value: visible)))
+    }
+
+    func updateNSView(_ view: Viewport, context: Context) {
+        if let slide, view.slideID == slide.id, view.visible == visible { return }
+        withTransaction(context.transaction) {
+            view.host.rootView = AnyView(content.environment(\.self, context.environment)
+            .animation(slide == nil ? context.transaction.animation : nil, value: visible))
+        }
+        view.onComplete = onComplete
+        view.update(slide: slide, visible: visible, onRight: onRight)
     }
 }

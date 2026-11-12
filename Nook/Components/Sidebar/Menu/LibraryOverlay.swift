@@ -109,7 +109,7 @@ struct LibraryPushContainer<Content: View>: View {
                 // and come back with the library over the second; at rest they belong to whichever
                 // is showing.
                 TrafficLights(
-                    visible: !windowState.showsFullscreenPage,
+                    visible: !windowState.showsFullscreenPage && windowState.sidebarSlide == nil,
                     alpha: (lightsVisible || progress > 0 ? 1 : 0) * abs(1 - 2 * progress),
                     sidebarOffset: onRight || lightsVisible ? 0 : -windowState.sidebarWidth * (1 - progress)
                 )

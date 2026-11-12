@@ -26,7 +26,7 @@ struct SidebarHoverOverlayView: View {
 
     var body: some View {
         // Only render overlay plumbing when the real sidebar is collapsed
-        if !windowState.isSidebarVisible, !windowState.showsFullscreenPage {
+        if !windowState.isSidebarVisible, windowState.sidebarSlide == nil, !windowState.showsFullscreenPage {
             ZStack(alignment: nookSettings.sidebarPosition == .left ? .leading : .trailing) {
                 // Edge hover hotspot
                 Color.clear

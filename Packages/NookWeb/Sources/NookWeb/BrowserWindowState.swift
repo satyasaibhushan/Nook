@@ -48,6 +48,22 @@ public class BrowserWindowState {
     /// Whether the sidebar is visible in this window
     public var isSidebarVisible: Bool = true
 
+    public struct SidebarSlide {
+        public let id = UUID()
+        public let distance: CGFloat
+        public let holdID: UUID?
+        public let showsSidebar: Bool
+
+        public init(distance: CGFloat, holdID: UUID?, showsSidebar: Bool) {
+            self.distance = distance
+            self.holdID = holdID
+            self.showsSidebar = showsSidebar
+        }
+    }
+
+    /// A wide page and its sidebar travel together without resizing the native container.
+    public var sidebarSlide: SidebarSlide?
+
     /// Whether the sidebar menu is visible in this window
     public var isSidebarMenuVisible: Bool = false
 

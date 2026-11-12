@@ -677,11 +677,27 @@ class BrowserManager: ObservableObject {
         let container = webViewCoordinator?.compositorContainerView(for: windowState.id) as? TabCompositorContainerView
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let canHoldWidth = !splitManager.isSplit(for: windowState.id) && !windowState.showsFullscreenPage && !reduceMotion
+        let wasVisible = windowState.sidebarSlide?.showsSidebar ?? windowState.isSidebarVisible
         let pageInset = nookSettings?.hideWebContentBorder == true ? 0 : NookDesign.Chrome.pageInset
         let holdID = canHoldWidth ? container?.beginSidebarTransition(
-            extraWidth: windowState.isSidebarVisible ? windowState.sidebarWidth - pageInset : 0,
+            extraWidth: wasVisible ? windowState.sidebarWidth - pageInset : 0,
             pinnedToRight: nookSettings?.sidebarPosition == .right
         ) : nil
+        let canSlide = canHoldWidth && !windowState.isSidebarAIChatVisible
+        if canSlide {
+            let slide = BrowserWindowState.SidebarSlide(
+                distance: windowState.sidebarWidth - pageInset, holdID: holdID, showsSidebar: !wasVisible
+            )
+            if wasVisible, let holdID, let container {
+                container.prepareSidebarSnapshot(holdID) {
+                    windowState.sidebarSlide = slide
+                }
+            } else {
+                windowState.sidebarSlide = slide
+            }
+            return
+        }
+        windowState.sidebarSlide = nil
         withAnimation(reduceMotion ? nil : .easeInOut(duration: canHoldWidth ? 0.15 : 0.1), completionCriteria: .removed) {
             windowState.isSidebarVisible.toggle()
         } completion: { [weak container] in
@@ -696,6 +712,22 @@ class BrowserManager: ObservableObject {
         }
         if windowRegistry?.activeWindow?.id == windowState.id {
             isSidebarVisible = windowState.isSidebarVisible
+            savedSidebarWidth = windowState.savedSidebarWidth
+        }
+        saveSidebarSettings()
+    }
+
+    func finishSidebarSlide(for windowState: BrowserWindowState, id: UUID) {
+        guard let slide = windowState.sidebarSlide, slide.id == id else { return }
+        if let holdID = slide.holdID {
+            let container = webViewCoordinator?.compositorContainerView(for: windowState.id) as? TabCompositorContainerView
+            container?.finishSidebarTransition(holdID)
+        }
+        windowState.isSidebarVisible = slide.showsSidebar
+        windowState.sidebarSlide = nil
+        if !slide.showsSidebar { sidebarPiPSidebarHidden(in: windowState) }
+        if windowRegistry?.activeWindow?.id == windowState.id {
+            isSidebarVisible = slide.showsSidebar
             savedSidebarWidth = windowState.savedSidebarWidth
         }
         saveSidebarSettings()
