@@ -6,18 +6,28 @@ import Observation
 import OSLog
 import Security
 
-/// The JEV key in the login Keychain. It is read only to make a request and never logged.
-enum JEVKeychain {
-    private static let base: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "com.gstudios.nook.jev",
-        kSecAttrAccount as String: "openai",
-    ]
+/// AI judge keys in the login Keychain, one per provider. They are read only to make a request and
+/// never logged. The OpenAI key keeps its original service and account so a saved key keeps working.
+enum JudgeKeychain {
+    private static func base(_ provider: ActivityJudgeProvider) -> [String: Any] {
+        let account: String
+        switch provider {
+        case .openAIDecisions: account = "openai"
+        case .typeSafeJev: account = "typesafe"
+        }
+        return [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.gstudios.nook.jev",
+            kSecAttrAccount as String: account,
+        ]
+    }
 
-    static var hasKey: Bool { SecItemCopyMatching(base as CFDictionary, nil) == errSecSuccess }
+    static func hasKey(_ provider: ActivityJudgeProvider) -> Bool {
+        SecItemCopyMatching(base(provider) as CFDictionary, nil) == errSecSuccess
+    }
 
-    static func key() -> String? {
-        var query = base
+    static func key(_ provider: ActivityJudgeProvider) -> String? {
+        var query = base(provider)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
@@ -28,8 +38,9 @@ enum JEVKeychain {
     }
 
     @discardableResult
-    static func save(_ key: String) -> Bool {
+    static func save(_ key: String, for provider: ActivityJudgeProvider) -> Bool {
         guard let data = key.data(using: .utf8), !data.isEmpty else { return false }
+        let base = base(provider)
         let attributes: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
@@ -41,8 +52,8 @@ enum JEVKeychain {
     }
 
     @discardableResult
-    static func clear() -> Bool {
-        let status = SecItemDelete(base as CFDictionary)
+    static func clear(_ provider: ActivityJudgeProvider) -> Bool {
+        let status = SecItemDelete(base(provider) as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
     }
 }
@@ -86,9 +97,10 @@ final class ActivityLabeller {
         let generation = reloadGeneration, files = files
         let snapshot = await Task.detached(priority: .utility) {
             files.seed()
-            return (files.loadRules(), files.loadLabels(), files.loadPreferences(),
+            let preferences = files.loadPreferences()
+            return (files.loadRules(), files.loadLabels(), preferences,
                     files.modificationDate(files.rulesURL), files.modificationDate(files.labelsURL),
-                    files.modificationDate(files.preferencesURL), JEVKeychain.hasKey)
+                    files.modificationDate(files.preferencesURL), JudgeKeychain.hasKey(preferences.judge.provider))
         }.value
         guard generation == reloadGeneration else { return }
         rules = snapshot.0; remembered = snapshot.1; preferences = snapshot.2
@@ -96,10 +108,10 @@ final class ActivityLabeller {
     }
 
     func reloadIfChanged() async {
-        let files = files
+        let files = files, provider = preferences.judge.provider
         let current = await Task.detached(priority: .utility) {
             (files.modificationDate(files.rulesURL), files.modificationDate(files.labelsURL),
-             files.modificationDate(files.preferencesURL), JEVKeychain.hasKey)
+             files.modificationDate(files.preferencesURL), JudgeKeychain.hasKey(provider))
         }.value
         if current.0 != rulesDate || current.1 != labelsDate || current.2 != preferencesDate { await reload() }
         else if hasJudgeKey != current.3 { hasJudgeKey = current.3 }
@@ -129,7 +141,7 @@ final class ActivityLabeller {
         let judge = config.provider.makeJudge()
         guard let body = try? judge.goalBody(url: url.absoluteString, title: title, goal: goal, mode: mode,
                                             examples: examples, config: config),
-              let data = await send(body: body, endpoint: judge.endpoint) else { return nil }
+              let data = await send(body: body, judge: judge) else { return nil }
         guard !Task.isCancelled else { return nil }
         let answer = judge.goalDecision(from: data, confidenceFloor: config.confidenceFloor)
         goalDecisions[cacheKey] = answer
@@ -165,7 +177,7 @@ final class ActivityLabeller {
                                        goal: goal, examples: examples, config: config)
         }.value
         guard preferences == snapshot, feedContexts[site] == context, hasJudgeKey, !Task.isCancelled else { return decisions + show }
-        guard let body, let data = await send(body: body, endpoint: judge.endpoint) else {
+        guard let body, let data = await send(body: body, judge: judge) else {
             feedFailedAt = Date(); return decisions + show
         }
         guard preferences == snapshot, feedContexts[site] == context, !Task.isCancelled else { return decisions + show }
@@ -263,7 +275,7 @@ final class ActivityLabeller {
         let profiles = await knownProfiles
         let judge = config.provider.makeJudge()
         guard let body = try? judge.labelBody(url: url, title: title, profiles: profiles, config: config),
-              let data = await send(body: body, endpoint: judge.endpoint) else { return nil }
+              let data = await send(body: body, judge: judge) else { return nil }
         return judge.pageLabel(from: data, at: activityTimestamp(Date()), profiles: profiles, confidenceFloor: config.confidenceFloor)
     }
 
@@ -271,9 +283,9 @@ final class ActivityLabeller {
     var profileNames: [String] = ["work", "personal"]
     private var knownProfiles: [String] { normalizedActivityProfiles(profileNames + rules.rules.flatMap(\.profiles)) }
 
-    nonisolated private func send(body: Data, endpoint: URL) async -> Data? {
-        guard !Task.isCancelled, let key = JEVKeychain.key() else { return nil }
-        var request = URLRequest(url: endpoint, timeoutInterval: 3)
+    nonisolated private func send(body: Data, judge: any ActivityJudge) async -> Data? {
+        guard !Task.isCancelled, let key = JudgeKeychain.key(judge.provider) else { return nil }
+        var request = URLRequest(url: judge.endpoint, timeoutInterval: 3)
         request.httpMethod = "POST"
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

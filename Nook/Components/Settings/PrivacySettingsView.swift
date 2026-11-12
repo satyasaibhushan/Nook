@@ -60,7 +60,9 @@ struct PrivacySettingsView: View {
                     detail: "Saves time spent on pages to a local activity log. Private windows are never recorded.",
                     isOn: $settings.recordActivity
                 )
-                JEVKeySettingRow()
+                ForEach(ActivityJudgeProvider.allCases, id: \.self) { provider in
+                    JEVKeySettingRow(provider: provider)
+                }
             }
 
             Section("History") {
