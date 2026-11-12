@@ -382,6 +382,7 @@ extension PageSession: WKScriptMessageHandler {
             }
 
         case "historyStateDidChange":
+            if let view = message.webView { FeedFiltering.pageChanged(in: view) }
             // The message is only a signal. The address comes from WebKit, never from the body:
             // a page could otherwise put any URL, lock icon included, in the URL bar.
             addressChangedWithoutLoad(in: message.webView)

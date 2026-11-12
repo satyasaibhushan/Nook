@@ -18,7 +18,7 @@ public protocol ActivityJudge: Sendable {
     func pageLabel(from data: Data, at: String, profiles: [String], confidenceFloor: Double) -> PageLabel?
     func goalBody(url: String, title: String, goal: String, mode: String, examples: [AttentionEvent], config: ActivityJudgeConfig) throws -> Data
     func goalDecision(from data: Data, confidenceFloor: Double) -> GoalFitDecision?
-    func feedBody(posts: [FeedPost], preferences: String, goal: String?, config: ActivityJudgeConfig) throws -> Data
+    func feedBody(posts: [FeedPost], preferences: String, goal: String?, examples: [AttentionEvent], config: ActivityJudgeConfig) throws -> Data
     func feedDecisions(from data: Data, posts: [FeedPost], confidenceFloor: Double) -> [FeedPostDecision]
 }
 
@@ -128,6 +128,27 @@ extension ActivityFiles {
     public func savePreferences(_ preferences: AttentionPreferences) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try Self.encoder.encode(preferences).write(to: preferencesURL, options: .atomic)
+    }
+    /// Merge against the current file so a mute cannot erase another site's edits or unknown fields.
+    public func muteFeedAuthor(_ author: String, site: String) throws {
+        guard ["x.com", "youtube.com", "reddit.com"].contains(site), !author.isEmpty else { return }
+        var raw: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: preferencesURL.path) {
+            let data = try Data(contentsOf: preferencesURL)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+            raw = object
+        }
+        var sites = raw["sites"] as? [String: Any] ?? [:]
+        var rules = sites[site] as? [String: Any] ?? [:]
+        var accounts = rules["mutedAccounts"] as? [String] ?? []
+        let normalized = author.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")).lowercased()
+        if !accounts.contains(where: { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")).lowercased() == normalized }) {
+            accounts.append(author)
+        }
+        rules["mutedAccounts"] = accounts; sites[site] = rules; raw["sites"] = sites
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: raw, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            .write(to: preferencesURL, options: .atomic)
     }
     public func saveModes(_ modes: FocusModes) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -2,6 +2,7 @@
 
 import AppKit
 import NookWeb
+import NookTweaks
 import Observation
 import OSLog
 import WebKit
@@ -78,6 +79,7 @@ final class FocusController {
             self.watchFiles()
         }
         observe()
+        observeFeeds()
         watchFiles()
         activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             DispatchQueue.main.async { self?.watchFiles(); self?.reconcileFiles(); self?.observe() }
@@ -336,6 +338,17 @@ final class FocusController {
         tabs.sessions + detached.values.filter { candidate in !tabs.sessions.contains { $0 === candidate } }
     }
 
+    /// Feed configuration changes independently of the active tab's navigation and title.
+    private func observeFeeds() {
+        withObservationTracking {
+            _ = labeller.preferences; _ = labeller.hasJudgeKey
+            _ = activeMode; _ = goal; _ = sessionID
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observeFeeds() }
+        }
+        FeedFiltering.refresh()
+    }
+
     private func observe() {
         observationGeneration += 1
         let generation = observationGeneration
@@ -448,5 +461,88 @@ final class FocusController {
         default: NotificationCenter.default.post(name: Self.refocusCover, object: session)
         }
         return nil
+    }
+}
+
+extension FocusController: FeedFilteringHost {
+    private struct FeedConfiguration: Encodable {
+        var enabled: Bool
+        var judgeEnabled: Bool
+        var rules: FeedSitePreferences
+        var context: String
+    }
+
+    func feedConfiguration(site: String) -> Data {
+        let preferences = labeller.preferences
+        let rules = preferences.sites[site] ?? FeedSitePreferences(enabled: false)
+        let goal = activeMode?.filterFeeds == true ? self.goal : nil
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let context = String(decoding: (try? encoder.encode(preferences)) ?? Data(), as: UTF8.self)
+            + "|" + (activeMode?.filterFeeds == true ? sessionID ?? "" : "") + "|" + (goal ?? "")
+        return (try? encoder.encode(FeedConfiguration(enabled: preferences.enabled && rules.enabled,
+            judgeEnabled: labeller.hasJudgeKey, rules: rules, context: context))) ?? Data("{}".utf8)
+    }
+
+    private struct FeedMessage: Decodable {
+        var type: String
+        var posts: [FeedPost]?
+        var post: FeedPost?
+        var reason: String?
+        var count: Int?
+        var judgedCount: Int?
+        var reasons: [String: Int]?
+    }
+
+    func handleFeedMessage(_ data: Data, site: String, url: URL) async -> Data {
+        guard let message = try? JSONDecoder().decode(FeedMessage.self, from: data) else { return Data("{}".utf8) }
+        if message.type == "batch" {
+            let context = feedConfiguration(site: site)
+            let posts = (message.posts ?? []).prefix(20).filter {
+                !$0.id.isEmpty && $0.id.count <= 256 && $0.author.count <= 256 && $0.text.count <= 6000
+            }
+            let answers = await labeller.requestFeed(posts: Array(posts), site: site,
+                goal: activeMode?.filterFeeds == true ? goal : nil, context: context)
+            guard context == feedConfiguration(site: site) else { return Data("[]".utf8) }
+            return (try? JSONEncoder().encode(answers)) ?? Data("[]".utf8)
+        }
+        let kind: AttentionEvent.Kind
+        switch message.type {
+        case "summary": kind = .feedHidden
+        case "wrong":
+            kind = .feedWrong
+            if let id = message.post?.id { labeller.invalidateFeed(site: site, id: id) }
+        case "show": kind = .feedShow
+        case "mute":
+            guard labeller.preferences.enabled, labeller.preferences.sites[site]?.enabled == true,
+                  let author = message.post?.author, !author.isEmpty, author.count <= 256 else { return Data("{}".utf8) }
+            let files = labeller.files
+            do {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    queue.async {
+                        do { try files.muteFeedAuthor(author, site: site); continuation.resume() }
+                        catch { continuation.resume(throwing: error) }
+                    }
+                }
+            } catch { return Data("{}".utf8) }
+            await labeller.reload()
+            FeedFiltering.refresh()
+            kind = .feedMute
+        default: return Data("{}".utf8)
+        }
+        let now = Date()
+        let reason: String
+        if kind == .feedHidden {
+            guard let count = message.count, count > 0 else { return Data("{}".utf8) }
+            reason = (message.reasons ?? [:]).sorted { $0.key < $1.key }.prefix(32)
+                .map { "\($0.value): \($0.key.prefix(240))" }.joined(separator: "; ")
+        } else {
+            guard let post = message.post, !post.id.isEmpty else { return Data("{}".utf8) }
+            reason = "\(post.author.prefix(256)) [\(post.id.prefix(256))]: \((message.reason ?? "").prefix(500))"
+        }
+        writer.writeEvent(.init(at: activityTimestamp(now), session: sessionID, mode: activeMode?.name,
+            kind: kind, url: url.absoluteString, title: message.post.map { String($0.text.prefix(6000)) }, site: site,
+            decidedBy: kind == .feedHidden ? ((message.judgedCount ?? 0) > 0 ? .judge : .fixed) : .you, reason: reason, count: kind == .feedHidden ? message.count : nil), machine: machine, date: now)
+        return Data("{\"ok\":true}".utf8)
     }
 }
