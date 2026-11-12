@@ -8,8 +8,13 @@ struct WebsiteLoadingIndicator: View {
     @Environment(BrowserWindowState.self) private var windowState
 
     var body: some View {
-        PageLoadingProgressBar(session: tabs.selectedSession(in: windowState), inPageInset: true)
-            .padding(.horizontal, NookDesign.Chrome.pageInset)
+        // The row is the page's top inset, so it keeps its height when the bar draws in the
+        // docked sidebar instead: an empty bar collapses its frame, and the page would lose it.
+        Color.clear
             .frame(height: NookDesign.Chrome.pageInset)
+            .overlay {
+                PageLoadingProgressBar(session: tabs.selectedSession(in: windowState), inPageInset: true)
+                    .padding(.horizontal, NookDesign.Chrome.pageInset)
+            }
     }
 }
