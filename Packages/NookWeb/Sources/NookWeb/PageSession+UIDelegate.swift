@@ -190,8 +190,12 @@ extension PageSession: WKUIDelegate {
         completionHandler: @escaping () -> Void
     ) {
         // An agent page's dialogs answer at once: a sheet would cover the person's window and
-        // hold the agent's next call until it times out.
-        guard !jsDialogsSuppressed, !isAgentPage, let alerts = controller?.alerts else { return completionHandler() }
+        // hold the agent's next call until it times out. The agent reads them in its next report.
+        if isAgentPage {
+            recordAgentDialog("alert: \(message)")
+            return completionHandler()
+        }
+        guard !jsDialogsSuppressed, let alerts = controller?.alerts else { return completionHandler() }
         alerts.presentAlert(
             message: message, host: frame.securityOrigin.host, over: webView,
             onSuppress: nextDialogSuppressor(), completion: completionHandler)
@@ -203,7 +207,11 @@ extension PageSession: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping (Bool) -> Void
     ) {
-        guard !jsDialogsSuppressed, !isAgentPage, let alerts = controller?.alerts else { return completionHandler(false) }
+        if isAgentPage {
+            recordAgentDialog("confirm: \(message) -> \(agentAcceptsDialogs ? "OK" : "Cancel")")
+            return completionHandler(agentAcceptsDialogs)
+        }
+        guard !jsDialogsSuppressed, let alerts = controller?.alerts else { return completionHandler(false) }
         alerts.presentConfirm(
             message: message, host: frame.securityOrigin.host, over: webView,
             onSuppress: nextDialogSuppressor(), completion: completionHandler)
@@ -216,7 +224,12 @@ extension PageSession: WKUIDelegate {
         initiatedByFrame frame: WKFrameInfo,
         completionHandler: @escaping (String?) -> Void
     ) {
-        guard !jsDialogsSuppressed, !isAgentPage, let alerts = controller?.alerts else { return completionHandler(nil) }
+        if isAgentPage {
+            let answer = agentAcceptsDialogs ? defaultText ?? "" : nil
+            recordAgentDialog("prompt: \(prompt) -> \(answer.map { "\"\($0)\"" } ?? "Cancel")")
+            return completionHandler(answer)
+        }
+        guard !jsDialogsSuppressed, let alerts = controller?.alerts else { return completionHandler(nil) }
         alerts.presentPrompt(
             prompt: prompt, defaultText: defaultText, host: frame.securityOrigin.host, over: webView,
             onSuppress: nextDialogSuppressor(), completion: completionHandler)

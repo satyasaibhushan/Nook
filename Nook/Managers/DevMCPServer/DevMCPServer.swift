@@ -42,7 +42,7 @@ final class DevMCPServer {
     private weak var browserManager: BrowserManager?
     private var listener: NWListener?
     /// Last snapshot per page and selector, so the next call can answer with a diff.
-    private var snapshots: [String: String] = [:]
+    var snapshots: [String: String] = [:]
     private var token = ""
     /// Each session's open GET stream, which carries nothing but keep-alives.
     private var streams: [String: NWConnection] = [:]
@@ -337,7 +337,7 @@ final class DevMCPServer {
         ),
         AIToolDefinition(
             name: "snapshot",
-            description: "Accessibility outline of the selected tab under a CSS selector (the body when omitted): one line per role with its name and state, generic wrappers flattened, hidden content left out. A repeat call for the same page and selector returns only the lines that changed; pass full: true for the whole outline. maxNodes defaults to 300, maxDepth to 12.",
+            description: "Accessibility outline of the selected tab under a CSS selector (the body when omitted): one line per role with its name, state and ref, generic wrappers flattened, hidden content left out. Pass a ref to clickElement, fill or press; it names that element for as long as the page lives. A repeat call for the same page and selector returns only the lines that changed; pass full: true for the whole outline. maxNodes defaults to 300, maxDepth to 12.",
             parameters: ["type": "object", "properties": [
                 "selector": ["type": "string"], "full": ["type": "boolean"],
                 "maxNodes": ["type": "integer"], "maxDepth": ["type": "integer"],
@@ -420,9 +420,12 @@ final class DevMCPServer {
     /// `executeJavaScript` is not advertised: over this server it is only an old name for
     /// `evaluate` (see callTool), and the chat's description of it is wrong for that behaviour.
     /// The alias stays so an agent registered against the old name keeps working.
-    private static let toolList: [[String: Any]] = (BrowserTools.allTools.filter { $0.name != "executeJavaScript" } + devTools).map {
-        ["name": $0.name, "description": $0.description, "inputSchema": agentSchema($0)]
+    private static let toolList: [[String: Any]] = (BrowserTools.allTools.filter { $0.name != "executeJavaScript" } + devTools + actionTools).map {
+        ["name": $0.name, "description": $0.name == "clickElement" ? clickDescription : $0.description,
+         "inputSchema": agentSchema($0)]
     }
+    /// Tools that act on an element and report what followed; see DevMCPActions.
+    private static let actionNames: Set<String> = ["clickElement", "fill", "press"]
 
     /// Tools that act on no single tab of the connection, so they take no `tab`.
     private static let untabbedTools: Set<String> = ["getTabList", "switchTab", "pick", "selection", "pages", "clear_page_cache", "check_urls"]
@@ -433,6 +436,7 @@ final class DevMCPServer {
     /// stay as they are.
     private static func agentSchema(_ tool: AIToolDefinition) -> [String: Any] {
         guard var properties = tool.parameters["properties"] as? [String: Any] else { return tool.parameters }
+        if tool.name == "clickElement" { properties.merge(clickProperties) { $1 } }
         if openingTools.contains(tool.name) {
             properties["logins"] = ["type": "string", "description": "Name of the person's space whose cookies this connection's tabs start with, or none (the default). Only while it has no tabs."]
         }
@@ -462,7 +466,7 @@ final class DevMCPServer {
     private static let pageContentTools: Set<String> = [
         "evaluate", "executeJavaScript", "selection", "pick", "snapshot", "console", "network", "blocker_log",
         "pages", "getTabList", "readPageContent", "getInteractiveElements", "extractStructuredData",
-        "searchInPage", "summarizePage", "getSelectedText",
+        "searchInPage", "summarizePage", "getSelectedText", "clickElement", "fill", "press",
     ]
 
     private static func markPageContent(_ result: [String: Any]) -> [String: Any] {
@@ -479,7 +483,7 @@ final class DevMCPServer {
     /// Why the page's last navigation did not load, or nil when it loaded or was superseded.
     /// A cancel (-999) means a newer navigation took over, and 102 is a response handed to
     /// downloads; neither is a failure the agent should act on.
-    private static func failedLoad(_ session: PageSession) -> String? {
+    static func failedLoad(_ session: PageSession) -> String? {
         guard case .didFailProvisionalNavigation(let error) = session.loadingState else { return nil }
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return nil }
@@ -503,7 +507,7 @@ final class DevMCPServer {
         return text("Loaded: \(shown) | \(session.webView?.title ?? session.title)")
     }
 
-    private func text(_ s: String, error: Bool = false) -> [String: Any] {
+    func text(_ s: String, error: Bool = false) -> [String: Any] {
         ["content": [["type": "text", "text": s]], "isError": error]
     }
 
@@ -578,6 +582,14 @@ final class DevMCPServer {
             }
             if name == "createTab", let tabName, target != nil {
                 return text("A tab named \(tabName) is open; use navigateToURL with tab: \"\(tabName)\".", error: true)
+            }
+
+            if Self.actionNames.contains(name), let caller {
+                _ = try bm.agentWebView(for: caller, tab: target)
+                guard let id = target ?? bm.tabs.agentCurrentTab(of: caller), let page = bm.tabs.session(for: id) else {
+                    return text("No tab to act on. Open one with navigateToURL.", error: true)
+                }
+                return try await runAction(name, args, session: page, caller: caller, tabs: bm.tabs)
             }
 
             if BrowserTools.toolsByName[name] != nil {

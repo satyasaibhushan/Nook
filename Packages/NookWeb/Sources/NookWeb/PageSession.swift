@@ -217,6 +217,17 @@ public final class PageSession: NSObject, Identifiable {
     /// JavaScript dialogs since the last commit, and whether the user silenced the page.
     @ObservationIgnored var jsDialogCount = 0
     @ObservationIgnored var jsDialogsSuppressed = false
+    /// The last dialogs an agent page answered on its own, oldest first, numbered from 1 for
+    /// the agent's action reports.
+    @ObservationIgnored public private(set) var agentDialogs: [(seq: Int, text: String)] = []
+    /// Agent dialogs are numbered from this count; ask for the ones after it.
+    public var agentDialogCount: Int { agentDialogs.last?.seq ?? 0 }
+    func recordAgentDialog(_ text: String) {
+        agentDialogs.append((agentDialogCount + 1, String(text.prefix(300))))
+        if agentDialogs.count > 20 { agentDialogs.removeFirst() }
+    }
+    /// Whether an agent page's confirm and prompt are accepted; an agent sets it around one action.
+    @ObservationIgnored public var agentAcceptsDialogs = false
     /// An open-in-another-app sheet is up, so a redirect loop cannot stack more.
     @ObservationIgnored var externalAppConfirmPending = false
     /// URL rewrites since the last commit; capped so a server redirecting back cannot loop us.
