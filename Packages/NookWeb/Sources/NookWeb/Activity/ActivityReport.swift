@@ -271,7 +271,10 @@ extension ActivityReport {
             summaries[id] = Session(id: id, mode: row.mode ?? "", start: row.start)
         }
         let relevantIDs = Set(rows.compactMap(\.session)).union(inRange.compactMap(\.session))
-        summaries = summaries.filter { relevantIDs.contains($0.key) || range.contains(String($0.value.start.prefix(10))) }
+        summaries = summaries.filter {
+            relevantIDs.contains($0.key) || (String($0.value.start.prefix(10)) <= (days.last ?? "")
+                && ($0.value.end.map { String($0.prefix(10)) >= (days.first ?? "") } ?? true))
+        }
         func key(_ raw: String?) -> String? { raw.flatMap(URL.init(string:)).flatMap(normalizedActivityURL)?.absoluteString }
         let bySession = Dictionary(grouping: events.filter { $0.session != nil }, by: { $0.session! })
         for row in rows {
@@ -347,7 +350,7 @@ extension ActivityReport {
             guard let date = formatter.date(from: day), let next = calendar.date(byAdding: .day, value: 1, to: date) else { continue }
             var cursor = date
             while cursor < next {
-                buckets[cursor] = Bucket(start: activityTimestamp(cursor))
+                buckets[cursor] = Bucket(start: activityTimestamp(cursor, timeZone: calendar.timeZone))
                 guard let end = calendar.date(byAdding: component, value: 1, to: cursor), end > cursor else { break }
                 cursor = end
             }
@@ -358,6 +361,7 @@ extension ActivityReport {
             while cursor < end {
                 guard let interval = calendar.dateInterval(of: component, for: cursor), interval.end > cursor else { break }
                 let next = min(end, interval.end)
+                // Rows store totals, so split time across bucket boundaries in proportion to wall time.
                 let weight = next.timeIntervalSince(cursor) / end.timeIntervalSince(start)
                 if buckets[interval.start] != nil {
                     buckets[interval.start]?.active += row.active * weight
@@ -369,5 +373,41 @@ extension ActivityReport {
         self.buckets = buckets.sorted { $0.key < $1.key }.map {
             Bucket(start: $0.value.start, active: Self.round($0.value.active), media: Self.round($0.value.media))
         }
+    }
+}
+
+extension ActivityReport.ModeTime {
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        seconds = (try? c.decode(Double.self, forKey: .seconds)) ?? 0
+        overrides = (try? c.decode(Int.self, forKey: .overrides)) ?? 0
+        sessions = (try? c.decode(Int.self, forKey: .sessions)) ?? 0
+        active = (try? c.decode(Double.self, forKey: .active)) ?? seconds
+        onGoal = (try? c.decode(Double.self, forKey: .onGoal)) ?? 0
+    }
+}
+
+extension ActivityReport {
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        from = (try? c.decode(String.self, forKey: .from)) ?? ""
+        to = (try? c.decode(String.self, forKey: .to)) ?? ""
+        generatedAt = (try? c.decode(String.self, forKey: .generatedAt)) ?? ""
+        total = (try? c.decode(Double.self, forKey: .total)) ?? 0
+        backgroundMedia = (try? c.decode(Double.self, forKey: .backgroundMedia)) ?? 0
+        outsideModes = (try? c.decode(Double.self, forKey: .outsideModes)) ?? 0
+        overrides = (try? c.decode(Int.self, forKey: .overrides)) ?? 0
+        scopes = (try? c.decode([Lenient<Share>].self, forKey: .scopes))?.compactMap(\.value) ?? []
+        kinds = (try? c.decode([Lenient<Share>].self, forKey: .kinds))?.compactMap(\.value) ?? []
+        modes = (try? c.decode([Lenient<ModeTime>].self, forKey: .modes))?.compactMap(\.value) ?? []
+        sites = (try? c.decode([Lenient<Share>].self, forKey: .sites))?.compactMap(\.value) ?? []
+        pages = (try? c.decode([Lenient<Page>].self, forKey: .pages))?.compactMap(\.value) ?? []
+        media = (try? c.decode([Lenient<Media>].self, forKey: .media))?.compactMap(\.value) ?? []
+        unlabelled = (try? c.decode([Lenient<Page>].self, forKey: .unlabelled))?.compactMap(\.value) ?? []
+        machines = (try? c.decode([Lenient<Share>].self, forKey: .machines))?.compactMap(\.value) ?? []
+        sessions = (try? c.decode([Lenient<Session>].self, forKey: .sessions))?.compactMap(\.value) ?? []
+        buckets = (try? c.decode([Lenient<Bucket>].self, forKey: .buckets))?.compactMap(\.value) ?? []
+        feeds = (try? c.decode([Lenient<Feed>].self, forKey: .feeds))?.compactMap(\.value) ?? []
     }
 }

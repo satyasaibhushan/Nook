@@ -171,12 +171,12 @@ import Foundation
         let input = (body["input"] as! [[String: Any]])[0]["content"] as! [[String: Any]]
         precondition((input[0]["data"] as! [String: String]) == ["url": "https://a.com/x", "title": "A"])
         let questions = body["questions"] as! [[String: Any]]
-        precondition(questions.map { $0["name"] as! String } == ["scope", "kind"])
+        precondition(questions.map { $0["name"] as! String } == ["profile", "kind"])
         precondition((questions[1]["choices"] as! [[String: String]]).map { $0["value"]! } == PageKind.allCases.map(\.rawValue))
         func answer(_ json: String) -> PageLabel? { ActivityJEV.label(from: Data(json.utf8), at: stamp) }
         precondition(answer("""
         {"answers":[{"type":"choice","name":"scope","choice":"work","confidence":0.9},{"type":"choice","name":"kind","choice":"reading","confidence":0.8}],"model":"m"}
-        """) == PageLabel(scope: .work, kind: .reading, source: .jev, unsure: false, at: stamp))
+        """) == PageLabel(profiles: ["work"], kind: .reading, source: .jev, at: stamp, confidence: 0.8))
         precondition(answer("""
         {"answers":[{"type":"choice","name":"scope","choice":"personal","confidence":0.55},{"type":"choice","name":"kind","choice":"social","confidence":0.9}]}
         """)?.unsure == true)
@@ -185,7 +185,7 @@ import Foundation
         """)?.unsure == true)
         precondition(answer("""
         {"answers":[{"type":"choice","name":"scope","choice":"work","confidence":0.9},{"type":"refusal","name":"kind"}]}
-        """) == PageLabel(scope: .work, kind: nil, source: .jev, unsure: false, at: stamp))
+        """) == PageLabel(profiles: ["work"], source: .jev, at: stamp, confidence: 0.9))
         precondition(answer("""
         {"answers":[{"type":"refusal","name":"scope"},{"type":"choice","name":"kind","choice":"social","confidence":0.9}]}
         """) == nil)

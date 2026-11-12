@@ -210,8 +210,8 @@ public struct ResolvedLabel: Codable, Equatable, Sendable {
 
 }
 
-/// Manual label, then a fixed work or personal rule, then a remembered JEV answer. A rule
-/// scoped `either` contributes its kind to a JEV answer, and stands alone without one.
+/// Manual label, then a fixed profile rule, then a remembered judge answer. Judge rules
+/// contribute their kind to remembered answers.
 public func resolveActivityLabel(_ url: URL, rules: ActivityRules, remembered: [String: PageLabel]) -> ResolvedLabel? {
     guard !isInternalActivityURL(url) else { return nil }
     let key = url.absoluteString
@@ -229,8 +229,7 @@ public func resolveActivityLabel(_ url: URL, rules: ActivityRules, remembered: [
     return nil
 }
 
-/// Whether JEV may be asked about `url`. A fixed work or personal rule keeps a page away from
-/// JEV for good; that is the owner's privacy rule.
+/// Fixed profile, block and allow rules keep page metadata away from the judge.
 public func activityLabelNeedsJEV(_ url: URL, rules: ActivityRules, remembered: [String: PageLabel]) -> Bool {
     guard !isInternalActivityURL(url), remembered[url.absoluteString] == nil else { return false }
     if let rule = rules.match(url), rule.handling != .judge { return false }

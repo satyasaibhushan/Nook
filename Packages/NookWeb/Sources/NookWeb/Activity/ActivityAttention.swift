@@ -5,11 +5,17 @@ import Darwin
 
 public enum ActivityJudgeProvider: String, Codable, CaseIterable, Sendable {
     case openAIDecisions = "openai-decisions"
+    public func makeJudge() -> any ActivityJudge {
+        switch self { case .openAIDecisions: return OpenAIDecisionsJudge() }
+    }
 }
 
 /// Providers supply wire formats; callers own credentials and transport.
 public protocol ActivityJudge: Sendable {
     var provider: ActivityJudgeProvider { get }
+    var endpoint: URL { get }
+    func labelBody(url: String, title: String, profiles: [String], config: ActivityJudgeConfig) throws -> Data
+    func pageLabel(from data: Data, at: String, profiles: [String], confidenceFloor: Double) -> PageLabel?
     func goalBody(url: String, title: String, goal: String, mode: String, examples: [AttentionEvent], config: ActivityJudgeConfig) throws -> Data
     func goalDecision(from data: Data, confidenceFloor: Double) -> GoalFitDecision?
     func feedBody(posts: [FeedPost], preferences: String, goal: String?, config: ActivityJudgeConfig) throws -> Data
@@ -138,8 +144,11 @@ extension ActivityFiles {
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
             raw = object
         }
-        var rules = raw["rules"] as? [[String: Any]] ?? []
-        rules.removeAll { ($0["host"] as? String)?.lowercased() == host.lowercased() && $0["pathPrefix"] == nil }
+        var rules = raw["rules"] as? [Any] ?? []
+        rules.removeAll { value in
+            guard let rule = value as? [String: Any] else { return false }
+            return (rule["host"] as? String)?.lowercased() == host.lowercased() && rule["pathPrefix"] == nil
+        }
         let rule = ActivityRule(host: host, handling: .block, source: .you)
         rules.insert(try JSONSerialization.jsonObject(with: Self.encoder.encode(rule)) as! [String: Any], at: 0)
         raw["rules"] = rules

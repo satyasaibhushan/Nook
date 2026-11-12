@@ -31,9 +31,32 @@ public struct FeedPostDecision: Codable, Equatable, Sendable {
     }
 }
 
+/// Apply fixed feed rules before constructing a provider request.
+public struct FeedPostBatch: Equatable, Sendable {
+    public var posts: [FeedPost]
+    public var fixed: [FeedPostDecision]
+    public init(posts: [FeedPost], preferences: FeedSitePreferences) {
+        self.posts = []; fixed = []
+        for post in posts {
+            if preferences.enabled && preferences.hides(post) {
+                fixed.append(.init(id: post.id, choice: .hide, reason: "Matched your feed rules."))
+            } else if !preferences.enabled {
+                fixed.append(.init(id: post.id, choice: .show, reason: "Filtering is disabled for this site."))
+            } else { self.posts.append(post) }
+        }
+    }
+}
+
 public struct OpenAIDecisionsJudge: ActivityJudge {
     public let provider = ActivityJudgeProvider.openAIDecisions
+    public let endpoint = ActivityJEV.endpoint
     public init() {}
+    public func labelBody(url: String, title: String, profiles: [String], config: ActivityJudgeConfig = .init()) throws -> Data {
+        try ActivityJEV.requestBody(url: url, title: title, profiles: profiles, config: config)
+    }
+    public func pageLabel(from data: Data, at: String, profiles: [String], confidenceFloor: Double = 0.6) -> PageLabel? {
+        ActivityJEV.label(from: data, at: at, profiles: profiles, confidenceFloor: confidenceFloor)
+    }
     public func goalBody(url: String, title: String, goal: String, mode: String, examples: [AttentionEvent] = [],
                          config: ActivityJudgeConfig = .init()) throws -> Data {
         let examples = try JSONSerialization.jsonObject(with: JSONEncoder().encode(Array(examples.prefix(20))))
