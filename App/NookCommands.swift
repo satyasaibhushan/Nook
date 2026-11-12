@@ -387,6 +387,10 @@ struct NookCommands: Commands {
             }
 
             CommandMenu("Privacy") {
+                Button("Attention") {
+                    browserManager.openAttention()
+                }
+                .modifier(dynamicShortcut(.openAttention))
                 Button(browserManager.activityRecorder.recordingPaused ? "Resume Recording" : "Pause Recording") {
                     browserManager.activityRecorder.setPaused(!browserManager.activityRecorder.recordingPaused)
                 }

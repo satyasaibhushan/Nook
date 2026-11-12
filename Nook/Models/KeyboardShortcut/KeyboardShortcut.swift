@@ -105,6 +105,7 @@ enum ShortcutAction: String, CaseIterable, Hashable, Codable {
     case organizeTabs = "organize_tabs"                        // Cmd+Shift+Option+O
     case togglePinTab = "toggle_pin_tab"                       // Cmd+D
     case stopLoading = "stop_loading"                          // Cmd+.
+    case openAttention = "open_attention"                      // Cmd+Option+A
 
     var displayName: String {
         switch self {
@@ -167,6 +168,7 @@ enum ShortcutAction: String, CaseIterable, Hashable, Codable {
         case .organizeTabs: return "Organize Tabs"
         case .togglePinTab: return "Pin/Unpin Tab"
         case .stopLoading: return "Stop Loading"
+        case .openAttention: return "Open Attention"
         }
     }
 
@@ -197,7 +199,7 @@ enum ShortcutAction: String, CaseIterable, Hashable, Codable {
             return .tools
         case .togglePictureInPicture:
             return .tools
-        case .copyCurrentURL, .printPage:
+        case .copyCurrentURL, .printPage, .openAttention:
             return .tools
         case .hardReload:
             return .navigation
@@ -416,7 +418,8 @@ extension KeyboardShortcut {
             KeyboardShortcut(action: .customizeSpaceGradient, keyCombination: KeyCombination(key: "g", modifiers: [.command, .shift])),
             KeyboardShortcut(action: .organizeTabs, keyCombination: KeyCombination(key: "o", modifiers: [.command, .shift, .option])),
             KeyboardShortcut(action: .togglePinTab, keyCombination: KeyCombination(key: "d", modifiers: [.command])),
-            KeyboardShortcut(action: .stopLoading, keyCombination: KeyCombination(key: ".", modifiers: [.command]))
+            KeyboardShortcut(action: .stopLoading, keyCombination: KeyCombination(key: ".", modifiers: [.command])),
+            KeyboardShortcut(action: .openAttention, keyCombination: KeyCombination(key: "a", modifiers: [.command, .option]))
         ]
     }
 }

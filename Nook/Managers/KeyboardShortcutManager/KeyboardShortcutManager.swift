@@ -18,7 +18,7 @@ class KeyboardShortcutManager {
     private let userDefaults = UserDefaults.standard
     private let shortcutsKey = "keyboard.shortcuts"
     private let shortcutsVersionKey = "keyboard.shortcuts.version"
-    private let currentVersion = 12 // Increment when adding new shortcuts; 12 took Cmd+Z back from Undo Close Tab; 11 added Pin/Unpin Tab (Cmd+D) and Stop Loading (Cmd+.); 10 added Go to Space 1-9 (Ctrl+1-9) and moved Next/Previous Space to Cmd+Opt+arrows
+    private let currentVersion = 13 // Increment when adding new shortcuts; 13 added Open Attention (Cmd+Opt+A); 12 took Cmd+Z back from Undo Close Tab; 11 added Pin/Unpin Tab (Cmd+D) and Stop Loading (Cmd+.); 10 added Go to Space 1-9 (Ctrl+1-9) and moved Next/Previous Space to Cmd+Opt+arrows
 
     /// Defaults that changed key: a user still on the old key gets the new one.
     private let movedDefaults: [(action: ShortcutAction, from: KeyCombination, version: Int)] = [
@@ -484,6 +484,8 @@ class KeyboardShortcutManager {
         switch action {
         case .newWindow, .closeBrowser, .togglePinTab:
             return false
+        case .openAttention:
+            browserManager?.openAttention()
         case .stopLoading:
             webView.stopLoading()
         case .goBack:
@@ -660,6 +662,8 @@ class KeyboardShortcutManager {
                 browserManager.togglePinCurrentTab()
             case .stopLoading:
                 browserManager.stopLoadingCurrentPage()
+            case .openAttention:
+                browserManager.openAttention()
             }
 
         }
