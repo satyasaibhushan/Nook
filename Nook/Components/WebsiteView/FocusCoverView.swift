@@ -24,7 +24,7 @@ struct FocusCoverView: View {
             if let focus = FocusController.shared, let cover = focus.cover(for: session) {
                 FocusCoverCard(session: session, cover: cover, focus: focus)
                     .clipShape(shape)
-                    .id(cover.url)
+                    .id((focus.sessionID ?? "") + "|" + cover.url.absoluteString)
             }
         }
         .onAppear { FocusController.shared?.register(session) }
@@ -39,6 +39,7 @@ private struct FocusCoverCard: View {
 
     private static let wait = 10
 
+    @State private var reportedWrong = false
     @State private var continuing = false
     @State private var remaining = Self.wait
     @State private var reason = ""
@@ -75,7 +76,12 @@ private struct FocusCoverCard: View {
                         DialogButton(text: "Continue", variant: .primary, isEnabled: canConfirm) { confirm() },
                     ])
                 } else {
-                    DialogFooter(rightButtons: (cover.canContinue ? [
+                    DialogFooter(rightButtons: (cover.decidedBy == .judge ? [
+                        DialogButton(text: reportedWrong ? "Reported" : "Wrong Block", isEnabled: !reportedWrong) {
+                            focus.wrongBlock(session)
+                            reportedWrong = true
+                        },
+                    ] : []) + (cover.canContinue ? [
                         DialogButton(text: "Continue Anyway") { beginContinue() },
                     ] : []) + [
                         DialogButton(text: leaveTitle, variant: .primary) { focus.leave(session) },
@@ -113,20 +119,27 @@ private struct FocusCoverCard: View {
     }
 
     private var subtitle: String {
+        if cover.decidedBy == .judge { return "This page does not fit your session goal." }
         if cover.mode.isBlockedHost(cover.url) { return "\(cover.mode.name) blocks this site." }
         guard let label = cover.label else { return "This page does not fit \(cover.mode.name)." }
-        let words = [label.scope == .either ? nil : label.scope.rawValue, label.kind?.rawValue].compactMap { $0 }
+        let words = label.profiles + [label.kind?.rawValue].compactMap { $0 }
         let by: String
         switch label.source {
         case .manual: by = "by you"
         case .rule: by = "by your rules"
-        case .jev: by = "by JEV"
+        case .jev: by = "by the judge"
         }
         return "Labelled \(words.joined(separator: ", ")) \(by)."
     }
 
     private var hints: some View {
         VStack(alignment: .leading, spacing: NookDesign.Spacing.sm) {
+            if !cover.reason.isEmpty {
+                Text(cover.reason)
+                    .font(NookDesign.Font.body)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if !cover.mode.description.isEmpty {
                 Text(cover.mode.description)
                     .font(NookDesign.Font.body)

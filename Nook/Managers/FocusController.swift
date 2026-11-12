@@ -84,7 +84,9 @@ final class FocusController {
             })
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated { self?.interceptKey(event) ?? event }
+            var result: NSEvent? = event
+            MainActor.assumeIsolated { if let self { result = self.interceptKey(event) } }
+            return result
         }
     }
 
@@ -275,21 +277,32 @@ final class FocusController {
         recordEvent(.wrongBlock, page: page, decidedBy: .you, reason: cover.reason, confidence: cover.confidence)
     }
 
-    func wrongAllow() {
-        guard activeMode != nil, let page = activePage, !page.isPrivate, !page.isAgentPage,
+    func wrongAllow() { if let page = activePage { wrongAllow(page) } }
+
+    func wrongAllow(_ page: PageSession) {
+        guard activeMode != nil, !page.isPrivate, !page.isAgentPage,
               let url = normalizedActivityURL(page.url), !isInternalActivityURL(url), cover(for: page) == nil else { return }
         recordEvent(.wrongAllow, page: page, decidedBy: .you)
     }
 
     func blockSite(host: String) {
         let host = host.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
-        guard !host.isEmpty, let page = activePage, !page.isPrivate, !page.isAgentPage,
-              page.url.host?.lowercased() == host else { return }
+        guard let url = URL(string: "https://" + host), url.host == host, url.path.isEmpty,
+              !isInternalActivityURL(url) else { return }
+        let page = activePage
+        let now = Date()
+        let pageURL = page.flatMap { page -> String? in
+            guard !page.isPrivate, !page.isAgentPage, page.url.host?.lowercased() == host else { return nil }
+            return normalizedActivityURL(page.url)?.absoluteString
+        }
+        let line = AttentionEvent(at: activityTimestamp(now), session: sessionID, mode: activeMode?.name, kind: .blockSite,
+                                  url: pageURL,
+                                  site: host, decidedBy: .you)
         Task {
             do {
                 try await labeller.blockSite(host: host)
                 overridden = overridden.filter { URL(string: $0)?.host?.lowercased() != host }
-                recordEvent(.blockSite, page: page, decidedBy: .you)
+                writer.writeEvent(line, machine: machine, date: now)
             } catch { Self.log.error("Could not block site: \(String(describing: error), privacy: .public)") }
         }
     }
