@@ -3,7 +3,7 @@
 //  JEVKeySettingRow.swift
 //  Nook
 //
-//  Sets or clears the JEV key in the Keychain. The saved key is never read back into the UI.
+//  Sets or clears the AI judge key in the Keychain. The saved key is never read back into the UI.
 //
 
 import SwiftUI
@@ -31,7 +31,7 @@ struct JEVKeySettingRow: View {
             }
         } label: {
             VStack(alignment: .leading, spacing: NookDesign.Spacing.xxs) {
-                Text("JEV key")
+                Text("AI judge key")
                 Text(status)
                     .font(NookDesign.Font.caption)
                     .foregroundStyle(.secondary)
@@ -42,7 +42,7 @@ struct JEVKeySettingRow: View {
     private var status: String {
         if failed { return "Could not update the Keychain." }
         let state = hasKey ? "A key is saved in your Keychain." : "No key saved."
-        return "\(state) While a Focus mode is on, JEV labels pages no rule decides, from their address and title only. Private windows are never sent."
+        return "\(state) The AI judge decides pages and posts no rule decides, from their address and title only. Private windows are never sent."
     }
 
     private func save() {
