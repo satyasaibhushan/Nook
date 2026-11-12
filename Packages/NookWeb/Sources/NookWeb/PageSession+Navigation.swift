@@ -73,6 +73,8 @@ extension PageSession: WKNavigationDelegate {
 
         if let newURL = webView.url {
             self.url = newURL
+            // Back, forward and redirects land here without a policy call for the new page.
+            reconcileAttentionBridge(for: newURL, in: webView)
             controller?.pageCommitted(itemID: itemID, url: newURL)
             controller?.sessionDelegate?.navigateAcrossWindows(itemID, to: newURL)
             // At commit, before first paint, so a zoomed site never flashes at 100%.
@@ -122,6 +124,12 @@ extension PageSession: WKNavigationDelegate {
 
             // CHROME WEB STORE INTEGRATION: Inject script after navigation
             injectWebStoreScriptIfNeeded(for: newURL, in: webView)
+
+            // A page restored from the back-forward cache does not run its scripts again;
+            // tell it the bridge is back so it can refresh.
+            if isAttentionPageURL(newURL) {
+                webView.evaluateJavaScript("window.dispatchEvent(new Event('nook-attention-bridge'))")
+            }
 
         }
 
@@ -313,10 +321,20 @@ extension PageSession: WKNavigationDelegate {
         // straight away; a scripted `a.click()` is also `.linkActivated`, so the gesture decides.
         // Everything else asks, one sheet at a time. That includes a subframe: Slack and others
         // launch their app from a hidden iframe when the browser reads as Safari.
-        // nook:// is for other apps. A page never triggers it, in any frame.
+        // nook:// is for other apps. A page never triggers it, in any frame. The one
+        // exception is the Attention tab itself, a main-frame page Nook serves.
         if navigationAction.request.url?.scheme?.lowercased() == "nook" {
-            decisionHandler(.cancel)
+            if let url = navigationAction.request.url, isAttentionPageURL(url),
+               navigationAction.targetFrame?.isMainFrame == true {
+                reconcileAttentionBridge(for: url, in: webView)
+                decisionHandler(.allow)
+            } else {
+                decisionHandler(.cancel)
+            }
             return
+        }
+        if navigationAction.targetFrame?.isMainFrame == true, let url = navigationAction.request.url {
+            reconcileAttentionBridge(for: url, in: webView)
         }
         if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(),
            !WKWebView.handlesURLScheme(scheme), scheme != "webkit-extension", scheme != "safari-web-extension"

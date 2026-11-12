@@ -261,6 +261,33 @@ extension PageSession {
         controller?.sessionDelegate?.configureShortcutDetection(in: webView)
     }
 
+    // MARK: - Attention page bridge
+
+    public static let attentionHandlerName = "nookAttention"
+
+    /// The Attention bridge exists only while this page shows an Attention URL, and never in
+    /// a private window. Registered on each of the page's views as they turn up; removed the
+    /// moment the page heads anywhere else. The handler rechecks the frame's own URL on
+    /// every message, so a registration that outlived its page still answers nothing.
+    func reconcileAttentionBridge(for url: URL, in webView: WKWebView) {
+        let content = webView.configuration.userContentController
+        let key = ObjectIdentifier(content)
+        guard isAttentionPageURL(url), !isPrivate else {
+            if attentionControllers.remove(key) != nil {
+                content.removeScriptMessageHandler(forName: Self.attentionHandlerName, contentWorld: .page)
+            }
+            return
+        }
+        guard !attentionControllers.contains(key) else { return }
+        if attentionHandler == nil {
+            attentionHandler = controller?.sessionDelegate?.makeAttentionBridge(for: self)
+        }
+        guard let handler = attentionHandler else { return }
+        content.removeScriptMessageHandler(forName: Self.attentionHandlerName, contentWorld: .page)
+        content.addScriptMessageHandler(handler, contentWorld: .page, name: Self.attentionHandlerName)
+        attentionControllers.insert(key)
+    }
+
     // MARK: - Chrome Web Store Integration
 
     /// Inject the Web Store "Add to Nook" script after navigation completes on a store page.

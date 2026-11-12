@@ -65,6 +65,16 @@ public protocol PageSessionDelegate: AnyObject {
     /// retain for the life of the page, or nil when the URL is not a store page.
     func installWebStoreScript(in webView: WKWebView) -> AnyObject?
     func removeWebStoreHandler(from controller: WKUserContentController)
+
+    // MARK: Attention page
+
+    /// The reply handler for the Attention tab's bridge, or nil where the app has none.
+    /// The session registers it only while the page shows an Attention URL.
+    func makeAttentionBridge(for session: PageSession) -> WKScriptMessageHandlerWithReply?
+}
+
+public extension PageSessionDelegate {
+    func makeAttentionBridge(for session: PageSession) -> WKScriptMessageHandlerWithReply? { nil }
 }
 
 /// What a window's picture-in-picture (`BrowserWindowState.sidebarPiPStorage`) shows, so the tab

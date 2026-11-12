@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Attention</title>
+<style>
+:root{
+  --win:#ececec; --group:rgba(255,255,255,.62); --line:rgba(0,0,0,.09);
+  --t1:rgba(0,0,0,.86); --t2:rgba(0,0,0,.52); --t3:rgba(0,0,0,.3);
+  --fill:rgba(0,0,0,.055); --fill2:rgba(0,0,0,.09); --raised:#fff; --field:#fff;
+  --accent:#5a6fe6; --accent-soft:rgba(90,111,230,.12); --on-accent:#fff;
+  --warn:#b26a00; --warn-soft:rgba(214,138,0,.13); --bad:#c5352b;
+  --btn-shadow:0 0 0 .5px rgba(0,0,0,.14),0 1px 1.5px rgba(0,0,0,.1);
+  --bar:#7c8496; --grid:rgba(0,0,0,.08);
+}
+@media (prefers-color-scheme: dark){ :root{
+  --win:#1e1e20; --group:rgba(255,255,255,.05); --line:rgba(255,255,255,.09);
+  --t1:rgba(255,255,255,.88); --t2:rgba(255,255,255,.55); --t3:rgba(255,255,255,.3);
+  --fill:rgba(255,255,255,.07); --fill2:rgba(255,255,255,.12); --raised:rgba(255,255,255,.13); --field:rgba(255,255,255,.07);
+  --accent:#8698f7; --accent-soft:rgba(134,152,247,.16); --on-accent:#0e1230;
+  --warn:#f0b24a; --warn-soft:rgba(240,178,74,.14); --bad:#ff6b5e;
+  --btn-shadow:0 0 0 .5px rgba(255,255,255,.1);
+  --bar:#8d95a8; --grid:rgba(255,255,255,.09);
+}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--win);color:var(--t1);font:500 13px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased;min-height:100vh}
+button,input{font:inherit;color:inherit}
+[hidden]{display:none!important}
+.num{font-variant-numeric:tabular-nums}
+.wrap{max-width:980px;margin:0 auto;padding:26px 28px 60px}
+h1{font-size:22px;font-weight:600;margin:0 0 4px;letter-spacing:-.01em}
+.lead{color:var(--t2);font-weight:400;margin:0 0 18px}
+h2.sec{font-size:13px;font-weight:600;margin:28px 2px 8px;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+h2.sec small{font-weight:400;color:var(--t2);font-size:11px}
+.grp{background:var(--group);border:1px solid var(--line);border-radius:10px}
+.cap{font-size:11px;color:var(--t2);font-weight:400;line-height:1.4}
+.btn{border:0;background:var(--raised);box-shadow:var(--btn-shadow);border-radius:6px;padding:0 10px;height:24px;font-size:13px;font-weight:400;white-space:nowrap;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
+.btn:hover{background:var(--fill2)}
+.btn.lg{height:30px;padding:0 14px;border-radius:8px;font-weight:500}
+.btn.sm{height:20px;font-size:11px;padding:0 8px;border-radius:5px}
+.btn.pri{background:var(--accent);color:var(--on-accent);box-shadow:none}
+.btn.plain{background:none;box-shadow:none;color:var(--t2)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.done{background:var(--fill);box-shadow:none;color:var(--t2)}
+.seg{display:inline-flex;background:var(--fill);border-radius:7px;padding:2px;gap:1px}
+.seg button{border:0;background:none;padding:3px 12px;border-radius:5px;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;color:var(--t1)}
+.seg button[aria-pressed=true]{background:var(--raised);box-shadow:var(--btn-shadow)}
+.field{background:var(--field);box-shadow:var(--btn-shadow);border-radius:6px;padding:3px 8px;min-height:22px;font-weight:400;border:0;outline:0}
+.field:focus{box-shadow:0 0 0 3px var(--accent-soft),0 0 0 1px var(--accent)}
+input.field::placeholder{color:var(--t3)}
+.toks{display:flex;flex-wrap:wrap;gap:6px}
+.tok{display:inline-flex;align-items:center;height:24px;padding:0 11px;border-radius:12px;background:var(--fill);font-weight:400;white-space:nowrap;cursor:pointer;border:0;font-size:13px}
+.tok.on{background:var(--accent-soft);color:var(--accent);font-weight:600;box-shadow:inset 0 0 0 1px var(--accent)}
+.warnline{display:flex;gap:8px;align-items:center;font-size:12px;font-weight:400;background:var(--warn-soft);border-radius:8px;padding:7px 10px;margin-bottom:14px}
+.empty{padding:26px 20px;text-align:center;color:var(--t2);font-weight:400}
+.empty strong{display:block;color:var(--t1);font-weight:600;margin-bottom:2px}
+.sample{display:inline-block;font-size:11px;color:var(--warn);background:var(--warn-soft);border-radius:8px;padding:1px 8px;margin-left:8px;vertical-align:2px}
+/* session hero */
+.hero{border-radius:14px;padding:18px 20px;background:var(--group);border:1px solid var(--line)}
+.hero.live{background:linear-gradient(135deg,var(--accent-soft),transparent 70%),var(--group);border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+.hero .top{display:flex;align-items:center;gap:8px;color:var(--t2);font-weight:400;flex-wrap:wrap}
+.hero .mode{color:var(--accent);font-weight:600}
+.hero .goal{font-size:20px;font-weight:600;line-height:1.3;margin:10px 0 14px;letter-spacing:-.01em;overflow-wrap:anywhere}
+.hero .goal.none{color:var(--t3);font-weight:500}
+.hero .bot{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.hero .clock{font-size:40px;font-weight:600;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.hero .clock small{font-size:15px;color:var(--t2);font-weight:500;margin:0 7px 0 3px;letter-spacing:0}
+.hero .clock small:last-child{margin-right:0}
+.hero .stats{flex:1;min-width:140px;color:var(--t2);font-weight:400;font-size:12px;padding-bottom:4px}
+.hero h3{margin:0 0 10px;font-size:17px;font-weight:600}
+.hero .goalin{width:100%;height:38px;border-radius:9px;font-size:14px;padding:0 12px}
+.hero .pick{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+.hero .pick .d{flex:1;min-width:160px;color:var(--t2);font-weight:400;font-size:12px}
+.hero .switchform{margin-top:16px;border-top:1px solid var(--line);padding-top:14px}
+/* activity hero */
+.fhero{border-radius:14px;padding:18px 22px;border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);background:linear-gradient(135deg,var(--accent-soft),transparent 70%),var(--group);display:grid;grid-template-columns:repeat(3,auto) 1fr;gap:0 44px;align-items:end}
+.fhero .k{font-size:11px;color:var(--t2);font-weight:500}
+.fhero .v{font-size:40px;font-weight:600;line-height:1.1;letter-spacing:-.02em}
+.fhero .v small{font-size:17px;font-weight:500;color:var(--t2);letter-spacing:0;margin:0 5px 0 1px}
+.fhero .side{justify-self:end;align-self:center;text-align:right;font-weight:400;color:var(--t2);font-size:12px;max-width:270px}
+.fhero .side b{color:var(--accent);font-weight:600}
+.modes{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px}
+.mcard{padding:14px 16px}
+.mcard .n{display:flex;align-items:center;gap:6px;font-weight:600}
+.mcard .n span{margin-left:auto;font-weight:400;color:var(--t2);font-size:12px}
+.mcard .t{font-size:26px;font-weight:600;letter-spacing:-.01em;margin:8px 0 10px}
+.mcard .t small{font-size:13px;color:var(--t2);font-weight:500;margin:0 4px 0 1px}
+.mcard.none .t{color:var(--t3)}
+.goalbar{display:flex;gap:2px;height:8px;flex:none}
+.goalbar span{display:block;height:8px;border-radius:4px;background:var(--accent)}
+.goalbar span.off{background:repeating-linear-gradient(135deg,var(--t3) 0 2px,transparent 2px 5px);border-radius:4px}
+.goalbar span.blank{background:var(--fill2)}
+.mcard .g{display:flex;justify-content:space-between;gap:8px;margin-top:6px;font-size:11px;color:var(--t2);font-weight:400}
+.mcard .g b{color:var(--t1);font-weight:600}
+/* charts */
+.two{display:grid;grid-template-columns:1.55fr 1fr;gap:12px}
+.card{padding:14px 16px}
+.card h3{margin:0 0 2px;font-size:13px;font-weight:600}
+svg text{font:400 10px -apple-system,sans-serif;fill:var(--t2);font-variant-numeric:tabular-nums}
+.hb{display:grid;grid-template-columns:var(--lw,140px) 1fr auto;gap:10px;align-items:center;padding:4px 0;font-weight:400;font-size:12px}
+.hb .l{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hb .b{height:10px;border-radius:0 4px 4px 0;background:var(--bar);min-width:2px}
+.hb .b.accent{background:var(--accent)}
+.hb .v{color:var(--t2);font-size:11px;white-space:nowrap}
+/* sessions */
+.srow{display:grid;grid-template-columns:14px 118px 110px 1fr 64px 150px;gap:10px;align-items:center;padding:9px 14px;position:relative;cursor:pointer;font-weight:400;width:100%;background:none;border:0;text-align:left;font-size:13px}
+.srow + .srow::before,.sdet + .srow::before{content:"";position:absolute;left:14px;right:14px;top:0;border-top:1px solid var(--line)}
+.srow:hover{background:var(--fill)}
+.srow .c{color:var(--t3);font-size:11px;transition:transform .12s;display:inline-block}
+.srow.open .c{transform:rotate(90deg)}
+.srow .m{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srow .goal{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:inherit}
+.srow .when,.srow .dur{color:var(--t2)}
+.srow .dur{text-align:right}
+.srow .gb{display:flex;align-items:center;gap:8px}.srow .gb .goalbar{flex:1;height:6px}.srow .gb span{width:32px;text-align:right;color:var(--t2);font-size:11px}
+.now{font-size:10px;font-weight:600;color:var(--accent);background:var(--accent-soft);border-radius:8px;padding:0 6px;line-height:15px;margin-left:5px}
+.sdet{padding:2px 14px 12px 38px}
+.ev{display:grid;grid-template-columns:74px 96px 1fr auto;gap:10px;align-items:center;padding:5px 0;font-weight:400;font-size:12px}
+.ev .tm{color:var(--t3)}.ev .what{color:var(--t2)}
+.ev .pg{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ev .pg span{color:var(--t2)}
+.ev.done .pg,.ev.done .what{color:var(--t3)}
+/* ask */
+.ask{margin-top:28px;border-top:1px solid var(--line);padding-top:14px}
+.askf{display:flex;align-items:center;gap:8px}
+.askf input{flex:1;height:34px;border-radius:9px;padding:0 12px;font-size:13px}
+.chips{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.chips button{background:var(--fill);border:0;border-radius:11px;padding:3px 10px;font-weight:400;font-size:12px;cursor:pointer;color:var(--t1)}
+.chips button:hover{background:var(--fill2)}
+.ans{margin-top:10px;font-weight:400;line-height:1.5;background:var(--accent-soft);border-radius:10px;padding:10px 12px}
+.acthead{display:flex;align-items:center;gap:10px;margin:30px 0 12px;flex-wrap:wrap}
+.acthead .date{font-size:17px;font-weight:600}
+.acthead .sp{flex:1}
+.err{color:var(--bad);font-size:12px;font-weight:400}
+@media (max-width:820px){
+  .two{grid-template-columns:1fr}
+  .fhero{grid-template-columns:repeat(3,1fr);gap:10px 18px}
+  .fhero .side{display:none}
+  .srow{grid-template-columns:14px 96px 90px 1fr 56px}
+  .srow .gb{display:none}
+}
+.card svg{display:block}
+@media (max-width:560px){
+  .wrap{padding:20px 14px 44px}
+  .fhero .v{font-size:30px}
+  .hb{--lw:82px!important}
+  .hb .v{white-space:normal;text-align:right;max-width:110px}
+  .srow{grid-template-columns:14px 90px 1fr 52px}
+  .srow .goal{display:none}
+  .ev{grid-template-columns:64px 1fr auto}
+  .ev .what{display:none}
+  .hero .clock{font-size:32px}
+}
+@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Attention<span class="sample" id="samplebadge" hidden>Sample data</span></h1>
+  <p class="lead">Focus sessions, and where your time went.</p>
+  <div id="hero"><div class="hero"><span class="cap">Loading the current session...</span></div></div>
+  <p class="err" id="stateerr" hidden></p>
+
+  <div id="activity">
+    <div class="acthead">
+      <span class="date" id="rangedate">Activity</span>
+      <span class="sp"></span>
+      <div class="seg" id="range">
+        <button data-days="1">Today</button>
+        <button data-days="7">7 days</button>
+        <button data-days="30">30 days</button>
+      </div>
+    </div>
+    <div id="report"><div class="grp"><div class="empty">Loading activity...</div></div></div>
+    <p class="err" id="reporterr" hidden></p>
+  </div>
+
+  <div class="ask">
+    <form class="askf" id="askform">
+      <input class="field" id="askinput" placeholder="Ask about this range" autocomplete="off">
+      <button class="btn lg" type="submit">Ask</button>
+    </form>
+    <div class="chips" id="chips">
+      <button type="button">Where did the off-goal time go?</button>
+      <button type="button">Which session was my best?</button>
+      <button type="button">What did I continue past?</button>
+    </div>
+    <div class="ans" id="ans" hidden></div>
+    <p class="err" id="askerr" hidden></p>
+  </div>
+</div>
+<script>
+"use strict";
+const $ = (s, r) => (r || document).querySelector(s);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const mins = sec => Math.round((sec || 0) / 60);
+const hmBig = sec => { const m = mins(sec), h = Math.floor(m / 60), r = m % 60;
+  return h ? h + "<small>h</small>" + (r ? String(r).padStart(2, "0") + "<small>m</small>" : "") : r + "<small>m</small>"; };
+const hm = sec => { const m = mins(sec), h = Math.floor(m / 60), r = m % 60;
+  return h ? h + "h" + (r ? " " + String(r).padStart(2, "0") + "m" : "") : r + "m"; };
+const pctOf = (on, off) => { const t = (on || 0) + (off || 0); return t > 0 ? Math.round(on / t * 100) : null; };
+function goalbar(on, off) {
+  const t = (on || 0) + (off || 0);
+  if (!t) return '<div class="goalbar"><span class="blank" style="flex:1"></span></div>';
+  const p = Math.max(0, Math.min(100, on / t * 100));
+  return '<div class="goalbar" title="' + hm(on) + " on goal, " + hm(off) + ' off goal"><span style="width:' + p + '%"></span><span class="off" style="flex:1"></span></div>';
+}
+function whenLabel(iso, withDay) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const time = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hour12: false});
+  if (!withDay) return time;
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  const day = sameDay ? "" : d.toLocaleDateString([], {month: "short", day: "numeric"}) + " ";
+  return day + time;
+}
+function rangeLabel(days, report) {
+  if (days === 1) return new Date().toLocaleDateString([], {weekday: "long", day: "numeric", month: "long"});
+  if (report && report.from && report.to) {
+    const f = new Date(report.from + "T12:00:00"), t = new Date(report.to + "T12:00:00");
+    if (!isNaN(f) && !isNaN(t)) {
+      return f.toLocaleDateString([], {day: "numeric", month: "long"}) + " to " + t.toLocaleDateString([], {day: "numeric", month: "long"});
+    }
+  }
+  return "Last " + days + " days";
+}
+
+/* Sample data, used only when this file is opened outside Nook so the layout can be checked. */
+const SAMPLE_GOAL = "Debugging the SQS sync, need AWS docs and related videos";
+let sampleState = null;
+function makeSampleState() {
+  return {
+    active: true, mode: "Focus", goal: SAMPLE_GOAL,
+    startedAt: new Date(Date.now() - 42 * 60000).toISOString(),
+    sessionID: "sample-now", hasJudgeKey: true,
+    modes: [
+      {name: "Focus", description: "Deep work: building and reading for work.", goalPrompt: "What are you building or fixing?", askGoal: true, offMode: "friction"},
+      {name: "Work", description: "Anything for work.", goalPrompt: "What needs doing?", askGoal: true, offMode: "friction"},
+      {name: "Prep", description: "Learning and preparation, for work or personal.", goalPrompt: "What are you studying?", askGoal: true, offMode: "friction"}
+    ]
+  };
+}
+function sampleReport(days) {
+  const S = m => m * 60;
+  const now = Date.now();
+  const at = minAgo => new Date(now - minAgo * 60000).toISOString();
+  const sessions = [
+    {id: "sample-now", mode: "Focus", goal: SAMPLE_GOAL, start: at(42), end: null, active: S(42), onGoal: S(38), offGoal: S(4), covers: 3, continued: 1, wrongBlocks: 0, wrongAllows: 0},
+    {id: "s2", mode: "Work", goal: "Clear SUPPORT tickets and pending reviews", start: at(220), end: at(145), active: S(75), onGoal: S(66), offGoal: S(9), covers: 1, continued: 1, wrongBlocks: 0, wrongAllows: 0},
+    {id: "s3", mode: "Focus", goal: "Fix the candidate program sync job", start: at(340), end: at(250), active: S(90), onGoal: S(82), offGoal: S(8), covers: 2, continued: 0, wrongBlocks: 1, wrongAllows: 0},
+    {id: "s4", mode: "Prep", goal: "Postgres indexing chapter", start: at(1500), end: at(1450), active: S(50), onGoal: S(47), offGoal: S(3), covers: 0, continued: 0, wrongBlocks: 0, wrongAllows: 0}
+  ];
+  const shown = days === 1 ? sessions.slice(0, 3) : sessions;
+  const buckets = [];
+  if (days === 1) {
+    const vals = [0,0,0,0,0,0,0,0,18,46,50,44,30,12,52,40,0,0,0,0,0,0,0,0];
+    const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+    vals.forEach((v, i) => buckets.push({start: new Date(dayStart.getTime() + i * 3600000).toISOString(), active: S(v), media: 0}));
+  } else {
+    const vals = [6.4, 1.2, 0.4, 7.1, 6.8, 7.4, 4.8, 5.2, 2.1];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(now - i * 86400000); d.setHours(0, 0, 0, 0);
+      buckets.push({start: d.toISOString(), active: (vals[(days - 1 - i) % vals.length] * 3600), media: 0});
+    }
+  }
+  const ev = (minAgo, kind, title, url, site, extra) => Object.assign(
+    {id: at(minAgo) + "|" + kind + "|" + url, at: at(minAgo), kind, title, url, site, decidedBy: "judge"}, extra || {});
+  return {
+    days,
+    report: {
+      from: new Date(now - (days - 1) * 86400000).toISOString().slice(0, 10),
+      to: new Date(now).toISOString().slice(0, 10),
+      total: S(430), sessions: shown, buckets,
+      modes: [
+        {name: "Focus", seconds: S(222), active: S(222), sessions: 2, onGoal: S(202), overrides: 1},
+        {name: "Work", seconds: S(75), active: S(75), sessions: 1, onGoal: S(66), overrides: 1},
+        {name: "Prep", seconds: days === 1 ? 0 : S(50), active: days === 1 ? 0 : S(50), sessions: days === 1 ? 0 : 1, onGoal: days === 1 ? 0 : S(47), overrides: 0}
+      ],
+      sites: [{name: "github.com", seconds: S(64)}, {name: "docs.aws.amazon.com", seconds: S(48)},
+        {name: "vmockinc.atlassian.net", seconds: S(41)}, {name: "app.slack.com", seconds: S(33)},
+        {name: "youtube.com", seconds: S(27)}, {name: "mail.google.com", seconds: S(19)}, {name: "x.com", seconds: S(12)}],
+      feeds: [{site: "x.com", hidden: 31, shown: 4, wrong: 2}, {site: "reddit.com", hidden: 9, shown: 1, wrong: 0},
+        {site: "youtube.com", hidden: 6, shown: 0, wrong: 1}]
+    },
+    eventsBySession: {
+      "sample-now": [
+        ev(33, "allow-judged", "SQS dead letter queues, a walkthrough", "https://www.youtube.com/watch?v=example", "youtube.com", {reason: "Matches the goal"}),
+        ev(22, "cover", "Elden Ring DLC: Every Boss Ranked", "https://www.youtube.com/watch?v=other", "youtube.com", {reason: "Entertainment, off goal"}),
+        ev(16, "continue", "Retries and idempotency in queue consumers", "https://medium.com/example", "medium.com", {decidedBy: "you", reason: "has the retry pattern I need"}),
+        ev(4, "block", "Home / X", "https://x.com/home", "x.com", {decidedBy: "rule"})
+      ],
+      s3: [ev(300, "cover", "Chess opening traps you must know", "https://www.youtube.com/watch?v=chess", "youtube.com")],
+      s2: [], s4: []
+    }
+  };
+}
+const handler = () => (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nookAttention) || null;
+const inNook = location.protocol === "nook:";
+function call(method, params) {
+  const h = handler();
+  if (h) return h.postMessage(Object.assign({method}, params || {}));
+  if (inNook) return Promise.reject(new Error("The Attention bridge is not ready yet"));
+  if (!sampleState) sampleState = makeSampleState();
+  switch (method) {
+    case "getState": return Promise.resolve(sampleState);
+    case "getReport": return Promise.resolve(sampleReport((params && params.days) || 1));
+    case "startSession": case "switchMode":
+      sampleState = Object.assign({}, sampleState, {active: true, mode: params.mode, goal: params.goal || null,
+        startedAt: new Date().toISOString(), sessionID: "sample-now"});
+      return Promise.resolve({ok: true});
+    case "endSession":
+      sampleState = Object.assign({}, sampleState, {active: false, mode: null, goal: null, startedAt: null, sessionID: null});
+      return Promise.resolve({ok: true});
+    case "flag": return Promise.resolve({ok: true});
+    case "ask": return Promise.resolve({answer: "Of 21 off-goal minutes today, 9 were in the Work session and 8 in the morning Focus session. This summary is computed on this Mac; the AI judge does not answer questions yet."});
+    default: return Promise.reject(new Error("Unknown method"));
+  }
+}
+
+let state = null, reportData = null, currentDays = 1, pickedMode = null, showSwitch = false;
+let startGoalText = "", switchGoalText = null;
+let clockTimer = null;
+
+function elapsedHTML(startedAt) {
+  const start = new Date(startedAt);
+  if (isNaN(start)) return '0<small>min</small>';
+  const sec = Math.max(0, Math.floor((Date.now() - start.getTime()) / 1000));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 0) return h + "<small>h</small>" + String(m).padStart(2, "0") + "<small>m</small>";
+  if (m > 0) return m + "<small>min</small>" + String(s).padStart(2, "0") + "<small>s</small>";
+  return s + "<small>s</small>";
+}
+function tickClock() {
+  const el = $("#clock");
+  if (el && state && state.startedAt) el.innerHTML = elapsedHTML(state.startedAt);
+}
+function setClockRunning(run) {
+  if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+  if (run && state && state.active && !document.hidden) {
+    tickClock();
+    clockTimer = setInterval(tickClock, 1000);
+  }
+}
+document.addEventListener("visibilitychange", () => setClockRunning(true));
+
+function modeChips(modes, selected, action) {
+  return '<div class="toks">' + modes.map(m =>
+    '<button type="button" class="tok' + (m.name === selected ? " on" : "") + '" data-action="' + action + '" data-mode="' + esc(m.name) + '">' + esc(m.name) + "</button>"
+  ).join("") + "</div>";
+}
+function renderHero() {
+  const box = $("#hero");
+  const modes = (state && state.modes) || [];
+  if (state && state.active) {
+    const warn = state.hasJudgeKey === false
+      ? '<div class="warnline"><span>No AI judge key, so pages are not checked against this goal. Your site rules still apply.</span></div>' : "";
+    const sw = showSwitch ? '<div class="switchform"><h3>Switch mode</h3>' +
+      modeChips(modes, pickedMode || state.mode, "pickswitch") +
+      '<div class="pick"><span class="d">' + esc(descOf(pickedMode || state.mode)) + '</span>' +
+      '<input class="field goalin" id="switchgoal" style="flex:1;min-width:180px" value="' + esc(switchGoalText == null ? state.goal || "" : switchGoalText) + '" placeholder="' + esc(promptOf(pickedMode || state.mode)) + '">' +
+      '<button class="btn lg pri" data-action="doswitch">Switch</button>' +
+      '<button class="btn lg" data-action="cancelswitch">Cancel</button></div></div>' : "";
+    box.innerHTML = '<div class="hero live">' +
+      '<div class="top"><span class="mode">' + esc(state.mode || "Focus") + "</span><span>since " + esc(whenLabel(state.startedAt)) + "</span></div>" +
+      (state.goal ? '<div class="goal">' + esc(state.goal) + "</div>" : '<div class="goal none">No goal set for this session</div>') +
+      warn +
+      '<div class="bot"><div class="clock num" id="clock">' + elapsedHTML(state.startedAt) + "</div>" +
+      '<div class="stats" id="herostats"></div>' +
+      '<button class="btn lg" data-action="switch">Switch mode</button>' +
+      '<button class="btn lg pri" data-action="end">End Session</button></div>' + sw + "</div>";
+    setClockRunning(true);
+    updateHeroStats();
+    return;
+  }
+  setClockRunning(false);
+  if (!modes.length) {
+    box.innerHTML = '<div class="hero"><div class="empty"><strong>No focus modes yet</strong>' +
+      "Modes live in Settings, under Attention. Add one there and it will show up here.</div></div>";
+    return;
+  }
+  if (!pickedMode || !modes.some(m => m.name === pickedMode)) pickedMode = modes[0].name;
+  box.innerHTML = '<div class="hero"><h3>What are you about to do?</h3>' +
+    '<input class="field goalin" id="startgoal" value="' + esc(startGoalText) + '" placeholder="' + esc(promptOf(pickedMode)) + '">' +
+    '<div class="pick">' + modeChips(modes, pickedMode, "pick") +
+    '<span class="d">' + esc(descOf(pickedMode)) + '</span>' +
+    '<button class="btn lg pri" data-action="start">Start ' + esc(pickedMode) + "</button></div></div>";
+}
+function descOf(name) {
+  const m = (state.modes || []).find(x => x.name === name);
+  return m ? m.description || "" : "";
+}
+function promptOf(name) {
+  const m = (state.modes || []).find(x => x.name === name);
+  return (m && m.goalPrompt) || "What are you working on?";
+}
+function updateHeroStats() {
+  const el = $("#herostats");
+  if (!el || !state) return;
+  const sessions = (reportData && reportData.report && reportData.report.sessions) || [];
+  const mine = sessions.find(s => s.id === state.sessionID);
+  if (!mine) { el.textContent = ""; return; }
+  const parts = [];
+  if (mine.covers) parts.push(mine.covers + " covered");
+  if (mine.continued) parts.push(mine.continued + " continued");
+  const p = pctOf(mine.onGoal, mine.offGoal);
+  if (p != null) parts.push(p + "% on goal");
+  el.textContent = parts.join(" · ");
+}
+async function refreshState() {
+  const err = $("#stateerr");
+  try {
+    state = await call("getState");
+    err.hidden = true;
+    renderHero();
+  } catch (e) {
+    err.textContent = "Could not load the current session. " + (e && e.message ? e.message : "");
+    err.hidden = false;
+  }
+}
+async function afterSessionChange() {
+  await refreshState();
+  setTimeout(() => { refreshState(); refreshReport(); }, 900);
+}
+
+function hbars(rows, lw, format, accent) {
+  if (!rows.length) return "";
+  const max = Math.max.apply(null, rows.map(r => r[1]).concat([1]));
+  return rows.map(r => '<div class="hb" style="--lw:' + lw + 'px"><span class="l" title="' + esc(r[0]) + '">' + esc(r[0]) +
+    '</span><div><div class="b' + (accent ? " accent" : "") + '" style="width:' + Math.max(1, r[1] / max * 100) + '%"></div></div>' +
+    '<span class="v num">' + esc(format(r)) + "</span></div>").join("");
+}
+function bucketChart(buckets, days) {
+  if (!buckets || !buckets.length) return '<div class="empty">No browsing recorded in this range yet.</div>';
+  const W = 520, H = 150, L = 40, B = 20, T = 8;
+  const maxSec = Math.max.apply(null, buckets.map(b => b.active || 0).concat([60]));
+  const unitMin = days === 1 ? 60 : 3600;
+  const max = maxSec / unitMin;
+  const n = buckets.length, step = (W - L) / n, bw = Math.max(2, Math.min(24, step * 0.62)), ph = H - T - B;
+  const y = v => T + ph - (v / maxSec) * ph;
+  let s = '<svg viewBox="0 0 ' + W + " " + H + '" width="100%" role="img" aria-label="Active time by ' + (days === 1 ? "hour" : "day") + '">';
+  [0, maxSec / 2, maxSec].forEach(g => {
+    const label = days === 1 ? Math.round(g / 60) + (g === maxSec ? " min" : "") : (Math.round(g / 360) / 10) + (g === maxSec ? " h" : "");
+    s += '<line x1="' + L + '" x2="' + W + '" y1="' + y(g) + '" y2="' + y(g) + '" stroke="var(--grid)"/>' +
+      '<text x="' + (L - 6) + '" y="' + (y(g) + 3) + '" text-anchor="end">' + label + "</text>";
+  });
+  const labelEvery = days === 1 ? 3 : Math.max(1, Math.ceil(n / 8));
+  buckets.forEach((b, i) => {
+    const x = L + i * step + (step - bw) / 2;
+    const v = b.active || 0;
+    const d = new Date(b.start);
+    const tip = (days === 1 ? whenLabel(b.start) : d.toLocaleDateString([], {day: "numeric", month: "short"})) + ": " + hm(v);
+    if (v > 0) {
+      const h = (v / maxSec) * ph, r = Math.min(4, h);
+      s += '<path d="M' + x + "," + (y(v) + h) + "V" + (y(v) + r) + "Q" + x + "," + y(v) + " " + (x + r) + "," + y(v) +
+        "H" + (x + bw - r) + "Q" + (x + bw) + "," + y(v) + " " + (x + bw) + "," + (y(v) + r) + "V" + (y(v) + h) + 'Z" fill="var(--bar)"><title>' + esc(tip) + "</title></path>";
+    }
+    if (i % labelEvery === 0) {
+      const label = days === 1 ? String(d.getHours()) : d.toLocaleDateString([], {weekday: "short"});
+      s += '<text x="' + (x + bw / 2) + '" y="' + (T + ph + 13) + '" text-anchor="middle">' + esc(label) + "</text>";
+    }
+  });
+  return s + "</svg>";
+}
+const VERB = {cover: "Covered", block: "Blocked", "allow-judged": "Let through", "continue": "Continued",
+  "wrong-block": "Wrong block", "wrong-allow": "Wrong allow", "block-site": "Site blocked",
+  "feed-hidden": "Feeds", "feed-wrong": "Feed wrong", "feed-show": "Feed shown", "feed-mute": "Feed muted"};
+const FIX = {cover: "wrongBlock", block: "wrongBlock", "continue": "wrongBlock", "allow-judged": "wrongAllow"};
+let openSessions = new Set();
+function sessionRows(sessions, eventsBySession) {
+  const list = sessions.slice().sort((a, b) => (a.start < b.start ? 1 : -1));
+  return list.map(s => {
+    const p = pctOf(s.onGoal, s.offGoal);
+    const open = openSessions.has(s.id);
+    const nowPill = !s.end && state && state.sessionID === s.id ? '<span class="now">now</span>' : "";
+    const events = (eventsBySession && eventsBySession[s.id]) || [];
+    let detail = "";
+    if (open) {
+      if (!events.length) {
+        detail = '<div class="sdet"><div class="ev"><span></span><span></span><span class="pg" style="color:var(--t2)">Nothing was covered or continued in this session.</span><span></span></div></div>';
+      } else {
+        detail = '<div class="sdet">' + events.map((e, i) => {
+          const page = e.title || e.url || e.site || "";
+          const sub = [e.site && e.title ? e.site : "", e.kind === "feed-hidden" && e.count ? e.count + " posts" : "", e.reason || ""]
+            .filter(Boolean).join(" · ");
+          const fix = FIX[e.kind];
+          const btn = fix && e.url
+            ? '<button class="btn sm" data-action="flag" data-session="' + esc(s.id) + '" data-index="' + i + '">' +
+              (fix === "wrongBlock" ? "Wrong block" : "Wrong allow") + "</button>" : "<span></span>";
+          return '<div class="ev"><span class="tm num">' + esc(whenLabel(e.at, currentDays > 1)) + '</span>' +
+            '<span class="what">' + esc(VERB[e.kind] || e.kind) + '</span>' +
+            '<span class="pg" title="' + esc(e.url || page) + '">' + esc(page) + (sub ? ' <span>· ' + esc(sub) + "</span>" : "") + "</span>" + btn + "</div>";
+        }).join("") + "</div>";
+      }
+    }
+    return '<button type="button" class="srow' + (open ? " open" : "") + '" data-action="togglesession" data-session="' + esc(s.id) + '">' +
+      '<span class="c">&#8250;</span><span class="when num">' + esc(whenLabel(s.start, true)) + '</span>' +
+      '<span class="m">' + esc(s.mode) + nowPill + '</span>' +
+      '<span class="goal">' + esc(s.goal || "No goal") + '</span>' +
+      '<span class="dur num">' + hm(s.active) + '</span>' +
+      '<span class="gb">' + goalbar(s.onGoal, s.offGoal) + '<span class="num">' + (p == null ? "·" : p + "%") + "</span></span></button>" + detail;
+  }).join("");
+}
+function renderReport() {
+  const box = $("#report");
+  document.querySelectorAll("#range button").forEach(b =>
+    b.setAttribute("aria-pressed", Number(b.dataset.days) === currentDays));
+  if (!reportData || !reportData.report) return;
+  const r = reportData.report;
+  $("#rangedate").textContent = rangeLabel(currentDays, r);
+  const sessions = r.sessions || [];
+  const totOn = sessions.reduce((a, s) => a + (s.onGoal || 0), 0);
+  const totOff = sessions.reduce((a, s) => a + (s.offGoal || 0), 0);
+  const totActive = sessions.reduce((a, s) => a + (s.active || 0), 0);
+  const share = pctOf(totOn, totOff);
+  const live = state && state.active
+    ? '<div class="side"><b>' + esc(state.mode || "Focus") + " is running</b><br>" + esc(state.goal || "No goal set") + "</div>"
+    : '<div class="side">No session running.<br>Start one above when you sit down to work.</div>';
+  const heroStats = '<div class="fhero">' +
+    '<div><div class="k">Focus sessions</div><div class="v num">' + sessions.length + "</div></div>" +
+    '<div><div class="k">Time in focus</div><div class="v num">' + hmBig(totActive) + "</div></div>" +
+    '<div><div class="k">On goal</div><div class="v num">' + (share == null ? "·" : share + "<small>%</small>") + "</div></div>" + live + "</div>";
+  const modeNames = [];
+  ((state && state.modes) || []).forEach(m => { if (!modeNames.includes(m.name)) modeNames.push(m.name); });
+  (r.modes || []).forEach(m => { if (!modeNames.includes(m.name)) modeNames.push(m.name); });
+  sessions.forEach(s => { if (s.mode && !modeNames.includes(s.mode)) modeNames.push(s.mode); });
+  const cards = modeNames.map(name => {
+    const mine = sessions.filter(s => s.mode === name);
+    const on = mine.reduce((a, s) => a + (s.onGoal || 0), 0);
+    const off = mine.reduce((a, s) => a + (s.offGoal || 0), 0);
+    const active = mine.reduce((a, s) => a + (s.active || 0), 0);
+    const covers = mine.reduce((a, s) => a + (s.covers || 0), 0);
+    const continued = mine.reduce((a, s) => a + (s.continued || 0), 0);
+    const p = pctOf(on, off);
+    if (!mine.length) {
+      return '<div class="grp mcard none"><div class="n">' + esc(name) + "<span>No sessions</span></div>" +
+        '<div class="t num">0<small>m</small></div>' + goalbar(0, 0) +
+        '<div class="g"><span>Not used in this range</span></div></div>';
+    }
+    return '<div class="grp mcard"><div class="n">' + esc(name) + "<span>" + mine.length + " session" + (mine.length > 1 ? "s" : "") + "</span></div>" +
+      '<div class="t num">' + hmBig(active) + "</div>" + goalbar(on, off) +
+      '<div class="g"><span>' + (p == null ? "" : "<b>" + p + "%</b> on goal") + "</span><span>" + covers + " covered · " + continued + " continued</span></div></div>";
+  }).join("");
+  const timeCard = '<div class="grp card"><h3>' + (currentDays === 1 ? "By hour" : "By day") + "</h3>" + bucketChart(r.buckets || [], currentDays) + "</div>";
+  const siteRows = (r.sites || []).slice(0, 10).map(s => [s.name, s.seconds || 0]);
+  const sitesCard = '<div class="grp card"><h3>Top sites</h3>' +
+    (siteRows.length ? '<div style="margin-top:8px">' + hbars(siteRows, 140, row => hm(row[1])) + "</div>"
+      : '<div class="empty">No sites recorded in this range yet.</div>') + "</div>";
+  const feeds = (r.feeds || []).filter(f => (f.hidden || 0) + (f.shown || 0) + (f.wrong || 0) > 0);
+  const feedsCard = '<h2 class="sec">Feeds <small>What feed filtering hid in this range.</small></h2>' +
+    (feeds.length
+      ? '<div class="grp card"><div>' + hbars(feeds.map(f => [f.site, f.hidden || 0]), 120,
+          row => { const f = feeds.find(x => x.site === row[0]);
+            return (f.hidden || 0) + " hidden" + (f.shown ? " · " + f.shown + " shown again" : "") + (f.wrong ? " · " + f.wrong + " marked wrong" : ""); }, true) + "</div></div>"
+      : '<div class="grp"><div class="empty"><strong>Nothing hidden in feeds</strong>No posts were filtered in this range.</div></div>');
+  const sessionsBlock = '<h2 class="sec">Sessions <small>Open one to see what was covered, continued or let through. Corrections teach the AI judge and never add a permanent rule.</small></h2>' +
+    (sessions.length
+      ? '<div class="grp">' + sessionRows(sessions, reportData.eventsBySession || {}) + "</div>"
+      : '<div class="grp"><div class="empty"><strong>No sessions in this range</strong>Start a focus session and it will be listed here with everything it decided.</div></div>');
+  box.innerHTML = heroStats + '<div class="modes">' + cards + "</div>" +
+    '<h2 class="sec">Where the time went</h2><div class="two">' + timeCard + sitesCard + "</div>" +
+    feedsCard + sessionsBlock;
+  updateHeroStats();
+}
+async function refreshReport() {
+  const err = $("#reporterr");
+  try {
+    reportData = await call("getReport", {days: currentDays});
+    err.hidden = true;
+    renderReport();
+  } catch (e) {
+    err.textContent = "Could not load activity. " + (e && e.message ? e.message : "");
+    err.hidden = false;
+  }
+}
+
+document.addEventListener("click", async e => {
+  const el = e.target.closest("[data-action]");
+  if (!el) return;
+  const action = el.dataset.action;
+  if (action === "pick" || action === "pickswitch") {
+    if ($("#startgoal")) startGoalText = $("#startgoal").value;
+    if ($("#switchgoal")) switchGoalText = $("#switchgoal").value;
+    pickedMode = el.dataset.mode;
+    renderHero();
+    const goal = $("#startgoal") || $("#switchgoal");
+    if (goal) goal.focus();
+  } else if (action === "start") {
+    const goal = ($("#startgoal") && $("#startgoal").value.trim()) || "";
+    el.disabled = true;
+    try {
+      await call("startSession", {mode: pickedMode, goal});
+      showSwitch = false;
+      await afterSessionChange();
+    } catch (err) { showStateError(err); }
+  } else if (action === "switch") {
+    pickedMode = state.mode;
+    switchGoalText = null;
+    showSwitch = true;
+    renderHero();
+  } else if (action === "cancelswitch") {
+    switchGoalText = null;
+    showSwitch = false;
+    renderHero();
+  } else if (action === "doswitch") {
+    const goal = ($("#switchgoal") && $("#switchgoal").value.trim()) || "";
+    el.disabled = true;
+    try {
+      await call("switchMode", {mode: pickedMode || state.mode, goal});
+      showSwitch = false;
+      await afterSessionChange();
+    } catch (err) { showStateError(err); }
+  } else if (action === "end") {
+    el.disabled = true;
+    try {
+      await call("endSession");
+      showSwitch = false;
+      await afterSessionChange();
+    } catch (err) { showStateError(err); }
+  } else if (action === "togglesession") {
+    const id = el.dataset.session;
+    if (openSessions.has(id)) openSessions.delete(id); else openSessions.add(id);
+    renderReport();
+  } else if (action === "flag") {
+    e.stopPropagation();
+    const events = (reportData && reportData.eventsBySession && reportData.eventsBySession[el.dataset.session]) || [];
+    const item = events[Number(el.dataset.index)];
+    if (!item) return;
+    const kind = FIX[item.kind];
+    el.disabled = true;
+    try {
+      const sessions = (reportData.report && reportData.report.sessions) || [];
+      const owner = sessions.find(s => s.id === el.dataset.session);
+      await call("flag", {kind, url: item.url, title: item.title || "", sessionID: el.dataset.session,
+        mode: owner ? owner.mode : "", eventId: item.id || ""});
+      el.textContent = "Marked";
+      el.classList.add("done");
+      const row = el.closest(".ev");
+      if (row) { row.classList.add("done"); const w = row.querySelector(".what"); if (w) w.textContent = "Marked wrong"; }
+    } catch (err) {
+      el.disabled = false;
+      showReportError(err);
+    }
+  }
+});
+function showStateError(err) {
+  const el = $("#stateerr");
+  el.textContent = "That did not work. " + (err && err.message ? err.message : "");
+  el.hidden = false;
+}
+function showReportError(err) {
+  const el = $("#reporterr");
+  el.textContent = (err && err.message) || "That did not work.";
+  el.hidden = false;
+}
+document.querySelectorAll("#range button").forEach(b => {
+  b.addEventListener("click", () => {
+    currentDays = Number(b.dataset.days) || 1;
+    refreshReport();
+  });
+});
+async function askQuestion(text) {
+  const ans = $("#ans"), err = $("#askerr"), input = $("#askinput");
+  const q = (text || "").trim();
+  if (!q) return;
+  err.hidden = true;
+  ans.hidden = false;
+  ans.textContent = "Looking at this range...";
+  input.value = q;
+  try {
+    const reply = await call("ask", {question: q, days: currentDays});
+    ans.textContent = (reply && reply.answer) || "Nothing to say about this range yet.";
+  } catch (e) {
+    ans.hidden = true;
+    err.textContent = (e && e.message) || "Could not answer.";
+    err.hidden = false;
+  }
+}
+$("#askform").addEventListener("submit", e => { e.preventDefault(); askQuestion($("#askinput").value); });
+document.querySelectorAll("#chips button").forEach(b => b.addEventListener("click", () => askQuestion(b.textContent)));
+
+let booted = false;
+async function boot() {
+  if (booted) return;
+  if (inNook && !handler()) return;
+  if (!inNook) $("#samplebadge").hidden = false;
+  booted = true;
+  await Promise.all([refreshState(), refreshReport()]);
+  if (location.pathname.endsWith("/activity") || location.hash === "#activity") {
+    const target = $("#activity");
+    if (target) target.scrollIntoView();
+  }
+}
+window.addEventListener("nook-attention-bridge", () => { if (booted) { refreshState(); refreshReport(); } else boot(); });
+document.addEventListener("DOMContentLoaded", boot);
+if (document.readyState !== "loading") boot();
+</script>
+</body>
+</html>
+
+
+

@@ -259,6 +259,9 @@ public final class PageSession: NSObject, Identifiable {
     @ObservationIgnored var audioRunningListenerDevice: UInt32?
     @ObservationIgnored var profileAwaitCancellable: AnyCancellable?
     @ObservationIgnored var webStoreHandler: AnyObject?
+    /// The Attention bridge handler and the content controllers it is registered on.
+    @ObservationIgnored var attentionHandler: WKScriptMessageHandlerWithReply?
+    @ObservationIgnored var attentionControllers: Set<ObjectIdentifier> = []
     @ObservationIgnored var didNotifyOpenToExtensions: Bool = false
 
     @ObservationIgnored let themeColorObservedWebViews = NSHashTable<AnyObject>.weakObjects()
@@ -385,6 +388,7 @@ public final class PageSession: NSObject, Identifiable {
             preferences.isElementFullscreenEnabled = false
             configuration.preferences = preferences
         }
+        BrowserConfiguration.installAttentionSchemeHandler(on: configuration)
         let created = controller?.webViews?.makeWebView(configuration: configuration)
         (created as? SessionWebView)?.contextMenuBridge = WebContextMenuBridge(session: self, configuration: configuration)
         primaryWebView = created
@@ -443,6 +447,7 @@ public final class PageSession: NSObject, Identifiable {
         }
         controller.removeScriptMessageHandler(forName: Self.translateHandlerName, contentWorld: Self.translateWorld)
         controller.add(self, contentWorld: Self.translateWorld, name: Self.translateHandlerName)
+        reconcileAttentionBridge(for: url, in: webView)
         configureActivityMedia(in: webView)
         webView.customUserAgent = PlatformUserAgent.custom
         // Let the web content control its own background so extension styles (like Dark
@@ -550,6 +555,8 @@ public final class PageSession: NSObject, Identifiable {
             controller.removeScriptMessageHandler(forName: name, contentWorld: Self.linkHoverWorld)
         }
         controller.removeScriptMessageHandler(forName: Self.translateHandlerName, contentWorld: Self.translateWorld)
+        controller.removeScriptMessageHandler(forName: Self.attentionHandlerName, contentWorld: .page)
+        attentionControllers.remove(ObjectIdentifier(controller))
         self.controller?.sessionDelegate?.removeWebStoreHandler(from: controller)
         detachDevCaptureHandler(from: webView)
         controller.removeScriptMessageHandler(
@@ -600,7 +607,9 @@ public final class PageSession: NSObject, Identifiable {
         hasFavicon = false
         faviconFetchAttempts = 0
 
-        PageSession.loadPage(newURL, in: activeWebView)
+        let view = activeWebView
+        reconcileAttentionBridge(for: newURL, in: view)
+        PageSession.loadPage(newURL, in: view)
 
         // Keep other windows displaying this page on the same URL.
         controller?.sessionDelegate?.navigateAcrossWindows(itemID, to: newURL)

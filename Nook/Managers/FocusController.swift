@@ -294,6 +294,22 @@ final class FocusController {
         recordEvent(.wrongAllow, page: page, decidedBy: .you)
     }
 
+    /// A correction from the Attention tab for a page that is not open any more. Recorded
+    /// as an example event only; it never adds a permanent rule.
+    @discardableResult
+    func recordCorrection(kind: AttentionEvent.Kind, urlString: String, title: String?,
+                          sessionID: String?, modeName: String?) -> Bool {
+        guard kind == .wrongBlock || kind == .wrongAllow,
+              let parsed = URL(string: urlString), let url = normalizedActivityURL(parsed),
+              !isInternalActivityURL(url) else { return false }
+        recorder.flush {}
+        let now = Date()
+        writer.writeEvent(.init(at: activityTimestamp(now), session: sessionID, mode: modeName, kind: kind,
+                                url: url.absoluteString, title: title, site: url.host, decidedBy: .you),
+                          machine: machine, date: now)
+        return true
+    }
+
     func blockSite(host: String) {
         let host = host.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
         guard let url = URL(string: "https://" + host), url.host == host, url.path.isEmpty,
