@@ -314,7 +314,7 @@ class App:
 
     def web_pids(self):
         try:
-            txt = self.mcp("pages")
+            txt = self.mcp("pages", {"all": True})
             start = txt.index("["); end = txt.rindex("]") + 1
             return sorted({p["pid"] for p in json.loads(txt[start:end]) if p.get("pid", 0) > 0}), txt
         except Exception as e:
