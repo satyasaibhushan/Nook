@@ -33,6 +33,8 @@ public final class ActivityStateStore: @unchecked Sendable {
         if state["mode"] == nil { state["mode"] = NSNull() }
         if state["modeStartedAt"] == nil { state["modeStartedAt"] = NSNull() }
         if state["recordingPaused"] == nil { state["recordingPaused"] = false }
+        if state["goal"] == nil { state["goal"] = NSNull() }
+        if state["sessionID"] == nil { state["sessionID"] = NSNull() }
         change(&state)
         let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
         try data.write(to: url, options: .atomic)

@@ -37,6 +37,9 @@ public struct ActivityReport: Codable, Equatable, Sendable {
         public var name: String
         public var seconds: Double
         public var overrides: Int
+        public var sessions: Int = 0
+        public var active: Double = 0
+        public var onGoal: Double = 0
     }
     public struct Page: Codable, Equatable, Sendable {
         public var url: String
@@ -53,6 +56,35 @@ public struct ActivityReport: Codable, Equatable, Sendable {
         public var foreground: Double
         public var background: Double
     }
+
+    public struct Session: Codable, Equatable, Sendable {
+        public var id: String
+        public var mode: String
+        public var goal: String?
+        public var start: String
+        public var end: String?
+        public var active: Double = 0
+        public var onGoal: Double = 0
+        public var offGoal: Double = 0
+        public var covers: Int = 0
+        public var continued: Int = 0
+        public var wrongBlocks: Int = 0
+        public var wrongAllows: Int = 0
+    }
+    public struct Bucket: Codable, Equatable, Sendable {
+        public var start: String
+        public var active: Double = 0
+        public var media: Double = 0
+    }
+    public struct Feed: Codable, Equatable, Sendable {
+        public var site: String
+        public var hidden: Int = 0
+        public var shown: Int = 0
+        public var wrong: Int = 0
+    }
+    public var sessions: [Session] = []
+    public var buckets: [Bucket] = []
+    public var feeds: [Feed] = []
 
     public var from: String
     public var to: String
@@ -78,7 +110,8 @@ public struct ActivityReport: Codable, Equatable, Sendable {
     public static let topPages = 20
 
     public static func make(records: [ActivityRecord], overrides: [FocusOverride], days: [String],
-                            rules: ActivityRules, remembered: [String: PageLabel], generatedAt: String) -> ActivityReport {
+                            rules: ActivityRules, remembered: [String: PageLabel], generatedAt: String,
+                            sessions: [AttentionSession] = [], events: [AttentionEvent] = [], calendar: Calendar = .current) -> ActivityReport {
         let range = Set(days)
         let rows = records.filter { range.contains(String($0.start.prefix(10))) }
 
@@ -140,7 +173,7 @@ public struct ActivityReport: Codable, Equatable, Sendable {
         }
         let all = order.compactMap { entries[$0] }
 
-        return ActivityReport(
+        var report = ActivityReport(
             from: days.first ?? "", to: days.last ?? "", generatedAt: generatedAt,
             total: Self.round(total), backgroundMedia: Self.round(backgroundMedia),
             scopes: Self.shares(scopes), kinds: Self.shares(kinds),
@@ -157,6 +190,8 @@ public struct ActivityReport: Codable, Equatable, Sendable {
             unlabelled: all.map(page).filter { $0.scope == "unlabelled" || $0.unsure }
                 .sorted { ($0.seconds, $1.url) > ($1.seconds, $0.url) },
             machines: machines.count > 1 ? Self.shares(machines, keepEmpty: true) : [])
+        report.addAttention(rows: rows, sessions: sessions, events: events, days: days, calendar: calendar)
+        return report
     }
 
     private static func site(_ url: URL?) -> String {
@@ -214,5 +249,125 @@ extension ActivityFiles {
         try Self.encoder.encode(report).write(to: base.appendingPathExtension("json"), options: .atomic)
         try Data(report.html().utf8).write(to: page, options: .atomic)
         return page
+    }
+}
+
+extension ActivityReport {
+    private mutating func addAttention(rows: [ActivityRecord], sessions lines: [AttentionSession], events: [AttentionEvent],
+                                       days: [String], calendar: Calendar) {
+        let range = Set(days)
+        let inRange = events.filter { range.contains(String($0.at.prefix(10))) }
+        var summaries: [String: Session] = [:]
+        for line in lines.sorted(by: { $0.at < $1.at }) {
+            if line.event == .start {
+                summaries[line.session] = Session(id: line.session, mode: line.mode, goal: line.goal, start: line.at)
+            } else if summaries[line.session] != nil {
+                summaries[line.session]?.end = line.at
+            }
+        }
+        // State from old installations can have a session without a start log.
+        for row in rows {
+            guard let id = row.session, summaries[id] == nil else { continue }
+            summaries[id] = Session(id: id, mode: row.mode ?? "", start: row.start)
+        }
+        let relevantIDs = Set(rows.compactMap(\.session)).union(inRange.compactMap(\.session))
+        summaries = summaries.filter { relevantIDs.contains($0.key) || range.contains(String($0.value.start.prefix(10))) }
+        func key(_ raw: String?) -> String? { raw.flatMap(URL.init(string:)).flatMap(normalizedActivityURL)?.absoluteString }
+        let bySession = Dictionary(grouping: events.filter { $0.session != nil }, by: { $0.session! })
+        for row in rows {
+            guard let id = row.session, var summary = summaries[id] else { continue }
+            summary.active += row.active
+            let pageEvents = (bySession[id] ?? []).filter { key($0.url) == key(row.url) }
+            let wrong = pageEvents.contains { $0.kind == .wrongAllow }
+            if wrong { summary.offGoal += row.active }
+            else if let start = parseActivityTimestamp(row.start), let end = parseActivityTimestamp(row.end), end > start {
+                let changes = pageEvents.compactMap { event -> (Date, AttentionEvent.Kind)? in
+                    guard [.cover, .block, .allowJudged, .continue, .wrongBlock].contains(event.kind),
+                          let date = parseActivityTimestamp(event.at) else { return nil }
+                    return (date, event.kind)
+                }.sorted { $0.0 < $1.0 }
+                var cursor = start
+                var state = changes.last { $0.0 <= start }?.1
+                for (at, next) in changes where at > start && at < end {
+                    let active = row.active * at.timeIntervalSince(cursor) / end.timeIntervalSince(start)
+                    if state == .continue { summary.offGoal += active }
+                    else if state != .cover && state != .block { summary.onGoal += active }
+                    cursor = at; state = next
+                }
+                let active = row.active * end.timeIntervalSince(cursor) / end.timeIntervalSince(start)
+                if state == .continue { summary.offGoal += active }
+                else if state != .cover && state != .block { summary.onGoal += active }
+            } else { summary.onGoal += row.active }
+            summaries[id] = summary
+        }
+        var feedsBySite: [String: Feed] = [:]
+        for event in inRange {
+            if let id = event.session, var summary = summaries[id] {
+                switch event.kind {
+                case .cover, .block: summary.covers += 1
+                case .continue: summary.continued += 1
+                case .wrongBlock: summary.wrongBlocks += 1
+                case .wrongAllow: summary.wrongAllows += 1
+                default: break
+                }
+                summaries[id] = summary
+            }
+            guard let site = event.site, [.feedHidden, .feedShow, .feedWrong].contains(event.kind) else { continue }
+            var feed = feedsBySite[site] ?? Feed(site: site)
+            let count = max(0, event.count ?? 1)
+            switch event.kind {
+            case .feedHidden: feed.hidden += count
+            case .feedShow: feed.shown += count
+            case .feedWrong: feed.wrong += count
+            default: break
+            }
+            feedsBySite[site] = feed
+        }
+        self.sessions = summaries.values.map {
+            var summary = $0
+            summary.active = Self.round(summary.active); summary.onGoal = Self.round(summary.onGoal); summary.offGoal = Self.round(summary.offGoal)
+            return summary
+        }.sorted { ($0.start, $0.id) < ($1.start, $1.id) }
+        self.feeds = feedsBySite.values.sorted { $0.site < $1.site }
+        for name in Set(self.sessions.map(\.mode)) where !modes.contains(where: { $0.name == name }) {
+            modes.append(ModeTime(name: name, seconds: 0, overrides: 0))
+        }
+        for index in modes.indices {
+            let sessions = self.sessions.filter { $0.mode == modes[index].name }
+            modes[index].sessions = sessions.count
+            modes[index].active = modes[index].seconds
+            modes[index].onGoal = Self.round(sessions.reduce(0) { $0 + $1.onGoal })
+        }
+        var buckets: [Date: Bucket] = [:]
+        let component: Calendar.Component = days.count == 1 ? .hour : .day
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.calendar = calendar; formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        for day in days {
+            guard let date = formatter.date(from: day), let next = calendar.date(byAdding: .day, value: 1, to: date) else { continue }
+            var cursor = date
+            while cursor < next {
+                buckets[cursor] = Bucket(start: activityTimestamp(cursor))
+                guard let end = calendar.date(byAdding: component, value: 1, to: cursor), end > cursor else { break }
+                cursor = end
+            }
+        }
+        for row in rows {
+            guard let start = parseActivityTimestamp(row.start), let end = parseActivityTimestamp(row.end), end > start else { continue }
+            var cursor = start
+            while cursor < end {
+                guard let interval = calendar.dateInterval(of: component, for: cursor), interval.end > cursor else { break }
+                let next = min(end, interval.end)
+                let weight = next.timeIntervalSince(cursor) / end.timeIntervalSince(start)
+                if buckets[interval.start] != nil {
+                    buckets[interval.start]?.active += row.active * weight
+                    buckets[interval.start]?.media += row.media * weight
+                }
+                cursor = next
+            }
+        }
+        self.buckets = buckets.sorted { $0.key < $1.key }.map {
+            Bucket(start: $0.value.start, active: Self.round($0.value.active), media: Self.round($0.value.media))
+        }
     }
 }

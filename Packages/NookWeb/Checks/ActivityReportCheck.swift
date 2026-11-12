@@ -75,7 +75,7 @@ import Foundation
         precondition(shares(report.kinds) == ["building": 700, "social": 300, "entertainment": 120, "reading": 30,
                                               "unlabelled": 70, "internal": 45], "\(report.kinds)")
         precondition(report.modes == [
-            ActivityReport.ModeTime(name: "Focus", seconds: 700, overrides: 2),
+            ActivityReport.ModeTime(name: "Focus", seconds: 700, overrides: 2, active: 700),
             ActivityReport.ModeTime(name: "Prep", seconds: 0, overrides: 1),
         ], "\(report.modes)")
         precondition(report.outsideModes == 565)

@@ -44,6 +44,7 @@ public struct ActivityRecord: Codable, Equatable, Sendable {
     public var media: Double
     public var background: Bool
     public var mode: String?
+    public var session: String? = nil
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -58,6 +59,7 @@ public struct ActivityRecord: Codable, Equatable, Sendable {
         try c.encode(media, forKey: .media)
         try c.encode(background, forKey: .background)
         try c.encode(mode, forKey: .mode)
+        try c.encodeIfPresent(session, forKey: .session)
     }
 }
 
@@ -86,6 +88,7 @@ public struct ActivityAccounting {
     private struct Open {
         var page: ActivityPage
         var mode: String?
+        var session: String? = nil
         var start: Date
         var end: Date
         var active = 0.0
@@ -102,7 +105,7 @@ public struct ActivityAccounting {
         self.machine = machine; self.calendar = calendar
     }
 
-    public mutating func update(at now: Date, pages: [ActivityPage], lastInput: Date, mode: String?) -> [Stretch] {
+    public mutating func update(at now: Date, pages: [ActivityPage], lastInput: Date, mode: String?, session: String? = nil) -> [Stretch] {
         var closed: [Stretch] = []
         // Accrue the previous state before adopting a navigation, selection or playback event.
         if let previous = lastTime, now >= previous {
@@ -125,7 +128,7 @@ public struct ActivityAccounting {
                     for id in Array(open.keys) {
                         let old = open[id]!
                         if let row = row(old) { closed.append(row) }
-                        open[id] = Open(page: old.page, mode: old.mode, start: end, end: end)
+                        open[id] = Open(page: old.page, mode: old.mode, session: old.session, start: end, end: end)
                     }
                 }
                 cursor = end
@@ -142,14 +145,14 @@ public struct ActivityAccounting {
             if let current = normalized[id], current.url == old.page.url { old.page.title = current.title }
             let next = eligible[id]
             if next?.url != old.page.url || next?.space != old.page.space
-                || next?.foregroundWindow != old.page.foregroundWindow || old.mode != mode {
+                || next?.foregroundWindow != old.page.foregroundWindow || old.mode != mode || old.session != session {
                 if let row = row(old) { closed.append(row) }
                 open.removeValue(forKey: id)
             }
         }
         for (id, page) in eligible {
             if open[id] != nil { open[id]?.page = page }
-            else { open[id] = Open(page: page, mode: mode, start: now, end: now) }
+            else { open[id] = Open(page: page, mode: mode, session: session, start: now, end: now) }
         }
         self.lastTime = now
         self.lastInput = lastInput
@@ -168,6 +171,6 @@ public struct ActivityAccounting {
             record: ActivityRecord(start: formatter.string(from: stretch.start), end: formatter.string(from: stretch.end),
                 machine: machine, space: stretch.page.space, url: stretch.page.url.absoluteString,
                 title: stretch.page.title, active: stretch.active, media: stretch.media,
-                background: stretch.page.foregroundWindow == nil, mode: stretch.mode))
+                background: stretch.page.foregroundWindow == nil, mode: stretch.mode, session: stretch.session))
     }
 }
