@@ -69,6 +69,10 @@ final class ActivityLabeller {
     @ObservationIgnored private var reloadGeneration = 0
     @ObservationIgnored private var rulesDate: Date?
     @ObservationIgnored private var labelsDate: Date?
+    @ObservationIgnored private var feedCache: [String: FeedPostDecision] = [:]
+    @ObservationIgnored private var feedOrder: [String] = []
+    @ObservationIgnored private var feedContexts: [String: Data] = [:]
+    @ObservationIgnored private var feedFailedAt: Date?
     @ObservationIgnored private let gate = JEVGate(limit: 4)
     nonisolated private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Nook", category: "Activity")
 
@@ -130,6 +134,57 @@ final class ActivityLabeller {
         let answer = judge.goalDecision(from: data, confidenceFloor: config.confidenceFloor)
         goalDecisions[cacheKey] = answer
         return answer
+    }
+
+    /// Shared transport, bounded decisions, and a failure pause without a retry timer.
+    func requestFeed(posts: [FeedPost], site: String, goal: String?, context: Data) async -> [FeedPostDecision] {
+        let snapshot = preferences
+        guard snapshot.enabled, let rules = snapshot.sites[site], rules.enabled else { return [] }
+        if feedContexts[site] != context {
+            feedContexts[site] = context
+            let prefix = site + "|"
+            feedCache = feedCache.filter { !$0.key.hasPrefix(prefix) }
+            feedOrder.removeAll { $0.hasPrefix(prefix) }
+        }
+        let batch = FeedPostBatch(posts: Array(posts.prefix(20)), preferences: rules)
+        var decisions = batch.fixed
+        let remaining = batch.posts.filter { post in
+            if let cached = feedCache[site + "|" + post.id] { decisions.append(cached); return false }
+            return true
+        }
+        guard !remaining.isEmpty else { return decisions }
+        let show = remaining.map { FeedPostDecision(id: $0.id, choice: .show, reason: "") }
+        guard hasJudgeKey, feedFailedAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true else { return decisions + show }
+        let config = snapshot.judge, files = files, judge = config.provider.makeJudge()
+        await gate.wait()
+        defer { Task { await gate.signal() } }
+        guard preferences == snapshot, feedContexts[site] == context, !Task.isCancelled else { return decisions + show }
+        let body = await Task.detached(priority: .utility) {
+            let examples = files.judgeExamples().filter { $0.kind == .feedWrong && $0.site == site }
+            return try? judge.feedBody(posts: remaining, preferences: [snapshot.never, rules.extra].filter { !$0.isEmpty }.joined(separator: "\n"),
+                                       goal: goal, examples: examples, config: config)
+        }.value
+        guard preferences == snapshot, feedContexts[site] == context, hasJudgeKey, !Task.isCancelled else { return decisions + show }
+        guard let body, let data = await send(body: body, endpoint: judge.endpoint) else {
+            feedFailedAt = Date(); return decisions + show
+        }
+        guard preferences == snapshot, feedContexts[site] == context, !Task.isCancelled else { return decisions + show }
+        let answers = await Task.detached(priority: .utility) {
+            judge.feedDecisions(from: data, posts: remaining, confidenceFloor: config.confidenceFloor)
+        }.value
+        guard preferences == snapshot, feedContexts[site] == context, !Task.isCancelled else { return decisions + show }
+        for answer in answers {
+            let key = site + "|" + answer.id
+            if feedCache[key] == nil { feedOrder.append(key) }
+            feedCache[key] = answer
+        }
+        while feedOrder.count > 1500 { feedCache.removeValue(forKey: feedOrder.removeFirst()) }
+        return decisions + answers
+    }
+
+    func invalidateFeed(site: String, id: String) {
+        let key = site + "|" + id
+        feedCache.removeValue(forKey: key); feedOrder.removeAll { $0 == key }
     }
 
     func clearGoalDecisions() { goalDecisions = [:]; goalAttempts = [] }

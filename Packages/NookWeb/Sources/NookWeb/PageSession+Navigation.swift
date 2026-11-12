@@ -49,6 +49,7 @@ extension PageSession: WKNavigationDelegate {
         _ webView: WKWebView,
         didCommit navigation: WKNavigation!
     ) {
+        FeedFiltering.flush(in: webView)
         loadingState = .didCommit
         navigationRewrites = 0
         linkPreview = nil
@@ -379,6 +380,8 @@ extension PageSession: WKNavigationDelegate {
             // so content scripts can inject at document_start
             controller?.tabEvents?.grantAccess(to: url, private: isPrivate)
 
+            FeedFiltering.apply(for: url, in: webView, allowed: !isPrivate && !isAgentPage)
+
             // Setup content blocker scripts before navigation starts
             controller?.blocker.setupContentBlockerScripts(for: url, in: webView, tab: self)
 
@@ -476,6 +479,9 @@ extension PageSession: WKNavigationDelegate {
         }
 
         if navigationResponse.isForMainFrame {
+            if let url = navigationResponse.response.url {
+                FeedFiltering.apply(for: url, in: webView, allowed: !isPrivate && !isAgentPage)
+            }
             pageAskedNotToStore = http?.value(forHTTPHeaderField: "Cache-Control")?.lowercased().contains("no-store") == true
         }
         decisionHandler(.allow)

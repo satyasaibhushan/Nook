@@ -507,6 +507,8 @@ class BrowserManager: ObservableObject {
         self.contentBlockerManager.prepareLinkCleaning()
         self.siteRoutingManager.host = self
         SocialImageTweaks.downloader = self
+        FeedFiltering.host = self.focus
+        Task { await FeedFiltering.prepare() }
         // Note: tracking protection will be configured after settingsManager injection
 
         self.externalMiniWindowManager.attach(browserManager: self)

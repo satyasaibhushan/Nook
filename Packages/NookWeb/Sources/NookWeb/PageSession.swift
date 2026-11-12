@@ -11,6 +11,7 @@
 import Combine
 import NookBlocker
 import NookTabsCore
+import NookTweaks
 import NookSettings
 import OSLog
 import SwiftUI
@@ -535,6 +536,7 @@ public final class PageSession: NSObject, Identifiable {
 
     /// Detaches a view from this session: handlers, observers, delegates, superview.
     public func cleanupClone(_ webView: WKWebView) {
+        FeedFiltering.detach(in: webView)
         webView.stopLoading()
         // Stop playback through WebKit; releasing the view tears down its document.
         webView.pauseAllMediaPlayback(completionHandler: nil)
