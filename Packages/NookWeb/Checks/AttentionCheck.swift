@@ -76,6 +76,9 @@ import Foundation
         precondition(jevGoal("off", "0.9")?.reason.isEmpty == false && jevGoal("maybe", "0.9") == nil && jevGoal("off", "1.5") == nil)
         let jevFeed = try JSONSerialization.jsonObject(with: jev.feedBody(posts: posts, preferences: "No spam", goal: nil, examples: [], config: jevConfig)) as! [String: Any]
         precondition((jevFeed["questions"] as? [String: Any])?.count == 20)
+        // Jev judges each question on its own text, so the post and preferences live in it.
+        let jevPost = String(decoding: try jev.feedBody(posts: [FeedPost(id: "x:9", author: "@a", text: "Giveaway now")], preferences: "No spam", goal: "Ship", examples: [], config: jevConfig), as: UTF8.self)
+        precondition(jevPost.contains("Giveaway now") && jevPost.contains("No spam") && jevPost.contains("Ship"))
         let jevDecisions = jev.feedDecisions(from: Data(#"{"answers":{"post_1":{"type":"choice","choice":"hide","confidence":0.9},"post_0":{"type":"choice","choice":"hide","confidence":0.2},"post_2":{"type":"refusal"}}}"#.utf8), posts: posts, confidenceFloor: 0.6)
         precondition(jevDecisions.count == 20 && jevDecisions[0].choice == .show && jevDecisions[1].choice == .hide && jevDecisions[2].choice == .show)
         let jevLabelBody = String(decoding: try jev.labelBody(url: "https://fixed.test", title: "Title", profiles: ["Research"], config: jevConfig), as: UTF8.self)
