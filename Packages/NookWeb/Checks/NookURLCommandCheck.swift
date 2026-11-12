@@ -33,12 +33,31 @@ struct NookURLCommandCheck {
             precondition(parse("nook://recording\(suffix)") == nil)
         }
 
-        precondition(parse("nook://focus?mode=Focus")?.action == .focus("Focus"))
-        precondition(parse("nook://focus?mode=deep%20work")?.action == .focus("deep work"))
-        precondition(parse("nook://focus?mode=OFF")?.action == .focus(nil))
+        precondition(parse("nook://focus?mode=Focus")?.action == .focus("Focus", goal: nil))
+        precondition(parse("nook://focus?mode=deep%20work")?.action == .focus("deep work", goal: nil))
+        precondition(parse("nook://focus?mode=OFF")?.action == .focus(nil, goal: nil))
         precondition(parse("nook://focus?mode=off&x=1")?.ignored == ["x"])
-        for suffix in ["", "?mode=", "?mode=%20", "?name=Focus"] {
+        precondition(parse("nook://focus?mode=Focus&goal=Fix%20the%20sync%20job")?.action == .focus("Focus", goal: "Fix the sync job"))
+        precondition(parse("nook://focus?mode=Focus&goal=%20Trim%20me%20")?.action == .focus("Focus", goal: "Trim me"))
+        precondition(parse("nook://focus/Focus")?.action == .focus("Focus", goal: nil))
+        precondition(parse("nook://focus/deep%20work?goal=Ship%20it")?.action == .focus("deep work", goal: "Ship it"))
+        precondition(parse("nook://focus/off")?.action == .focus(nil, goal: nil))
+        precondition(parse("nook://focus/Focus?mode=Focus")?.action == .focus("Focus", goal: nil))
+        for bad in ["nook://focus/Focus?mode=Work", "nook://focus/a/b", "nook://focus/%20", "nook://focus//Focus"] {
+            precondition(parse(bad) == nil, bad)
+        }
+        for suffix in ["", "?mode=", "?mode=%20", "?name=Focus", "?mode=Focus&goal=", "?mode=Focus&goal=%20",
+                       "?mode=Focus&goal=" + String(repeating: "x", count: 501)] {
             precondition(parse("nook://focus\(suffix)") == nil)
+        }
+
+        precondition(parse("nook://attention")?.action == .attention(section: nil))
+        precondition(parse("nook://attention/")?.action == .attention(section: nil))
+        precondition(parse("nook://attention/activity")?.action == .attention(section: "activity"))
+        precondition(parse("nook://attention/focus")?.action == .attention(section: "focus"))
+        precondition(parse("NOOK://ATTENTION/Activity")?.action == .attention(section: "activity"))
+        for bad in ["nook://attention/settings", "nook://attention/activity/extra", "nook://attention//activity"] {
+            precondition(parse(bad) == nil, bad)
         }
 
         precondition(parse("nook://report")?.action == .report(days: 1))
