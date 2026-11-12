@@ -13,7 +13,7 @@ struct AgentSpaceTests {
         #expect(f.tree.space(created.id)?.isAgent == true)
         #expect(f.tree.loginSpace(for: created.id) == f.spaceB)
 
-        let againResult = f.tree.ensureAgentSpace(loginsFrom: f.spaceA, now: fixedNow)
+        let againResult = f.tree.ensureAgentSpace(loginsFrom: f.spaceB, now: fixedNow)
         let again = try #require(againResult)
         #expect(again.id == created.id)
         #expect(again.change.isEmpty)
@@ -46,10 +46,38 @@ struct AgentSpaceTests {
         store.flush()
 
         var reloaded = TabStore(directory: dir).load(now: fixedNow).tree
-        let reused = reloaded.ensureAgentSpace(loginsFrom: f.spaceB, now: fixedNow)
+        let reused = reloaded.ensureAgentSpace(loginsFrom: nil, now: fixedNow)
         #expect(reused?.id == created.id)
         #expect(reloaded.orderedSpaces.filter(\.isAgent).count == 1)
         #expect(reloaded.loginSpace(for: created.id) == f.spaceA)
+    }
+
+    @Test func emptyAgentSpaceTakesLoginsOfTheCurrentSpace() throws {
+        var f = Fixture()
+        let createdResult = f.tree.ensureAgentSpace(loginsFrom: f.spaceB, now: fixedNow)
+        let agent = try #require(createdResult).id
+        let movedResult = f.tree.ensureAgentSpace(loginsFrom: f.spaceA, now: fixedNow)
+        let moved = try #require(movedResult)
+        #expect(moved.id == agent)
+        #expect(!moved.change.isEmpty)
+        #expect(f.tree.loginSpace(for: agent) == f.spaceA)
+        // Unknown or agent spaces leave the logins as they are.
+        #expect(f.tree.ensureAgentSpace(loginsFrom: agent, now: fixedNow)?.change.isEmpty == true)
+        #expect(f.tree.ensureAgentSpace(loginsFrom: nil, now: fixedNow)?.change.isEmpty == true)
+        #expect(f.tree.loginSpace(for: agent) == f.spaceA)
+        checkInvariants(f.tree)
+    }
+
+    @Test func agentSpaceWithTabsKeepsItsLogins() throws {
+        var f = Fixture()
+        let createdResult = f.tree.ensureAgentSpace(loginsFrom: f.spaceB, now: fixedNow)
+        let agent = try #require(createdResult).id
+        let tab = f.tab("work", in: .tabs(spaceID: agent))
+        #expect(f.tree.ensureAgentSpace(loginsFrom: f.spaceA, now: fixedNow)?.change.isEmpty == true)
+        #expect(f.tree.loginSpace(for: agent) == f.spaceB)
+        _ = try f.tree.close(tab, now: fixedNow)
+        _ = f.tree.ensureAgentSpace(loginsFrom: f.spaceA, now: fixedNow)
+        #expect(f.tree.loginSpace(for: agent) == f.spaceA)
     }
 
     @Test func loginsFallBackWhenBorrowedSpaceIsGone() throws {

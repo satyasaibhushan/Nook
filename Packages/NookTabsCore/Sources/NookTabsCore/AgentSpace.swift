@@ -46,9 +46,18 @@ extension TabTree {
     }
 
     /// The agent space, created last in order with logins from `loginsFrom` when there is none.
+    /// An existing one with no tabs takes `loginsFrom`'s logins too, so the agent signs in as the
+    /// space the person is on now; with tabs it keeps its logins, since a switch would reload
+    /// pages an agent is working in.
     public mutating func ensureAgentSpace(loginsFrom: UUID?, now: Date = Date()) -> (id: UUID, change: Change)? {
-        if let existing = agentSpace { return (existing.id, Change()) }
         let given = loginsFrom.flatMap(space).flatMap { $0.isAgent ? nil : $0 }
+        if let existing = agentSpace {
+            let hasTabs = items.values.contains { $0.deletedAt == nil && !$0.isFolder && spaceID(of: $0.id) == existing.id }
+            guard let given, !hasTabs, existing.agentLoginSpaceID != given.id,
+                  let change = try? updateSpace(existing.id, icon: SpaceRecord.agentIcon(loginsFrom: given.id), now: now)
+            else { return (existing.id, Change()) }
+            return (existing.id, change)
+        }
         let login = given ?? orderedSpaces.first { !$0.isAgent }
         guard let login else { return nil }
         let id = UUID()
