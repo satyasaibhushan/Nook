@@ -43,6 +43,13 @@ struct SpaceGradient: Codable, Hashable {
         accent(hex: "#8E8E93")
     }
 
+    /// The accent a window's chrome paints for the space it shows. Read from the space itself so
+    /// every surface changes in the same frame as the space; private windows keep their own.
+    static func chromeAccent(hex: String?, isIncognito: Bool) -> Color {
+        if isIncognito { return incognito.primaryColor }
+        return (hex.map(accent(hex:)) ?? `default`).primaryColor
+    }
+
     var encoded: Data? {
         let encoder = JSONEncoder()
         do {
