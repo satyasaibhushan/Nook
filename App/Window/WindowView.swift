@@ -276,10 +276,7 @@ struct WindowView: View {
 
     @ViewBuilder
     private func WindowBackground() -> some View {
-        // Private windows keep the neutral incognito accent, never the space's color.
-        let accent = windowState.isIncognito
-            ? SpaceGradient.incognito.primaryColor
-            : spaceAccentHex.map { SpaceGradient.accent(hex: $0).primaryColor } ?? SpaceGradient.default.primaryColor
+        let accent = SpaceGradient.chromeAccent(hex: spaceAccentHex, isIncognito: windowState.isIncognito)
         let isActive = windowState.isActive
 
         SpaceChromeBackground(theme: spaceTheme, accent: accent, isActive: isActive)

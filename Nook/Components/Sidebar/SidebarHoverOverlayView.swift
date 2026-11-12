@@ -75,7 +75,10 @@ struct SidebarHoverOverlayView: View {
 
     /// The docked sidebar's own background, so the overlay reads as the same sidebar.
     private var sidebarBackground: some View {
-        let accent = windowState.isIncognito ? SpaceGradient.incognito.primaryColor : browserManager.gradientColorManager.accentColor
+        // From the space, as the window background: the shared gradient manager is not observed
+        // here, so the overlay kept the previous space's color after a switch.
+        let hex = windowState.spaceID.flatMap { browserManager.tabs.space($0)?.accentHex }
+        let accent = SpaceGradient.chromeAccent(hex: hex, isIncognito: windowState.isIncognito)
         let isAgent = windowState.spaceID != nil && windowState.spaceID == browserManager.tabs.agentSpaceID
         return SpaceChromeBackground(theme: overlayTheme, accent: accent, isActive: true)
             .spaceThemeAppearance(overlayTheme)
