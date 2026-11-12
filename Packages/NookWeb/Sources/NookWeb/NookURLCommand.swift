@@ -20,7 +20,9 @@ public struct NookURLCommand: Equatable, Sendable {
         case search(String)
         case recording(RecordingState)
         /// A mode name as typed, matched case-insensitively later; nil ends the running mode.
-        case focus(String?)
+        case focus(String?, goal: String?)
+        /// The Attention tab; a section of "activity" or "focus", or nil for the top.
+        case attention(section: String?)
         /// Days counted back from today, today included.
         case report(days: Int)
         case switchSpace
@@ -74,8 +76,32 @@ public struct NookURLCommand: Equatable, Sendable {
             guard let state = take("state").flatMap(RecordingState.init(rawValue:)) else { return nil }
             action = .recording(state)
         case "focus":
-            guard let mode = take("mode") else { return nil }
-            action = .focus(mode.lowercased() == "off" ? nil : mode)
+            // The mode comes as ?mode= or as the one path segment, never as both at odds.
+            var pathMode: String?
+            if !parts.path.isEmpty && parts.path != "/" {
+                let name = String(parts.path.dropFirst())
+                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.contains("/"), !trimmed.isEmpty, trimmed.count <= maxLength else { return nil }
+                pathMode = trimmed
+            }
+            let hadModeParam = params["mode"] != nil
+            let queryMode = hadModeParam ? take("mode") : nil
+            if hadModeParam, queryMode == nil { return nil }
+            if let pathMode, let queryMode, pathMode != queryMode { return nil }
+            guard let mode = queryMode ?? pathMode else { return nil }
+            var goal: String?
+            if params["goal"] != nil {
+                guard let text = take("goal"), text.count <= 500 else { return nil }
+                goal = text
+            }
+            action = .focus(mode.lowercased() == "off" ? nil : mode, goal: goal)
+        case "attention":
+            switch parts.path.lowercased() {
+            case "", "/": action = .attention(section: nil)
+            case "/activity": action = .attention(section: "activity")
+            case "/focus": action = .attention(section: "focus")
+            default: return nil
+            }
         case "report":
             var days = 1
             if params["days"] != nil {
