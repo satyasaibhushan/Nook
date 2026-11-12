@@ -54,12 +54,18 @@ enum JEVKeychain {
 final class ActivityLabeller {
     private(set) var rules = ActivityRules(rules: [])
     private(set) var remembered: [String: PageLabel] = [:]
+    private(set) var preferences = AttentionPreferences()
+    private(set) var hasJudgeKey = false
+    private(set) var goalDecisions: [String: GoalFitDecision] = [:]
     let files: ActivityFiles
 
     @ObservationIgnored private var inFlight: Set<String> = []
     /// URLs JEV gave no answer for, and when; retried only after a pause so a missing key or
     /// network does not turn every navigation into a request.
     @ObservationIgnored private var failedAt: [String: Date] = [:]
+    @ObservationIgnored private var goalAttempts: Set<String> = []
+    @ObservationIgnored private var preferencesDate: Date?
+    @ObservationIgnored private var reloadGeneration = 0
     @ObservationIgnored private var rulesDate: Date?
     @ObservationIgnored private var labelsDate: Date?
     @ObservationIgnored private let gate = JEVGate(limit: 4)
@@ -69,20 +75,61 @@ final class ActivityLabeller {
         files = ActivityFiles(directory: directory)
     }
 
-    /// Seeds the starter files once and reads rules and labels from disk.
-    func reload() {
-        files.seed()
-        rulesDate = files.modificationDate(files.rulesURL)
-        labelsDate = files.modificationDate(files.labelsURL)
-        rules = files.loadRules()
-        remembered = files.loadLabels()
+    /// File reads, metadata and seeding stay off the main thread.
+    func reload() async {
+        reloadGeneration += 1
+        let generation = reloadGeneration, files = files
+        let snapshot = await Task.detached(priority: .utility) {
+            files.seed()
+            return (files.loadRules(), files.loadLabels(), files.loadPreferences(),
+                    files.modificationDate(files.rulesURL), files.modificationDate(files.labelsURL),
+                    files.modificationDate(files.preferencesURL), JEVKeychain.hasKey)
+        }.value
+        guard generation == reloadGeneration else { return }
+        rules = snapshot.0; remembered = snapshot.1; preferences = snapshot.2
+        rulesDate = snapshot.3; labelsDate = snapshot.4; preferencesDate = snapshot.5; hasJudgeKey = snapshot.6
     }
 
-    /// Picks up hand edits; cheap enough to call every couple of seconds.
-    func reloadIfChanged() {
-        let newRules = files.modificationDate(files.rulesURL), newLabels = files.modificationDate(files.labelsURL)
-        if newRules != rulesDate { rulesDate = newRules; rules = files.loadRules() }
-        if newLabels != labelsDate { labelsDate = newLabels; remembered = files.loadLabels() }
+    func reloadIfChanged() async { await reload() }
+
+    func goalDecision(session: String, url: URL) -> GoalFitDecision? {
+        goalDecisions[goalKey(session: session, url: url)]
+    }
+
+    func needsGoalDecision(session: String, url: URL) -> Bool {
+        guard hasJudgeKey, !isInternalActivityURL(url) else { return false }
+        if let rule = rules.match(url), rule.handling != .judge { return false }
+        return !goalAttempts.contains(goalKey(session: session, url: url))
+    }
+
+    func requestGoal(session: String, url: URL, title: String, goal: String, mode: String) async -> GoalFitDecision? {
+        let cacheKey = goalKey(session: session, url: url)
+        if let cached = goalDecisions[cacheKey] { return cached }
+        guard needsGoalDecision(session: session, url: url) else { return nil }
+        goalAttempts.insert(cacheKey)
+        let config = preferences.judge, files = files
+        let examples = await Task.detached(priority: .utility) { files.judgeExamples() }.value
+        guard !Task.isCancelled, hasJudgeKey, rules.match(url).map({ $0.handling == .judge }) ?? true else { return nil }
+        let judge = Self.judge(for: config.provider)
+        guard let body = try? judge.goalBody(url: url.absoluteString, title: title, goal: goal, mode: mode,
+                                            examples: examples, config: config),
+              let data = await send(body: body) else { return nil }
+        let answer = judge.goalDecision(from: data, confidenceFloor: config.confidenceFloor)
+        goalDecisions[cacheKey] = answer
+        return answer
+    }
+
+    func clearGoalDecisions() { goalDecisions = [:]; goalAttempts = [] }
+
+    private func goalKey(session: String, url: URL) -> String { session + "|" + (normalizedActivityURL(url) ?? url).absoluteString }
+
+    nonisolated private static func judge(for provider: ActivityJudgeProvider) -> any ActivityJudge {
+        switch provider { case .openAIDecisions: return OpenAIDecisionsJudge() }
+    }
+
+    func blockSite(host: String) async throws {
+        let files = files
+        rules = try await Task.detached(priority: .utility) { try files.blockSite(host: host) }.value
     }
 
     /// The label a page has now, without asking JEV. `url` must already be normalised.
@@ -93,7 +140,7 @@ final class ActivityLabeller {
     /// Asks JEV about one page in the background when nothing on disk decides it.
     func request(url: URL, title: String) {
         let key = url.absoluteString
-        guard activityLabelNeedsJEV(url, rules: rules, remembered: remembered), !inFlight.contains(key),
+        guard hasJudgeKey, activityLabelNeedsJEV(url, rules: rules, remembered: remembered), !inFlight.contains(key),
               failedAt[key].map({ Date().timeIntervalSince($0) > 600 }) ?? true else { return }
         inFlight.insert(key)
         Task {
@@ -107,12 +154,12 @@ final class ActivityLabeller {
     /// Labels every page that has none: rules first, then JEV for the rest, a few at a time.
     /// Pages a fixed rule decides are never sent.
     func labelNow(_ pages: [(url: URL, title: String)]) async {
-        reload()
+        await reload()
         var wanted: [String: String] = [:]
         for page in pages where activityLabelNeedsJEV(page.url, rules: rules, remembered: remembered) {
             if wanted[page.url.absoluteString]?.isEmpty != false { wanted[page.url.absoluteString] = page.title }
         }
-        guard !wanted.isEmpty, JEVKeychain.hasKey else { return }
+        guard !wanted.isEmpty, hasJudgeKey else { return }
         let answers = await withTaskGroup(of: (String, PageLabel?).self) { group in
             for (url, title) in wanted {
                 group.addTask { (url, await self.ask(url: url, title: title)) }
@@ -136,7 +183,8 @@ final class ActivityLabeller {
         }.value
         if let merged {
             remembered = merged
-            labelsDate = files.modificationDate(files.labelsURL)
+            let files = files
+            labelsDate = await Task.detached(priority: .utility) { files.modificationDate(files.labelsURL) }.value
         } else {
             // labels.json is unreadable; keep the answers for this run without touching the file.
             for (key, label) in answers where remembered[key] == nil { remembered[key] = label }
@@ -147,7 +195,19 @@ final class ActivityLabeller {
     nonisolated private func ask(url: String, title: String) async -> PageLabel? {
         await gate.wait()
         defer { Task { await gate.signal() } }
-        guard let key = JEVKeychain.key(), let body = try? ActivityJEV.requestBody(url: url, title: title) else { return nil }
+        let config = await preferences.judge
+        let profiles = await knownProfiles
+        guard let body = try? ActivityJEV.requestBody(url: url, title: title, profiles: profiles, config: config),
+              let data = await send(body: body) else { return nil }
+        return ActivityJEV.label(from: data, at: activityTimestamp(Date()), profiles: profiles, confidenceFloor: config.confidenceFloor)
+    }
+
+    /// Space names are supplied by FocusController, with legacy defaults for the report path.
+    var profileNames: [String] = ["work", "personal"]
+    private var knownProfiles: [String] { normalizedActivityProfiles(profileNames + rules.rules.flatMap(\.profiles)) }
+
+    nonisolated private func send(body: Data) async -> Data? {
+        guard !Task.isCancelled, let key = JEVKeychain.key() else { return nil }
         var request = URLRequest(url: ActivityJEV.endpoint, timeoutInterval: 3)
         request.httpMethod = "POST"
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -155,15 +215,9 @@ final class ActivityLabeller {
         request.httpBody = body
         do {
             let (data, response) = try await Self.session.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                Self.log.info("JEV gave no label: HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
-                return nil
-            }
-            return ActivityJEV.label(from: data, at: activityTimestamp(Date()))
-        } catch {
-            Self.log.info("JEV gave no label: \((error as? URLError)?.code.rawValue ?? -1)")
-            return nil
-        }
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            return data
+        } catch { return nil }
     }
 
     nonisolated private static let session: URLSession = {

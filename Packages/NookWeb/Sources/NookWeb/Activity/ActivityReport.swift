@@ -282,7 +282,7 @@ extension ActivityReport {
             if wrong { summary.offGoal += row.active }
             else if let start = parseActivityTimestamp(row.start), let end = parseActivityTimestamp(row.end), end > start {
                 let changes = pageEvents.compactMap { event -> (Date, AttentionEvent.Kind)? in
-                    guard [.cover, .block, .allowJudged, .continue, .wrongBlock].contains(event.kind),
+                    guard [.cover, .block, .allowJudged, .continue].contains(event.kind),
                           let date = parseActivityTimestamp(event.at) else { return nil }
                     return (date, event.kind)
                 }.sorted { $0.0 < $1.0 }
