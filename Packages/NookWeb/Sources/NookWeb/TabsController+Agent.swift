@@ -27,6 +27,9 @@ public final class AgentCaller {
     public let folderID: UUID
     /// The tab tools act on; `TabsController.agentCurrentTab(of:)` falls back when it is gone.
     public internal(set) var currentTab: UUID?
+    /// Tabs opened with a `tab` name, so workers sharing one connection each keep their own
+    /// tab without moving `currentTab` under the others.
+    @ObservationIgnored public internal(set) var tabNames: [String: UUID] = [:]
     @ObservationIgnored public let profile: Profile
     /// Tool calls of this caller running now.
     @ObservationIgnored public var callsInFlight = 0
@@ -163,29 +166,43 @@ extension TabsController {
         return tabs.first
     }
 
+    /// `caller`'s tab opened under `name`, while it still has it.
+    public func agentTab(named name: String, of caller: AgentCaller) -> UUID? {
+        guard let id = caller.tabNames[name], agentTabs(of: caller).contains(id) else { return nil }
+        return id
+    }
+
+    /// The name `itemID` was opened under, if any.
+    public func agentTabName(_ itemID: UUID, of caller: AgentCaller) -> String? {
+        caller.tabNames.first { $0.value == itemID }?.key
+    }
+
     /// Whether `itemID` is the tab some caller's tools act on.
     public func isAgentCurrentTab(_ itemID: UUID) -> Bool {
         agentCallers.values.contains { $0.currentTab == itemID }
     }
 
-    /// A new tab at the end of `caller`'s folder, made its current tab.
+    /// A new tab at the end of `caller`'s folder: its current tab, or, given a `name`, a tab
+    /// addressed by that name that leaves the current tab alone.
     @discardableResult
-    public func openAgentTab(_ url: URL, for caller: AgentCaller) -> UUID? {
+    public func openAgentTab(_ url: URL, for caller: AgentCaller, name: String? = nil) -> UUID? {
         let last = tree.children(of: .folder(itemID: caller.folderID)).last?.id
         let id = UUID()
         guard perform(.main, "open", {
             try $0.createTab(id: id, url: url, title: url.host ?? url.absoluteString, in: .folder(itemID: caller.folderID), after: last)
         }) != nil else { return nil }
-        selectForAgent(id)
+        if let name { caller.tabNames[name] = id }
+        selectForAgent(id, makeCurrent: name == nil)
         return id
     }
 
     /// Makes `itemID` its caller's current tab. Windows showing the Agent space show it; the
-    /// others only remember it for when the person opens the space. The page loads either way.
-    public func selectForAgent(_ itemID: UUID) {
+    /// others only remember it for when the person opens the space. The page loads either way;
+    /// with `makeCurrent` false only that happens, for a tab addressed by name.
+    public func selectForAgent(_ itemID: UUID, makeCurrent: Bool = true) {
         guard let agent = agentSpaceID, tree.spaceID(of: itemID) == agent else { return }
-        agentCaller(owning: itemID)?.currentTab = itemID
-        for other in regularWindows {
+        if makeCurrent { agentCaller(owning: itemID)?.currentTab = itemID }
+        for other in regularWindows where makeCurrent {
             if other.spaceID == agent {
                 if other.selectedItemID != itemID { select(itemID, in: other) }
             } else {
