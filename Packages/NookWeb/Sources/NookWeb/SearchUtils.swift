@@ -41,6 +41,11 @@ private func looksLikeHost(_ input: String) -> Bool {
 public func normalizeURL(_ input: String, queryTemplate: String) -> String {
   let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
 
+  // The Attention tab is the one nook address typed in the address bar.
+  if trimmed.lowercased().hasPrefix("nook://attention") {
+    return trimmed
+  }
+
   // Explicit scheme — respect it as-is (including http://)
   if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") ||
     trimmed.hasPrefix("file://") || trimmed.hasPrefix("chrome-extension://") ||

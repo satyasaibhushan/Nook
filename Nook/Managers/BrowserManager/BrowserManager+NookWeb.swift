@@ -121,6 +121,10 @@ extension BrowserManager: PageSessionDelegate {
         controller.removeScriptMessageHandler(
             forName: WebStoreScriptHandler.handlerName, contentWorld: WebStoreScriptHandler.contentWorld)
     }
+
+    func makeAttentionBridge(for session: PageSession) -> WKScriptMessageHandlerWithReply? {
+        AttentionBridgeHandler(manager: self, session: session)
+    }
 }
 
 // MARK: - TabEventObserver

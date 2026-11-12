@@ -114,6 +114,7 @@ class WebViewCoordinator {
         }
         // Fresh user content controller per view: handlers are keyed by name.
         configuration.userContentController = BrowserConfiguration.shared.freshUserContentController()
+        BrowserConfiguration.installAttentionSchemeHandler(on: configuration)
 
         let newWebView = FocusableWKWebView(frame: .zero, configuration: configuration)
         newWebView.navigationDelegate = session
@@ -200,6 +201,7 @@ class WebViewCoordinator {
         for name in handlerNames {
             controller.removeScriptMessageHandler(forName: name)
         }
+        controller.removeScriptMessageHandler(forName: PageSession.attentionHandlerName, contentWorld: .page)
         controller.removeScriptMessageHandler(forName: "pipStateChange", contentWorld: PageSession.pipStateWorld)
         for name in PageSession.linkHoverHandlerNames {
             controller.removeScriptMessageHandler(forName: name, contentWorld: PageSession.linkHoverWorld)

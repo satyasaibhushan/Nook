@@ -15,8 +15,16 @@ public class BrowserConfiguration {
     
     private init() {}
     
+    /// The Attention tab is the only nook address a web view may load.
+    public static func installAttentionSchemeHandler(on config: WKWebViewConfiguration) {
+        if config.urlSchemeHandler(forURLScheme: "nook") == nil {
+            config.setURLSchemeHandler(AttentionSchemeHandler.shared, forURLScheme: "nook")
+        }
+    }
+
     public lazy var webViewConfiguration: WKWebViewConfiguration = {
         let config = WKWebViewConfiguration()
+        BrowserConfiguration.installAttentionSchemeHandler(on: config)
         #if os(macOS)
         BrowserConfiguration.applyProcessPool(to: config)
         #endif
@@ -117,6 +125,7 @@ public class BrowserConfiguration {
     // Derives from shared config to preserve process pool + extension controller
     public func cacheOptimizedWebViewConfiguration() -> WKWebViewConfiguration {
         let config = webViewConfiguration.copy() as! WKWebViewConfiguration
+        Self.installAttentionSchemeHandler(on: config)
         config.userContentController = freshUserContentController()
         return config
     }
@@ -126,6 +135,7 @@ public class BrowserConfiguration {
     @MainActor
     public func webViewConfiguration(for profile: Profile) -> WKWebViewConfiguration {
         let config = webViewConfiguration.copy() as! WKWebViewConfiguration
+        Self.installAttentionSchemeHandler(on: config)
 
         // Fresh UCC per tab to avoid cross-tab handler conflicts (preserves shared scripts)
         config.userContentController = freshUserContentController()
