@@ -267,7 +267,27 @@ enum AgentInputScript {
       }
       function keyUp(key, mods) { keyEvent('keyup', document.activeElement || document.body, key, mods); }
 
-      window.__nookAgent = { find, describe, locate, clickResult, scriptClick, focusField, fieldValue, setValue, selectOption, keyDown, keyUp };
+      // What expect checks on the first element matching `spec` (the body when it names none).
+      function probe(spec) {
+        let all;
+        if (spec.ref) { const el = P.resolve(spec.ref); all = el ? [el] : []; }
+        else if (spec.selector) all = [...document.querySelectorAll(spec.selector)];
+        else all = document.body ? [document.body] : [];
+        const el = all[0];
+        if (!el) return { count: 0, visible: false };
+        return {
+          count: all.length,
+          element: describe(el),
+          visible: visible(el),
+          enabled: !el.disabled && el.getAttribute('aria-disabled') !== 'true',
+          checked: el.checked === true || el.getAttribute('aria-checked') === 'true',
+          focused: document.activeElement === el,
+          text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 5000),
+          value: 'value' in el && typeof el.value === 'string' ? el.value : (el.isContentEditable ? el.innerText : null),
+        };
+      }
+
+      window.__nookAgent = { find, describe, locate, clickResult, scriptClick, focusField, fieldValue, setValue, selectOption, keyDown, keyUp, probe };
     })();
     """
 }
