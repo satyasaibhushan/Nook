@@ -370,7 +370,7 @@ final class DevMCPServer {
         ),
         AIToolDefinition(
             name: "wait_for_load",
-            description: "Wait until the selected tab stops loading (timeout seconds, default 20, capped at 25 by the server's own deadline). Call after navigateToURL.",
+            description: "Wait until the selected tab stops loading (timeout seconds, default 20, capped at 25 by the server's own deadline), for a load a click or script started; navigateToURL, createTab and reload already wait. Waits up to 0.3 s for a load to start when none is running.",
             parameters: ["type": "object", "properties": ["timeout": ["type": "number"]]]
         ),
         AIToolDefinition(
@@ -492,6 +492,17 @@ final class DevMCPServer {
         return "Failed to load \(attempted): \(reason). The tab still shows \(shown.isEmpty ? "a blank page" : shown)."
     }
 
+    /// Waits for `session`'s load and says how it ended: loaded with its address and title, failed
+    /// (a load that never committed leaves the previous page, which the agent must not read as
+    /// the new one), or still loading.
+    private func loadResult(_ session: PageSession, timeout: Double, startGrace: Duration) async -> [String: Any] {
+        let done = await session.waitForLoad(timeout: .seconds(timeout), startGrace: startGrace)
+        let shown = session.webView?.url?.absoluteString ?? session.url.absoluteString
+        guard done else { return text("Still loading after \(Int(timeout))s: \(shown)", error: true) }
+        if let failure = Self.failedLoad(session) { return text(failure, error: true) }
+        return text("Loaded: \(shown) | \(session.webView?.title ?? session.title)")
+    }
+
     private func text(_ s: String, error: Bool = false) -> [String: Any] {
         ["content": [["type": "text", "text": s]], "isError": error]
     }
@@ -573,7 +584,13 @@ final class DevMCPServer {
                 let executor = BrowserToolExecutor(browserManager: bm, windowState: window, agent: caller,
                                                    agentTab: target, agentTabName: tabName)
                 let r = try await executor.execute(AIToolCall(name: name, arguments: args))
-                return text(r.content, error: r.isError)
+                // The opening tools answer once the page has loaded, so the agent reads the new page.
+                guard Self.openingTools.contains(name), !r.isError, let caller, (args["url"] as? String)?.isEmpty == false,
+                      let id = tabName.flatMap({ bm.tabs.agentTab(named: $0, of: caller) }) ?? bm.tabs.agentCurrentTab(of: caller),
+                      let opened = bm.tabs.session(for: id) else { return text(r.content, error: r.isError) }
+                // A tab just made has not started its load when the call returns.
+                let grace: Duration = opened.loadingState == .idle ? .milliseconds(500) : .zero
+                return await loadResult(opened, timeout: Self.toolTimeout - 10, startGrace: grace)
             }
             // The caller's page, loaded and hosted once for this call; a read-only tool loads nothing.
             let agentView: WKWebView? = forPerson || readOnly || name == "closeTabs" ? nil
@@ -782,22 +799,13 @@ final class DevMCPServer {
                 return text(json(["entries": entries, "cursor": capture.network.lastSeq, "dropped": capture.network.dropped]))
 
             case "reload", "wait_for_load":
-                guard let wv = webView else { return text("No active tab", error: true) }
-                if name == "reload" { wv.reload() }
+                guard let session else { return text("No active tab", error: true) }
+                if name == "reload" { session.refresh() }
                 // Clamped below the outer deadline: an uncapped timeout: 60 would be cut off
                 // by withTimeout at 30s as a confusing -32001 instead of this tool's own answer.
                 let timeout = min((args["timeout"] as? NSNumber)?.doubleValue ?? 20, Self.toolTimeout - 5)
-                let deadline = Date().addingTimeInterval(timeout)
-                // ponytail: 100 ms poll, debug-only and bounded by the timeout; use navigation delegate callbacks if this ever matters.
-                // A load started by the previous call may not have set isLoading yet.
-                try await Task.sleep(for: .milliseconds(150))
-                while wv.isLoading, Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
-                // A load that never committed leaves the view on the previous page; reporting
-                // that page as loaded has the agent read the old page as the new one.
-                if !wv.isLoading, let failure = session.flatMap(Self.failedLoad) {
-                    return text(failure, error: true)
-                }
-                return text(wv.isLoading ? "Still loading after \(timeout)s: \(wv.url?.absoluteString ?? "")" : "Loaded: \(wv.url?.absoluteString ?? "") | \(wv.title ?? "")", error: wv.isLoading)
+                // A load a click asked for may not have started yet.
+                return await loadResult(session, timeout: timeout, startGrace: name == "reload" ? .zero : .milliseconds(300))
 
             case "blocker_status":
                 let cb = bm.contentBlockerManager
