@@ -61,8 +61,9 @@ public final class TabsController {
     public internal(set) var liveStatus: [UUID: LiveFolderStatus] = [:]
     @ObservationIgnored var liveRefreshed: [UUID: Date] = [:]
     @ObservationIgnored var liveRefreshing: Set<UUID> = []
-    /// The tab DevMCP page tools act on, in the Agent space (see `TabsController+Agent.swift`).
-    public internal(set) var agentItemID: UUID?
+    /// Connected DevMCP agents by MCP session id (see `TabsController+Agent.swift`).
+    public internal(set) var agentCallers: [String: AgentCaller] = [:]
+    @ObservationIgnored var agentLooseProfileStorage: Profile?
     /// DevMCP tool calls running now; the sidebar's agent row pulses while it is above zero.
     public var agentCallsInFlight = 0
     /// The agent's page changed or lost its window; the app keeps it rendering.
@@ -522,14 +523,15 @@ public final class TabsController {
     }
 
     /// The website data store of a space, made on first use and shared by every space that uses
-    /// the same store (the Agent space borrows one). Its name and icon follow the space asked for.
+    /// the same store. Its name and icon follow the space asked for. The Agent space's pages use
+    /// their callers' stores; this answers for the ones no caller owns.
     public func profile(forSpace spaceID: UUID) -> Profile? {
-        guard let space = tree.space(spaceID), let storeID = tree.dataStoreID(for: spaceID) else { return nil }
+        guard let space = tree.space(spaceID) else { return nil }
+        if space.isAgent { return agentLooseProfile }
+        guard let storeID = tree.dataStoreID(for: spaceID) else { return nil }
         if let existing = spaceProfiles[storeID] {
-            if !space.isAgent {
-                existing.name = space.name
-                existing.icon = space.icon
-            }
+            existing.name = space.name
+            existing.icon = space.icon
             return existing
         }
         let profile = Profile(id: storeID, name: space.name, icon: space.icon)
@@ -554,6 +556,7 @@ public final class TabsController {
         if session.isPrivate {
             return privateWindows.first { $0.privateSessions[session.itemID] === session }?.ephemeralProfile
         }
+        if let caller = agentCaller(owning: session.itemID) { return caller.profile }
         if let id = tree.spaceID(of: session.itemID), let profile = profile(forSpace: id) {
             return profile
         }

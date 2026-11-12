@@ -18,13 +18,14 @@ class BrowserToolExecutor {
 
     weak var browserManager: BrowserManager?
     weak var windowState: BrowserWindowState?
-    /// DevMCP's Agent space: tools act on its tabs instead of what the window shows.
-    let agentSpace: UUID?
+    /// The DevMCP agent calling: tools act on its tabs in the Agent space instead of what the
+    /// window shows.
+    let agent: AgentCaller?
 
-    init(browserManager: BrowserManager? = nil, windowState: BrowserWindowState? = nil, agentSpace: UUID? = nil) {
+    init(browserManager: BrowserManager? = nil, windowState: BrowserWindowState? = nil, agent: AgentCaller? = nil) {
         self.browserManager = browserManager
         self.windowState = windowState
-        self.agentSpace = agentSpace
+        self.agent = agent
     }
 
     // MARK: - Tool Definitions
@@ -102,19 +103,20 @@ class BrowserToolExecutor {
     }
 
     private func getWebView(browserManager: BrowserManager, windowState: BrowserWindowState) -> WKWebView? {
-        if agentSpace != nil { return (try? browserManager.agentWebView()) ?? nil }
+        if let agent { return (try? browserManager.agentWebView(for: agent)) ?? nil }
         guard let itemID = windowState.selectedItemID else { return nil }
         return browserManager.getWebView(for: itemID, in: windowState.id)
     }
 
     private func tabOrder(_ tabs: TabsController, _ windowState: BrowserWindowState) -> [UUID] {
-        agentSpace.map(tabs.displayOrder(inSpace:)) ?? tabs.displayOrder(in: windowState)
+        agent.map(tabs.agentTabs(of:)) ?? tabs.displayOrder(in: windowState)
     }
 
-    /// A new selected tab: in the Agent space when there is one, without showing it.
+    /// A new selected tab: the agent's new current tab when an agent calls, without showing it.
     @discardableResult
     private func openTab(_ url: URL, _ tabs: TabsController, _ windowState: BrowserWindowState) -> UUID? {
-        tabs.open(url: url, in: windowState, placement: .newTab, parent: agentSpace.map { .tabs(spaceID: $0) })
+        if let agent { return tabs.openAgentTab(url, for: agent) }
+        return tabs.open(url: url, in: windowState, placement: .newTab)
     }
 
     /// JSON-encodes a string for interpolation into a script. `JSONSerialization` raises an
@@ -146,9 +148,9 @@ class BrowserToolExecutor {
 
         let newTab = args["newTab"] as? Bool ?? false
         let tabs = browserManager.tabs
-        if agentSpace != nil {
-            if !newTab, let id = tabs.agentItem, let session = tabs.ensureSession(for: id) {
-                tabs.select(id, in: windowState)
+        if let agent {
+            if !newTab, let id = tabs.agentCurrentTab(of: agent), let session = tabs.ensureSession(for: id) {
+                tabs.selectForAgent(id)
                 session.load(url)
             } else {
                 openTab(url, tabs, windowState)
@@ -467,7 +469,7 @@ class BrowserToolExecutor {
                 "index": index,
                 "title": tabTitle(itemID, in: controller),
                 "url": (controller.session(for: itemID)?.url ?? controller.item(itemID)?.url)?.absoluteString ?? "",
-                "isActive": itemID == (agentSpace != nil ? controller.agentItem : windowState.selectedItemID)
+                "isActive": itemID == (agent != nil ? agent.flatMap(controller.agentCurrentTab(of:)) : windowState.selectedItemID)
             ])
         }
 
@@ -489,7 +491,11 @@ class BrowserToolExecutor {
             return "Tab index \(index) out of range (0-\(order.count - 1))"
         }
 
-        controller.select(order[index], in: windowState)
+        if agent != nil {
+            controller.selectForAgent(order[index])
+        } else {
+            controller.select(order[index], in: windowState)
+        }
         return "Switched to tab: \(tabTitle(order[index], in: controller))"
     }
 

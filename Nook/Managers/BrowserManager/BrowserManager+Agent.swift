@@ -3,53 +3,52 @@
 //  BrowserManager+Agent.swift
 //  Nook
 //
-//  Keeps the DevMCP agent's page rendering while the person looks at another space. WebKit
-//  treats a page outside any window as hidden (no rendering, 1 Hz timers), so the agent's page
-//  sits in a browser window, in a view placed outside the window's content area: nothing draws,
-//  no tracking area or click reaches it, and WebKit still counts it visible. After 30 s with no
-//  tool call it leaves the window, so an idle agent page costs what a background tab does.
+//  Keeps DevMCP agents' pages rendering while the person looks at another space. WebKit treats
+//  a page outside any window as hidden (no rendering, 1 Hz timers), so agent pages sit in a
+//  browser window, in a view placed outside the window's content area: nothing draws, no
+//  tracking area or click reaches them, and WebKit still counts them visible. After 30 s with
+//  no call from its caller a page leaves the window, so an idle one costs what a background
+//  tab does.
 //
 
 import AppKit
 import WebKit
 import NookWeb
 
-@MainActor private var agentIdle: Task<Void, Never>?
-/// Set while the agent's page is out of the window for being idle; the next tool call clears it.
-@MainActor private var agentParked = false
-
 extension BrowserManager {
     private static let agentIdleDelay: Duration = .seconds(30)
-    /// How long after parking the Agent space's tabs are closed.
+    /// How long after parking a caller's tabs are closed.
     private static let agentCloseDelay: Duration = .seconds(30 * 60)
 
     func installAgentPageHost() {
         tabs.onAgentPage = { [weak self] session in
-            guard let self, !agentParked || self.tabs.agentCallsInFlight > 0 else { return }
-            agentParked = false
+            guard let self, let caller = self.tabs.agentCaller(owning: session.itemID),
+                  !caller.isParked || caller.callsInFlight > 0 else { return }
+            caller.isParked = false
             self.hostAgentPage(session)
-            self.scheduleAgentIdle()
+            self.scheduleAgentIdle(caller)
         }
     }
 
-    /// The agent's page, loaded, in a window and counted as used. Nil without an Agent space tab;
-    /// throws when the tab's page cannot be made.
-    func agentWebView() throws -> WKWebView? {
-        guard let id = tabs.agentItem else { return nil }
+    /// `caller`'s current page, loaded, in a window and counted as used. Nil while it has no
+    /// tab; throws when the tab's page cannot be made.
+    func agentWebView(for caller: AgentCaller) throws -> WKWebView? {
+        guard let id = tabs.agentCurrentTab(of: caller) else { return nil }
         guard let session = tabs.ensureSession(for: id) else { throw AgentPageError.noPage }
         session.loadWebViewIfNeeded()
         guard let view = session.webView else { throw AgentPageError.noPage }
         compositorManager.markTabAccessed(id)
-        agentParked = false
+        caller.isParked = false
         hostAgentPage(session)
-        scheduleAgentIdle()
+        scheduleAgentIdle(caller)
         return view
     }
 
-    /// Puts the agent's page in the active window's hidden host when no open window holds it; a
-    /// window that shows the Agent space takes it from there itself.
+    /// Puts an agent page in the active window's hidden host when no open window holds it; a
+    /// window that shows the Agent space takes it from there itself. Pages stay until their
+    /// caller parks, so every tab a caller used lately keeps rendering, whoever else is busy.
     func hostAgentPage(_ session: PageSession) {
-        guard tabs.agentItem == session.itemID, let view = session.webView,
+        guard let view = session.webView,
               let window = windowRegistry?.mostRecentRegularWindow?.window,
               let content = window.contentView else { return }
         // Already in a window that is still open; a closed one no longer renders it.
@@ -64,45 +63,42 @@ extension BrowserManager {
             content.addSubview(host, positioned: .below, relativeTo: nil)
             return host
         }()
-        // One page at a time: the agent's previous one goes back to being a background tab.
-        host.subviews.forEach { $0.removeFromSuperview() }
         view.frame = host.bounds
         view.autoresizingMask = [.width, .height]
         host.addSubview(view)
     }
 
-    /// Takes the agent's page out of its host once no call has run for `agentIdleDelay`.
-    private func scheduleAgentIdle() {
-        agentIdle?.cancel()
-        agentIdle = Task { @MainActor [weak self] in
+    /// Takes `caller`'s pages out of the host once it has made no call for `agentIdleDelay`, and
+    /// closes its tabs `agentCloseDelay` later unless a window shows the Agent space.
+    private func scheduleAgentIdle(_ caller: AgentCaller) {
+        caller.idleTask?.cancel()
+        caller.idleTask = Task { @MainActor [weak self, weak caller] in
             repeat {
                 try? await Task.sleep(for: Self.agentIdleDelay)
                 if Task.isCancelled { return }
-            } while self?.tabs.agentCallsInFlight ?? 0 > 0
-            guard let self, let view = self.tabs.agentItem.flatMap(self.tabs.session(for:))?.webView,
-                  view.superview is AgentPageHostView else { return }
-            agentParked = true
-            view.removeFromSuperview()
+            } while caller?.callsInFlight ?? 0 > 0
+            guard let self, let caller else { return }
+            caller.isParked = true
+            for id in self.tabs.agentTabs(of: caller) {
+                if let view = self.tabs.session(for: id)?.webView, view.superview is AgentPageHostView {
+                    view.removeFromSuperview()
+                }
+            }
             try? await Task.sleep(for: Self.agentCloseDelay)
             if Task.isCancelled { return }
-            self.closeIdleAgentTabs()
+            guard caller.callsInFlight == 0,
+                  !self.tabs.regularWindows.contains(where: { $0.spaceID == self.tabs.agentSpaceID }) else { return }
+            self.tabs.closeAgentTabs(of: caller)
         }
-    }
-
-    /// Closes the Agent space's regular tabs, unless a window is showing the space or a call runs.
-    func closeIdleAgentTabs() {
-        guard let agent = tabs.agentSpaceID, tabs.agentCallsInFlight == 0,
-              !tabs.regularWindows.contains(where: { $0.spaceID == agent }) else { return }
-        for item in tabs.children(of: .tabs(spaceID: agent)) { tabs.remove(item.id) }
     }
 }
 
 enum AgentPageError: LocalizedError {
     case noPage
-    var errorDescription: String? { "The Agent space's tab has no page" }
+    var errorDescription: String? { "The agent's tab has no page" }
 }
 
-/// Holds the agent's page out of sight: transparent, outside the content area, never the target
+/// Holds agent pages out of sight: transparent, outside the content area, never the target
 /// of a click.
 final class AgentPageHostView: NSView {
     /// How far left of the content area the host sits; wider than any window.

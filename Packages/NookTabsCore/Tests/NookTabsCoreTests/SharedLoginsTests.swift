@@ -23,14 +23,14 @@ struct SharedLoginsTests {
         #expect(f.tree.dataStoreID(for: shared) == f.spaceA)
     }
 
-    @Test func agentBorrowsTheSharedStore() throws {
+    @Test func agentUsesNoSpaceStore() throws {
         var f = Fixture()
         let shared = UUID()
         f.tree.createSpace(id: shared, name: "Work 2", icon: "", accentHex: "#000", after: f.spaceB,
                            dataStoreID: f.spaceA, now: fixedNow)
         let created = f.tree.ensureAgentSpace(loginsFrom: shared, now: fixedNow)
         let agent = try #require(created)
-        #expect(f.tree.dataStoreID(for: agent.id) == f.spaceA)
+        #expect(f.tree.dataStoreID(for: agent.id) == nil)
     }
 
     @Test func survivesSaveAndLoad() throws {

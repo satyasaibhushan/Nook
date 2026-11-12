@@ -220,7 +220,7 @@ extension TabsController {
         // An agent tab never pulls a window into the Agent space; the person opens it to watch.
         if isInAgentSpace(itemID) {
             guard window.spaceID == agentSpaceID else { return selectForAgent(itemID) }
-            agentItemID = itemID
+            agentCaller(owning: itemID)?.currentTab = itemID
         }
         let movedSpace = source.spaceID(of: itemID).map { $0 != window.spaceID } ?? false
         if let spaceID = source.spaceID(of: itemID) {
@@ -745,7 +745,6 @@ extension TabsController {
               perform(.main, "setProfile", { try $0.setProfile(spaceID, to: storeID, name: name) }) != nil
         else { return }
         unloadPagesOnWrongDataStore(items(inSpace: spaceID).map(\.id))
-        if let agent = agentSpaceID { unloadPagesOnWrongDataStore(items(inSpace: agent).map(\.id)) }
         for window in regularWindows where window.spaceID == spaceID { sessionDelegate?.windowSpaceChanged(window) }
         if !tree.orderedSpaces.contains(where: { tree.dataStoreID(for: $0.id) == old.id }) {
             forgetProfile(old.id)
@@ -776,8 +775,8 @@ extension TabsController {
                    + source.children(of: .pinned(spaceID: spaceID))
                    + source.children(of: .tabs(spaceID: spaceID)))
             .flatMap { source.subtree(of: $0.id) }
-        // Read while the space still exists. The Agent space's data store is borrowed from the
-        // person's space, so it is never cleared, and its tabs stay out of the reopen history.
+        // Read while the space still exists. The Agent space's pages use throwaway data stores,
+        // and its tabs stay out of the reopen history.
         let isAgent = source.space(spaceID)?.isAgent == true
         let deleted = isAgent ? nil : profile(forSpace: spaceID)
         var closed: [ClosedEntry] = []
@@ -808,8 +807,6 @@ extension TabsController {
             // Its cookies and logins go with it, since no other space uses this data store.
             forgetProfile(profile.id)
             Task { await profile.clearAllData() }
-            // The Agent space may have borrowed its logins from this one.
-            if let agent = agentSpaceID { unloadPagesOnWrongDataStore(items(inSpace: agent).map(\.id)) }
         }
     }
 
