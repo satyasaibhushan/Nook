@@ -448,6 +448,22 @@ final class DevMCPServer {
         return marked
     }
 
+    /// Why the page's last navigation did not load, or nil when it loaded or was superseded.
+    /// A cancel (-999) means a newer navigation took over, and 102 is a response handed to
+    /// downloads; neither is a failure the agent should act on.
+    private static func failedLoad(_ session: PageSession) -> String? {
+        guard case .didFailProvisionalNavigation(let error) = session.loadingState else { return nil }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return nil }
+        if nsError.domain == "WebKitErrorDomain", nsError.code == 102 { return nil }
+        let attempted = (nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL)?.absoluteString
+            ?? nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String ?? "the page"
+        let blocked = nsError.domain == "WebKitErrorDomain" && nsError.code == 104
+        let reason = blocked ? "blocked by the content blocker" : nsError.localizedDescription.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let shown = session.webView?.url?.absoluteString ?? ""
+        return "Failed to load \(attempted): \(reason). The tab still shows \(shown.isEmpty ? "a blank page" : shown)."
+    }
+
     private func text(_ s: String, error: Bool = false) -> [String: Any] {
         ["content": [["type": "text", "text": s]], "isError": error]
     }
@@ -711,6 +727,11 @@ final class DevMCPServer {
                 // A load started by the previous call may not have set isLoading yet.
                 try await Task.sleep(for: .milliseconds(150))
                 while wv.isLoading, Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
+                // A load that never committed leaves the view on the previous page; reporting
+                // that page as loaded has the agent read the old page as the new one.
+                if !wv.isLoading, let failure = session.flatMap(Self.failedLoad) {
+                    return text(failure, error: true)
+                }
                 return text(wv.isLoading ? "Still loading after \(timeout)s: \(wv.url?.absoluteString ?? "")" : "Loaded: \(wv.url?.absoluteString ?? "") | \(wv.title ?? "")", error: wv.isLoading)
 
             case "blocker_status":
