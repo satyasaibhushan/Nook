@@ -30,10 +30,10 @@ extension BrowserManager {
         }
     }
 
-    /// `caller`'s current page, loaded, in a window and counted as used. Nil while it has no
-    /// tab; throws when the tab's page cannot be made.
-    func agentWebView(for caller: AgentCaller) throws -> WKWebView? {
-        guard let id = tabs.agentCurrentTab(of: caller) else { return nil }
+    /// `caller`'s page in `tab`, else its current one, loaded, in a window and counted as used.
+    /// Nil while it has no tab; throws when the tab's page cannot be made.
+    func agentWebView(for caller: AgentCaller, tab: UUID? = nil) throws -> WKWebView? {
+        guard let id = tab ?? tabs.agentCurrentTab(of: caller) else { return nil }
         guard let session = tabs.ensureSession(for: id) else { throw AgentPageError.noPage }
         session.loadWebViewIfNeeded()
         guard let view = session.webView else { throw AgentPageError.noPage }

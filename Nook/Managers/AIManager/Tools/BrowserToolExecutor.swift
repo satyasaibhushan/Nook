@@ -21,11 +21,19 @@ class BrowserToolExecutor {
     /// The DevMCP agent calling: tools act on its tabs in the Agent space instead of what the
     /// window shows.
     let agent: AgentCaller?
+    /// The agent's tab named by the call's `tab` argument, which tools act on instead of its
+    /// current tab; nil for the current tab, or for a name not opened yet.
+    let agentTab: UUID?
+    /// The call's `tab` name: navigateToURL and createTab open a tab under it when `agentTab` is nil.
+    let agentTabName: String?
 
-    init(browserManager: BrowserManager? = nil, windowState: BrowserWindowState? = nil, agent: AgentCaller? = nil) {
+    init(browserManager: BrowserManager? = nil, windowState: BrowserWindowState? = nil, agent: AgentCaller? = nil,
+         agentTab: UUID? = nil, agentTabName: String? = nil) {
         self.browserManager = browserManager
         self.windowState = windowState
         self.agent = agent
+        self.agentTab = agentTab
+        self.agentTabName = agentTabName
     }
 
     // MARK: - Tool Definitions
@@ -103,7 +111,7 @@ class BrowserToolExecutor {
     }
 
     private func getWebView(browserManager: BrowserManager, windowState: BrowserWindowState) -> WKWebView? {
-        if let agent { return (try? browserManager.agentWebView(for: agent)) ?? nil }
+        if let agent { return (try? browserManager.agentWebView(for: agent, tab: agentTab)) ?? nil }
         guard let itemID = windowState.selectedItemID else { return nil }
         return browserManager.getWebView(for: itemID, in: windowState.id)
     }
@@ -115,7 +123,7 @@ class BrowserToolExecutor {
     /// A new selected tab: the agent's new current tab when an agent calls, without showing it.
     @discardableResult
     private func openTab(_ url: URL, _ tabs: TabsController, _ windowState: BrowserWindowState) -> UUID? {
-        if let agent { return tabs.openAgentTab(url, for: agent) }
+        if let agent { return tabs.openAgentTab(url, for: agent, name: agentTabName) }
         return tabs.open(url: url, in: windowState, placement: .newTab)
     }
 
@@ -149,8 +157,10 @@ class BrowserToolExecutor {
         let newTab = args["newTab"] as? Bool ?? false
         let tabs = browserManager.tabs
         if let agent {
-            if !newTab, let id = tabs.agentCurrentTab(of: agent), let session = tabs.ensureSession(for: id) {
-                tabs.selectForAgent(id)
+            // A named tab is used when it exists and opened when it does not, whatever newTab says.
+            let existing = agentTabName != nil ? agentTab : (newTab ? nil : tabs.agentCurrentTab(of: agent))
+            if let id = existing, let session = tabs.ensureSession(for: id) {
+                tabs.selectForAgent(id, makeCurrent: agentTabName == nil)
                 session.load(url)
             } else {
                 openTab(url, tabs, windowState)
@@ -465,12 +475,14 @@ class BrowserToolExecutor {
 
         var tabList: [[String: Any]] = []
         for (index, itemID) in order.enumerated() {
-            tabList.append([
+            var entry: [String: Any] = [
                 "index": index,
                 "title": tabTitle(itemID, in: controller),
                 "url": (controller.session(for: itemID)?.url ?? controller.item(itemID)?.url)?.absoluteString ?? "",
                 "isActive": itemID == (agent != nil ? agent.flatMap(controller.agentCurrentTab(of:)) : windowState.selectedItemID)
-            ])
+            ]
+            if let name = agent.flatMap({ controller.agentTabName(itemID, of: $0) }) { entry["tab"] = name }
+            tabList.append(entry)
         }
 
         let data = try? JSONSerialization.data(withJSONObject: tabList, options: .prettyPrinted)
