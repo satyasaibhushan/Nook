@@ -11,6 +11,7 @@ import SystemConfiguration
 @Observable
 final class ActivityRecorder {
     var modeProvider: () -> String? = { nil }
+    var sessionProvider: () -> String? = { nil }
     private(set) var recordingPaused = false
     let stateStore: ActivityStateStore
     let machine: String
@@ -18,7 +19,7 @@ final class ActivityRecorder {
     @ObservationIgnored private let tabs: TabsController
     @ObservationIgnored private let registry: WindowRegistry
     @ObservationIgnored private let settings: NookSettingsService
-    @ObservationIgnored private let writer: ActivityLogWriter
+    @ObservationIgnored let writer: ActivityLogWriter
     @ObservationIgnored private var accounting: ActivityAccounting
     @ObservationIgnored private let stateQueue = DispatchQueue(label: "Nook.ActivityState", qos: .utility)
     @ObservationIgnored private var ready = false
@@ -145,7 +146,7 @@ final class ActivityRecorder {
     }
 
     private func closeStretches() {
-        let closed = accounting.update(at: Date(), pages: [], lastInput: lastInput, mode: modeProvider())
+        let closed = accounting.update(at: Date(), pages: [], lastInput: lastInput, mode: modeProvider(), session: sessionProvider())
         writer.write(closed: closed, open: [])
         lastCheckpoint = Date()
     }
@@ -186,7 +187,7 @@ final class ActivityRecorder {
                     space: space, foregroundWindow: foreground, playingMedia: playing))
             }
         }
-        let closed = accounting.update(at: now, pages: pages, lastInput: lastInput, mode: modeProvider())
+        let closed = accounting.update(at: now, pages: pages, lastInput: lastInput, mode: modeProvider(), session: sessionProvider())
         if !closed.isEmpty || now.timeIntervalSince(lastCheckpoint) >= 30 {
             writer.write(closed: closed, open: accounting.checkpoint)
             lastCheckpoint = now

@@ -25,13 +25,13 @@ extension BrowserManager {
             await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in recorder.flush { done.resume() } }
             let range = activityReportDays(endingAt: Date(), count: days)
             let files = labeller.files
-            let (records, overrides) = await Task.detached(priority: .utility) {
-                (files.loadRecords(days: range), files.loadOverrides())
+            let (records, overrides, sessions, events) = await Task.detached(priority: .utility) {
+                (files.loadRecords(days: range), files.loadOverrides(), files.loadSessions(), files.loadEvents())
             }.value
             // Private windows are never recorded, so every logged page may be labelled.
             await labeller.labelNow(activityPagesToLabel(records))
             let report = ActivityReport.make(records: records, overrides: overrides, days: range, rules: labeller.rules,
-                                             remembered: labeller.remembered, generatedAt: activityTimestamp(Date()))
+                                             remembered: labeller.remembered, generatedAt: activityTimestamp(Date()), sessions: sessions, events: events)
             do {
                 let page = try await Task.detached(priority: .utility) { try files.writeReport(report) }.value
                 showActivityReport(page)

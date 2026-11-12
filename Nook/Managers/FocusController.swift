@@ -13,6 +13,9 @@ struct FocusCover: Equatable {
     let url: URL
     /// False in a mode that blocks, and for a host in the mode's blockHosts.
     let canContinue: Bool
+    let reason: String
+    let decidedBy: AttentionEvent.DecidedBy
+    let confidence: Double?
 }
 
 /// The running Focus mode. Modes come from modes.json; the running one and its start live in
@@ -22,6 +25,8 @@ struct FocusCover: Equatable {
 final class FocusController {
     private(set) var activeMode: FocusMode?
     private(set) var startedAt: Date?
+    private(set) var goal: String?
+    private(set) var sessionID: String?
     private(set) var modes = FocusModes(modes: [])
     let labeller: ActivityLabeller
 
@@ -31,8 +36,14 @@ final class FocusController {
     private var detached: [UUID: PageSession] = [:]
     @ObservationIgnored private var mutedByFocus: Set<UUID> = []
     @ObservationIgnored private var lastCovered: [UUID: URL] = [:]
-    @ObservationIgnored private var pendingLabels: [UUID: (url: URL, task: Task<Void, Never>)] = [:]
-    @ObservationIgnored private var modesDate: Date?
+    @ObservationIgnored private var pendingGoal: Task<Void, Never>?
+    @ObservationIgnored private var pendingGoalKey: String?
+    @ObservationIgnored private var recordedDecisions: Set<String> = []
+    @ObservationIgnored private var observationGeneration = 0
+    @ObservationIgnored private var transitionGeneration = 0
+    @ObservationIgnored private var fileGeneration = 0
+    @ObservationIgnored private var windowObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private let writer: ActivityLogWriter
     @ObservationIgnored private var fileMonitors: [DispatchSourceFileSystemObject] = []
     @ObservationIgnored private var activationObserver: NSObjectProtocol?
     @ObservationIgnored private var keyMonitor: Any?
@@ -49,17 +60,28 @@ final class FocusController {
     init(tabs: TabsController, recorder: ActivityRecorder) {
         self.tabs = tabs
         stateStore = recorder.stateStore
+        writer = recorder.writer
         machine = recorder.machine
         labeller = ActivityLabeller(directory: recorder.stateStore.url.deletingLastPathComponent())
         Self.shared = self
-        labeller.reload()
-        reloadModes()
         recorder.modeProvider = { [weak self] in self?.activeMode?.name }
-        resume()
+        recorder.sessionProvider = { [weak self] in self?.sessionID }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.labeller.reload()
+            await self.reloadModes()
+            await self.resume()
+            self.watchFiles()
+        }
         observe()
         watchFiles()
         activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            DispatchQueue.main.async { self?.watchFiles(); self?.reconcileFiles() }
+            DispatchQueue.main.async { self?.watchFiles(); self?.reconcileFiles(); self?.observe() }
+        }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification, NSApplication.didResignActiveNotification] {
+            windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.observe() }
+            })
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             MainActor.assumeIsolated { self?.interceptKey(event) ?? event }
@@ -67,107 +89,125 @@ final class FocusController {
     }
 
     private func watchFiles() {
-        fileMonitors.forEach { $0.cancel() }
-        fileMonitors.removeAll()
-        let files = labeller.files
-        let paths = [stateStore.url.deletingLastPathComponent(), files.rulesURL, files.labelsURL, files.modesURL]
-        for (index, path) in paths.enumerated() {
-            let descriptor = open(path.path, O_EVTONLY)
-            guard descriptor >= 0 else { continue }
-            let monitor = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: .main)
-            monitor.setEventHandler { [weak self, weak monitor] in
-                MainActor.assumeIsolated {
-                    self?.reconcileFiles()
-                    // A replaced file leaves this descriptor on the old one.
-                    if index == 0 || monitor?.data.isDisjoint(with: [.rename, .delete]) == false { self?.watchFiles() }
+        fileGeneration += 1
+        let generation = fileGeneration
+        fileMonitors.forEach { $0.cancel() }; fileMonitors = []
+        let files = labeller.files, queue = queue
+        let paths = [files.directory, files.rulesURL, files.labelsURL, files.modesURL, files.preferencesURL]
+        queue.async { [weak self] in
+            let monitors = paths.compactMap { path -> DispatchSourceFileSystemObject? in
+                let descriptor = open(path.path, O_EVTONLY)
+                guard descriptor >= 0 else { return nil }
+                let monitor = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: queue)
+                monitor.setEventHandler { [weak self] in
+                    Task { @MainActor in self?.reconcileFiles() }
                 }
+                monitor.setCancelHandler { close(descriptor) }
+                return monitor
             }
-            monitor.setCancelHandler { close(descriptor) }
-            monitor.resume()
-            fileMonitors.append(monitor)
+            Task { @MainActor [weak self] in
+                guard let self, self.fileGeneration == generation else {
+                    monitors.forEach { $0.cancel(); $0.resume() }; return
+                }
+                self.fileMonitors = monitors
+                monitors.forEach { $0.resume() }
+            }
         }
     }
 
     private func reconcileFiles() {
-        labeller.reloadIfChanged()
-        reloadModesIfChanged()
+        Task { [weak self] in
+            guard let self else { return }
+            await self.labeller.reloadIfChanged()
+            await self.reloadModes()
+            self.watchFiles()
+        }
     }
 
     // MARK: - Modes
 
-    func start(named name: String) {
-        labeller.reload()
-        reloadModes()
-        guard let mode = modes.mode(named: name) else {
-            Self.log.info("No Focus mode named \(name, privacy: .public)")
-            return
+    func start(named name: String, goal: String? = nil) {
+        transitionGeneration += 1
+        let generation = transitionGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            await self.labeller.reload()
+            await self.reloadModes()
+            guard generation == self.transitionGeneration, let mode = self.modes.mode(named: name) else { return }
+            let trimmed = goal?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let goal = trimmed?.isEmpty == false ? trimmed : nil
+            // Existing nook://focus/<name> links keep the running session when no goal is supplied.
+            if self.activeMode?.name == mode.name, goal == nil || self.goal == goal { self.activeMode = mode; return }
+            self.logSession(.switch)
+            self.activate(mode, since: Date(), goal: goal, sessionID: UUID().uuidString, overrides: [])
+            self.logSession(.start)
+            self.persist()
         }
-        // Starting the running mode again keeps its session and overrides.
-        if activeMode?.name == mode.name { activeMode = mode; return }
-        activate(mode, since: Date(), overrides: [])
-        persist()
     }
 
     func end() {
+        transitionGeneration += 1
         guard activeMode != nil else { return }
-        activeMode = nil
-        startedAt = nil
-        overridden = []
+        logSession(.end)
+        pendingGoal?.cancel(); pendingGoal = nil; pendingGoalKey = nil
+        activeMode = nil; startedAt = nil; goal = nil; sessionID = nil; overridden = []
+        labeller.clearGoalDecisions()
         persist()
     }
 
-    private func activate(_ mode: FocusMode, since: Date, overrides: Set<String>) {
-        activeMode = mode
-        startedAt = since
-        overridden = overrides
+    private func activate(_ mode: FocusMode, since: Date, goal: String?, sessionID: String, overrides: Set<String>) {
+        pendingGoal?.cancel(); pendingGoal = nil; pendingGoalKey = nil
+        labeller.clearGoalDecisions(); recordedDecisions = []
+        activeMode = mode; startedAt = since; self.goal = goal; self.sessionID = sessionID; overridden = overrides
+    }
+
+    private func logSession(_ event: AttentionSession.Event) {
+        guard let sessionID, let mode = activeMode else { return }
+        let now = Date()
+        writer.writeSession(.init(at: activityTimestamp(now), event: event, session: sessionID, mode: mode.name, goal: goal), machine: machine, date: now)
     }
 
     private func persist() {
-        let name = activeMode?.name, started = startedAt.map(activityTimestamp)
+        let name = activeMode?.name, started = startedAt.map(activityTimestamp), goal = goal, sessionID = sessionID
         let store = stateStore
         queue.async {
             do {
                 try store.update {
-                    $0["mode"] = name ?? NSNull()
-                    $0["modeStartedAt"] = started ?? NSNull()
+                    $0["mode"] = name ?? NSNull(); $0["modeStartedAt"] = started ?? NSNull()
+                    $0["goal"] = goal ?? NSNull(); $0["sessionID"] = sessionID ?? NSNull()
                 }
-            } catch {
-                Self.log.error("Could not save Focus state: \(String(describing: error), privacy: .public)")
-            }
+            } catch { Self.log.error("Could not save Focus state: \(String(describing: error), privacy: .public)") }
         }
     }
 
-    /// Picks up the mode state.json names. A mode that no longer exists in modes.json ends.
-    private func resume() {
-        let store = stateStore, files = labeller.files, modes = modes
-        queue.async { [weak self] in
-            guard let state = try? store.read(), let name = state["mode"] as? String else { return }
+    private func resume() async {
+        let store = stateStore, files = labeller.files, modes = modes, generation = transitionGeneration
+        let restored = await Task.detached(priority: .utility) { () -> (FocusMode, Date, String?, String, Set<String>)? in
+            guard let state = try? store.read(), let name = state["mode"] as? String else { return nil }
             let started = (state["modeStartedAt"] as? String).flatMap(parseActivityTimestamp) ?? Date()
             guard let mode = modes.mode(named: name) else {
-                _ = try? store.update { $0["mode"] = NSNull(); $0["modeStartedAt"] = NSNull() }
-                return
+                _ = try? store.update {
+                    $0["mode"] = NSNull(); $0["modeStartedAt"] = NSNull(); $0["goal"] = NSNull(); $0["sessionID"] = NSNull()
+                }
+                return nil
             }
-            // Overrides from before a relaunch still count for the rest of the mode session.
+            let id = state["sessionID"] as? String ?? UUID().uuidString
             let overrides = Set(files.loadOverrides().filter {
-                $0.mode == mode.name && (parseActivityTimestamp($0.at).map { $0 >= started } ?? false)
+                $0.session == id || ($0.session == nil && $0.mode == mode.name && (parseActivityTimestamp($0.at).map { $0 >= started } ?? false))
             }.map(\.url))
-            Task { @MainActor [weak self] in
-                guard let self, self.activeMode == nil else { return }
-                self.activate(mode, since: started, overrides: overrides)
-            }
-        }
+            return (mode, started, state["goal"] as? String, id, overrides)
+        }.value
+        guard transitionGeneration == generation, activeMode == nil, let restored else { return }
+        activate(restored.0, since: restored.1, goal: restored.2, sessionID: restored.3, overrides: restored.4)
+        persist()
     }
 
-    private func reloadModes() {
-        modesDate = labeller.files.modificationDate(labeller.files.modesURL)
-        modes = labeller.files.loadModes()
-    }
-
-    private func reloadModesIfChanged() {
-        guard labeller.files.modificationDate(labeller.files.modesURL) != modesDate else { return }
-        reloadModes()
-        // The running mode follows hand edits; renaming or removing it leaves it running as it was.
-        if let name = activeMode?.name, let edited = modes.mode(named: name), edited.name == name { activeMode = edited }
+    private func reloadModes() async {
+        let files = labeller.files
+        let loaded = await Task.detached(priority: .utility) { files.loadModes() }.value
+        modes = loaded
+        labeller.profileNames = tabs.orderedSpaces.filter { !$0.isAgent }.map(\.name)
+        if let name = activeMode?.name, let edited = modes.mode(named: name) { activeMode = edited }
     }
 
     // MARK: - Covering
@@ -175,14 +215,18 @@ final class FocusController {
     /// The cover for `session` now, or nil when the page may show.
     func cover(for session: PageSession) -> FocusCover? {
         guard let mode = activeMode, !session.isPrivate, !session.isAgentPage,
-              let url = normalizedActivityURL(session.url), !isInternalActivityURL(url),
-              !overridden.contains(url.absoluteString) else { return nil }
-        let label = labeller.label(for: url)
-        switch focusVerdict(for: url, label: label, mode: mode) {
-        case .allowed: return nil
-        case .covered: return FocusCover(mode: mode, label: label, url: url, canContinue: true)
-        case .blocked: return FocusCover(mode: mode, label: label, url: url, canContinue: false)
-        }
+              let url = normalizedActivityURL(session.url), !isInternalActivityURL(url) else { return nil }
+        let label = labeller.label(for: url), rule = labeller.rules.match(url)
+        if overridden.contains(url.absoluteString), !mode.isBlockedHost(url), rule == nil || rule?.handling == .judge { return nil }
+        let decision = sessionID.flatMap { labeller.goalDecision(session: $0, url: url) }
+        // Without a key, judged pages always pass, including cached answers from earlier in the run.
+        let verdict = focusVerdict(for: url, label: label, mode: mode, rule: rule, goalFit: labeller.hasJudgeKey ? decision : nil)
+        guard verdict != .allowed else { return nil }
+        let fixed = mode.isBlockedHost(url) || rule.map { $0.handling != .judge } == true
+        let by: AttentionEvent.DecidedBy = fixed ? .rule : .judge
+        let reason = by == .judge ? decision?.reason ?? "" : "This page is outside the rules for \(mode.name)."
+        return FocusCover(mode: mode, label: label, url: url, canContinue: verdict == .covered && by == .judge,
+                          reason: reason, decidedBy: by, confidence: by == .judge ? decision?.confidence : nil)
     }
 
     func register(_ session: PageSession) {
@@ -211,10 +255,11 @@ final class FocusController {
         guard let mode = activeMode, let cover = cover(for: session), cover.canContinue else { return }
         let reason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !reason.isEmpty else { return }
+        recordEvent(.continue, page: session, decidedBy: .you, reason: reason)
         overridden.insert(cover.url.absoluteString)
         let now = Date()
         let line = FocusOverride(at: activityTimestamp(now), mode: mode.name, url: cover.url.absoluteString,
-                                 title: session.title, reason: reason)
+                                 title: session.title, reason: reason, session: sessionID)
         let files = labeller.files, machine = machine
         queue.async {
             do { try files.appendOverride(line, machine: machine, date: now) }
@@ -222,17 +267,71 @@ final class FocusController {
         }
     }
 
+    /// Records a correction without changing permanent rules or dismissing the cover.
+    func wrongBlock() { if let page = activePage { wrongBlock(page) } }
+
+    func wrongBlock(_ page: PageSession) {
+        guard let cover = cover(for: page), cover.decidedBy == .judge else { return }
+        recordEvent(.wrongBlock, page: page, decidedBy: .you, reason: cover.reason, confidence: cover.confidence)
+    }
+
+    func wrongAllow() {
+        guard activeMode != nil, let page = activePage, !page.isPrivate, !page.isAgentPage,
+              let url = normalizedActivityURL(page.url), !isInternalActivityURL(url), cover(for: page) == nil else { return }
+        recordEvent(.wrongAllow, page: page, decidedBy: .you)
+    }
+
+    func blockSite(host: String) {
+        let host = host.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
+        guard !host.isEmpty, let page = activePage, !page.isPrivate, !page.isAgentPage,
+              page.url.host?.lowercased() == host else { return }
+        Task {
+            do {
+                try await labeller.blockSite(host: host)
+                overridden = overridden.filter { URL(string: $0)?.host?.lowercased() != host }
+                recordEvent(.blockSite, page: page, decidedBy: .you)
+            } catch { Self.log.error("Could not block site: \(String(describing: error), privacy: .public)") }
+        }
+    }
+
+    var activePage: PageSession? {
+        guard NSApp.isActive else { return nil }
+        if let window = tabs.allWindows.first(where: { $0.window?.isKeyWindow == true }),
+           let id = window.selectedItemID { return tabs.session(for: id) }
+        return detached.values.first { $0.webView?.window?.isKeyWindow == true }
+    }
+
+    private func recordEvent(_ kind: AttentionEvent.Kind, page: PageSession, decidedBy: AttentionEvent.DecidedBy,
+                             reason: String? = nil, confidence: Double? = nil) {
+        guard !page.isPrivate, !page.isAgentPage, let url = normalizedActivityURL(page.url), !isInternalActivityURL(url) else { return }
+        let now = Date()
+        writer.writeEvent(.init(at: activityTimestamp(now), session: sessionID, mode: activeMode?.name, kind: kind,
+                               url: url.absoluteString, title: page.title, site: url.host, decidedBy: decidedBy,
+                               confidence: confidence, reason: reason), machine: machine, date: now)
+    }
+
     private var watchedSessions: [PageSession] {
         tabs.sessions + detached.values.filter { candidate in !tabs.sessions.contains { $0 === candidate } }
     }
 
     private func observe() {
+        observationGeneration += 1
+        let generation = observationGeneration
+        var active: PageSession?
         let covers = withObservationTracking {
-            watchedSessions.map { ($0, cover(for: $0)) }
+            active = activePage
+            _ = goal; _ = sessionID; _ = labeller.hasJudgeKey
+            _ = labeller.rules; _ = labeller.goalDecisions
+            return watchedSessions.map { ($0, cover(for: $0)) }
         } onChange: { [weak self] in
-            Task { @MainActor in self?.observe() }
+            Task { @MainActor in
+                guard let self, self.observationGeneration == generation else { return }
+                self.observe()
+            }
         }
         apply(covers)
+        scheduleGoal(for: active)
+        recordVisibleDecision(for: active)
     }
 
     /// Side effects stay out of the tracked read so they cannot retrigger it.
@@ -247,14 +346,9 @@ final class FocusController {
                 lastCovered[session.itemID] = nil
                 if mutedByFocus.remove(session.itemID) != nil { session.setMuted(false) }
             }
-            scheduleLabel(for: session)
         }
         for id in mutedByFocus.subtracting(live) { mutedByFocus.remove(id) }
         for id in Set(lastCovered.keys).subtracting(live) { lastCovered[id] = nil }
-        for (id, pending) in pendingLabels where !live.contains(id) {
-            pending.task.cancel()
-            pendingLabels[id] = nil
-        }
     }
 
     private func silence(_ session: PageSession) {
@@ -266,25 +360,43 @@ final class FocusController {
         mutedByFocus.insert(session.itemID)
     }
 
-    /// While a mode is on, a page no rule decides is sent to JEV once it settles, so its title is
-    /// the page's own rather than the previous one's.
-    private func scheduleLabel(for session: PageSession) {
-        guard activeMode != nil, !session.isPrivate, !session.isAgentPage,
-              let url = normalizedActivityURL(session.url),
-              activityLabelNeedsJEV(url, rules: labeller.rules, remembered: labeller.remembered) else {
-            pendingLabels.removeValue(forKey: session.itemID)?.task.cancel()
+    /// Only the foreground page with a goal and a key gets a settle task.
+    private func scheduleGoal(for page: PageSession?) {
+        guard let mode = activeMode, let goal, let sessionID, labeller.hasJudgeKey,
+              let page, !page.isPrivate, !page.isAgentPage, let url = normalizedActivityURL(page.url),
+              !mode.isBlockedHost(url), !overridden.contains(url.absoluteString),
+              labeller.needsGoalDecision(session: sessionID, url: url) else {
+            pendingGoal?.cancel(); pendingGoal = nil; pendingGoalKey = nil
             return
         }
-        if pendingLabels[session.itemID]?.url == url { return }
-        pendingLabels[session.itemID]?.task.cancel()
-        let task = Task { [weak self, weak session] in
+        let key = sessionID + "|" + url.absoluteString + "|" + page.itemID.uuidString
+        guard pendingGoalKey != key else { return }
+        pendingGoal?.cancel(); pendingGoalKey = key
+        pendingGoal = Task { [weak self, weak page] in
             try? await Task.sleep(for: .seconds(1.5))
-            guard !Task.isCancelled, let self, let session,
-                  normalizedActivityURL(session.url) == url, !session.isPrivate else { return }
-            self.pendingLabels[session.itemID] = nil
-            self.labeller.request(url: url, title: session.title)
+            guard !Task.isCancelled, let self, let page, self.activePage === page,
+                  self.sessionID == sessionID, normalizedActivityURL(page.url) == url else { return }
+            _ = await self.labeller.requestGoal(session: sessionID, url: url, title: page.title, goal: goal, mode: mode.name)
+            guard !Task.isCancelled, self.sessionID == sessionID, self.activePage === page,
+                  normalizedActivityURL(page.url) == url else { return }
+            self.pendingGoal = nil; self.pendingGoalKey = nil
+            self.observe()
         }
-        pendingLabels[session.itemID] = (url, task)
+    }
+
+    private func recordVisibleDecision(for page: PageSession?) {
+        guard let sessionID, let page, !page.isPrivate, !page.isAgentPage,
+              let url = normalizedActivityURL(page.url) else { return }
+        let cover = cover(for: page)
+        let decision = labeller.goalDecision(session: sessionID, url: url)
+        let kind: AttentionEvent.Kind
+        if let cover { kind = cover.canContinue ? .cover : .block }
+        else if decision != nil, labeller.hasJudgeKey, !overridden.contains(url.absoluteString) { kind = .allowJudged }
+        else { return }
+        let key = sessionID + "|" + url.absoluteString + "|" + kind.rawValue
+        guard recordedDecisions.insert(key).inserted else { return }
+        recordEvent(kind, page: page, decidedBy: cover?.decidedBy ?? .judge, reason: cover?.reason ?? decision?.reason,
+                    confidence: cover?.confidence ?? decision?.confidence)
     }
 
     // MARK: - Keyboard
