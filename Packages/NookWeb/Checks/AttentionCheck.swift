@@ -49,6 +49,15 @@ import Foundation
         precondition(decisions.count == 20 && decisions[0].choice == .show && decisions[1].choice == .hide && decisions[2].choice == .show)
         precondition(FeedSitePreferences(mutedAccounts: ["@AUTHOR"]).hides(posts[0]))
         precondition(FeedSitePreferences(keywords: ["post"]).hides(posts[0]))
+        let fixedBatch = FeedPostBatch(posts: [posts[0], FeedPost(id: "keep", author: "other", text: "Keep")],
+                                       preferences: .init(mutedAccounts: ["author"]))
+        precondition(fixedBatch.posts.map(\.id) == ["keep"] && fixedBatch.fixed.map(\.id) == ["0"])
+        let fixedBody = String(decoding: try judge.feedBody(posts: fixedBatch.posts, preferences: ""), as: UTF8.self)
+        precondition(!fixedBody.contains("\"id\":\"0\"") && fixedBody.contains("Keep"))
+        let custom = try judge.labelBody(url: "https://fixed.test", title: "Title", profiles: ["Research", "Personal"])
+        precondition(String(decoding: custom, as: UTF8.self).contains("research"))
+        let customLabel = judge.pageLabel(from: Data(#"{"answers":[{"type":"choice","name":"profile","choice":"research","confidence":0.9,"reason":"Research paper"}]}"#.utf8), at: "now", profiles: ["research"])
+        precondition(customLabel?.profiles == ["research"] && customLabel?.confidence == 0.9 && customLabel?.reason == "Research paper")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("attention-check-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
         let files = ActivityFiles(directory: root)
@@ -95,6 +104,32 @@ import Foundation
         let encoded = try JSONEncoder().encode(report)
         let decoded = try decoder.decode(ActivityReport.self, from: encoded)
         precondition(decoded == report)
+        let cover = AttentionEvent(at: start, session: "s", kind: .cover, url: "https://judge.test/", decidedBy: .judge)
+        let wrongBlock = AttentionEvent(at: middle, session: "s", kind: .wrongBlock, url: "https://judge.test/", decidedBy: .you)
+        let covered = ActivityReport.make(records: [row("https://judge.test/", 600)], overrides: [], days: ["2026-11-10"],
+            rules: rules, remembered: [:], generatedAt: end, sessions: [session], events: [cover, wrongBlock], calendar: utc)
+        precondition(covered.sessions[0].onGoal == 0 && covered.sessions[0].offGoal == 0 && covered.sessions[0].wrongBlocks == 1)
+        let switched = AttentionSession(at: end, event: .switch, session: "s", mode: "Focus", goal: "Ship")
+        let continued = ActivityReport.make(records: [row("https://judge.test/", 600)], overrides: [], days: ["2026-11-10"],
+            rules: rules, remembered: [:], generatedAt: end, sessions: [session, switched], events: [cover, wrongBlock, event], calendar: utc)
+        precondition(continued.sessions[0].onGoal == 0 && continued.sessions[0].offGoal == 300 && continued.sessions[0].end == end)
+        var spanning = row("https://judge.test/", 600)
+        spanning.start = middle; spanning.end = "2026-11-10T11:30:00.000+00:00"
+        let hourly = ActivityReport.make(records: [spanning], overrides: [], days: ["2026-11-10"], rules: rules, remembered: [:], generatedAt: end, calendar: utc)
+        precondition(hourly.buckets[10].active == 300 && hourly.buckets[11].active == 300)
+        precondition(hourly.buckets[10].start == start)
+        let legacyReport = try decoder.decode(ActivityReport.self, from: Data(#"{"from":"2026-11-10","modes":[{"name":"Focus","seconds":15,"overrides":1}]}"#.utf8))
+        precondition(legacyReport.sessions.isEmpty && legacyReport.feeds.isEmpty && legacyReport.modes[0].active == 15)
+        try Data(#"{"note":"keep","rules":["broken",{"host":"keep.test","profiles":["work"]}]}"#.utf8).write(to: files.rulesURL)
+        let blocked = try files.blockSite(host: "block.test")
+        precondition(blocked.rules.count == 2 && blocked.rules[0].handling == .block && blocked.rules[0].source == .you)
+        let rawRules = try JSONSerialization.jsonObject(with: Data(contentsOf: files.rulesURL)) as! [String: Any]
+        precondition(rawRules["note"] as? String == "keep" && (rawRules["rules"] as? [Any])?.count == 3)
+        for offset in 0..<25 {
+            let at = date.addingTimeInterval(7200 + Double(offset))
+            try files.appendEvent(.init(at: activityTimestamp(at), kind: .wrongBlock, decidedBy: .you), machine: "Examples", date: at)
+        }
+        precondition(files.judgeExamples().count == 20 && parseActivityTimestamp(files.judgeExamples()[0].at) == date.addingTimeInterval(7224))
         let store = ActivityStateStore(directory: root)
         let state = try store.update { $0["goal"] = "Ship"; $0["sessionID"] = "s" }
         precondition(state["goal"] as? String == "Ship" && state["sessionID"] as? String == "s")

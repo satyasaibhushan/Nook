@@ -37,12 +37,14 @@ final class FocusController {
     @ObservationIgnored private var mutedByFocus: Set<UUID> = []
     @ObservationIgnored private var lastCovered: [UUID: URL] = [:]
     @ObservationIgnored private var pendingGoal: Task<Void, Never>?
+    @ObservationIgnored private var pendingGoalGeneration = 0
     @ObservationIgnored private var pendingGoalKey: String?
-    @ObservationIgnored private var recordedDecisions: Set<String> = []
+    @ObservationIgnored private var lastVisibleDecision: String?
     @ObservationIgnored private var observationGeneration = 0
     @ObservationIgnored private var transitionGeneration = 0
     @ObservationIgnored private var fileGeneration = 0
     @ObservationIgnored private var windowObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private let recorder: ActivityRecorder
     @ObservationIgnored private let writer: ActivityLogWriter
     @ObservationIgnored private var fileMonitors: [DispatchSourceFileSystemObject] = []
     @ObservationIgnored private var activationObserver: NSObjectProtocol?
@@ -59,6 +61,7 @@ final class FocusController {
 
     init(tabs: TabsController, recorder: ActivityRecorder) {
         self.tabs = tabs
+        self.recorder = recorder
         stateStore = recorder.stateStore
         writer = recorder.writer
         machine = recorder.machine
@@ -66,11 +69,12 @@ final class FocusController {
         Self.shared = self
         recorder.modeProvider = { [weak self] in self?.activeMode?.name }
         recorder.sessionProvider = { [weak self] in self?.sessionID }
+        let initialGeneration = transitionGeneration
         Task { [weak self] in
             guard let self else { return }
             await self.labeller.reload()
             await self.reloadModes()
-            await self.resume()
+            await self.resume(generation: initialGeneration)
             self.watchFiles()
         }
         observe()
@@ -149,7 +153,8 @@ final class FocusController {
 
     func end() {
         transitionGeneration += 1
-        guard activeMode != nil else { return }
+        guard activeMode != nil else { persist(); return }
+        recorder.flush {}
         logSession(.end)
         pendingGoal?.cancel(); pendingGoal = nil; pendingGoalKey = nil
         activeMode = nil; startedAt = nil; goal = nil; sessionID = nil; overridden = []
@@ -158,8 +163,9 @@ final class FocusController {
     }
 
     private func activate(_ mode: FocusMode, since: Date, goal: String?, sessionID: String, overrides: Set<String>) {
+        recorder.flush {}
         pendingGoal?.cancel(); pendingGoal = nil; pendingGoalKey = nil
-        labeller.clearGoalDecisions(); recordedDecisions = []
+        labeller.clearGoalDecisions(); lastVisibleDecision = nil
         activeMode = mode; startedAt = since; self.goal = goal; self.sessionID = sessionID; overridden = overrides
     }
 
@@ -170,7 +176,7 @@ final class FocusController {
     }
 
     private func persist() {
-        let name = activeMode?.name, started = startedAt.map(activityTimestamp), goal = goal, sessionID = sessionID
+        let name = activeMode?.name, started = startedAt.map { activityTimestamp($0) }, goal = goal, sessionID = sessionID
         let store = stateStore
         queue.async {
             do {
@@ -182,8 +188,9 @@ final class FocusController {
         }
     }
 
-    private func resume() async {
-        let store = stateStore, files = labeller.files, modes = modes, generation = transitionGeneration
+    private func resume(generation: Int) async {
+        guard transitionGeneration == generation else { return }
+        let store = stateStore, files = labeller.files, modes = modes
         let restored = await Task.detached(priority: .utility) { () -> (FocusMode, Date, String?, String, Set<String>)? in
             guard let state = try? store.read(), let name = state["mode"] as? String else { return nil }
             let started = (state["modeStartedAt"] as? String).flatMap(parseActivityTimestamp) ?? Date()
@@ -317,6 +324,8 @@ final class FocusController {
     private func recordEvent(_ kind: AttentionEvent.Kind, page: PageSession, decidedBy: AttentionEvent.DecidedBy,
                              reason: String? = nil, confidence: Double? = nil) {
         guard !page.isPrivate, !page.isAgentPage, let url = normalizedActivityURL(page.url), !isInternalActivityURL(url) else { return }
+        // Close the accounting row at a visible decision so goal time does not straddle it.
+        recorder.flush {}
         let now = Date()
         writer.writeEvent(.init(at: activityTimestamp(now), session: sessionID, mode: activeMode?.name, kind: kind,
                                url: url.absoluteString, title: page.title, site: url.host, decidedBy: decidedBy,
@@ -334,7 +343,7 @@ final class FocusController {
         let covers = withObservationTracking {
             active = activePage
             _ = goal; _ = sessionID; _ = labeller.hasJudgeKey
-            _ = labeller.rules; _ = labeller.goalDecisions
+            _ = labeller.rules; _ = labeller.goalDecisions; _ = labeller.goalRevision
             return watchedSessions.map { ($0, cover(for: $0)) }
         } onChange: { [weak self] in
             Task { @MainActor in
@@ -377,23 +386,31 @@ final class FocusController {
     private func scheduleGoal(for page: PageSession?) {
         guard let mode = activeMode, let goal, let sessionID, labeller.hasJudgeKey,
               let page, !page.isPrivate, !page.isAgentPage, let url = normalizedActivityURL(page.url),
-              !mode.isBlockedHost(url), !overridden.contains(url.absoluteString),
-              labeller.needsGoalDecision(session: sessionID, url: url) else {
+              !isInternalActivityURL(url), !mode.isBlockedHost(url), !overridden.contains(url.absoluteString),
+              labeller.rules.match(url).map({ $0.handling == .judge }) ?? true else {
             pendingGoal?.cancel(); pendingGoal = nil; pendingGoalKey = nil
             return
         }
         let key = sessionID + "|" + url.absoluteString + "|" + page.itemID.uuidString
+        // An unrelated observation must not cancel the foreground request once it has started.
         guard pendingGoalKey != key else { return }
-        pendingGoal?.cancel(); pendingGoalKey = key
+        pendingGoal?.cancel(); pendingGoal = nil; pendingGoalKey = nil
+        guard labeller.needsGoalDecision(session: sessionID, url: url) else { return }
+        pendingGoalGeneration += 1
+        let generation = pendingGoalGeneration
+        pendingGoalKey = key
         pendingGoal = Task { [weak self, weak page] in
+            guard let self else { return }
+            defer {
+                if self.pendingGoalGeneration == generation, self.pendingGoalKey == key {
+                    self.pendingGoal = nil; self.pendingGoalKey = nil
+                    self.observe()
+                }
+            }
             try? await Task.sleep(for: .seconds(1.5))
-            guard !Task.isCancelled, let self, let page, self.activePage === page,
+            guard !Task.isCancelled, let page, self.activePage === page,
                   self.sessionID == sessionID, normalizedActivityURL(page.url) == url else { return }
             _ = await self.labeller.requestGoal(session: sessionID, url: url, title: page.title, goal: goal, mode: mode.name)
-            guard !Task.isCancelled, self.sessionID == sessionID, self.activePage === page,
-                  normalizedActivityURL(page.url) == url else { return }
-            self.pendingGoal = nil; self.pendingGoalKey = nil
-            self.observe()
         }
     }
 
@@ -405,9 +422,10 @@ final class FocusController {
         let kind: AttentionEvent.Kind
         if let cover { kind = cover.canContinue ? .cover : .block }
         else if decision != nil, labeller.hasJudgeKey, !overridden.contains(url.absoluteString) { kind = .allowJudged }
-        else { return }
-        let key = sessionID + "|" + url.absoluteString + "|" + kind.rawValue
-        guard recordedDecisions.insert(key).inserted else { return }
+        else { lastVisibleDecision = nil; return }
+        let key = sessionID + "|" + page.itemID.uuidString + "|" + url.absoluteString + "|" + kind.rawValue
+        guard lastVisibleDecision != key else { return }
+        lastVisibleDecision = key
         recordEvent(kind, page: page, decidedBy: cover?.decidedBy ?? .judge, reason: cover?.reason ?? decision?.reason,
                     confidence: cover?.confidence ?? decision?.confidence)
     }

@@ -28,8 +28,8 @@ public enum ActivityJEV {
             "questions": [
                 [
                     "type": "choice",
-                    "name": "scope",
-                    "instructions": "Is this web page most likely visited for the person's job or for their personal life?",
+                    "name": "profile",
+                    "instructions": "Which of the person's profiles best describes this page? Use only the supplied profile names. Give a one-line reason.",
                     "choices": normalizedActivityProfiles(profiles).map { ["value": $0, "description": $0] },
                 ],
                 [
@@ -64,12 +64,14 @@ public enum ActivityJEV {
             guard let found = named ?? (positional?.name == nil ? positional : nil), found.type == "choice" else { return nil }
             return found
         }
-        guard let scopeAnswer = answer("scope", 0),
+        guard let scopeAnswer = answer("profile", 0) ?? answer("scope", 0),
               let profile = scopeAnswer.choice, normalizedActivityProfiles(profiles).contains(profile.lowercased()) else { return nil }
         let kindAnswer = answer("kind", 1)
         let kind = kindAnswer?.choice.flatMap(PageKind.init(rawValue:))
         let weak = [scopeAnswer.confidence, kind == nil ? nil : kindAnswer?.confidence]
             .contains { ($0 ?? 1) < confidenceFloor }
-        return PageLabel(profiles: [profile], kind: kind, source: .jev, unsure: weak, at: at)
+        let confidence = [scopeAnswer.confidence, kind == nil ? nil : kindAnswer?.confidence].compactMap { $0 }.min()
+        return PageLabel(profiles: [profile], kind: kind, source: .jev, unsure: weak, at: at,
+                         confidence: confidence, reason: scopeAnswer.reason ?? kindAnswer?.reason)
     }
 }

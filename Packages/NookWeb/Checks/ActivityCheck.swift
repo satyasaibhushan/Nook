@@ -74,10 +74,26 @@ import Foundation
         rows = engine.update(at: time(86410), pages: [page], lastInput: base, mode: nil)
         precondition(rows.count == 1 && rows[0].record.media == 10 && rows[0].fileName == "Mac-2026-11-10.jsonl")
         precondition(engine.checkpoint[0].record.media == 10 && engine.checkpoint[0].fileName == "Mac-2026-11-11.jsonl")
+        // Session changes split rows even when the mode and page stay the same.
+        var sessions = ActivityAccounting(machine: "Mac", calendar: calendar)
+        _ = sessions.update(at: time(86390), pages: [page], lastInput: time(86390), mode: "Work", session: "first")
+        let firstSession = sessions.update(at: time(86410), pages: [page], lastInput: time(86410), mode: "Work", session: "second")
+        precondition(firstSession.count == 2 && firstSession.allSatisfy { $0.record.session == "first" })
+        precondition(sessions.checkpoint.isEmpty)
+        let secondSession = sessions.update(at: time(86420), pages: [], lastInput: time(86410), mode: nil)
+        precondition(secondSession.count == 1 && secondSession[0].record.session == "second")
+        let sessionBytes = try JSONEncoder().encode(secondSession[0].record)
+        let sessionRow = try JSONDecoder().decode(ActivityRecord.self, from: sessionBytes)
+        precondition(sessionRow == secondSession[0].record)
+        var legacyRow = try JSONSerialization.jsonObject(with: sessionBytes) as! [String: Any]
+        legacyRow.removeValue(forKey: "session")
+        let oldRow = try JSONDecoder().decode(ActivityRecord.self, from: JSONSerialization.data(withJSONObject: legacyRow))
+        precondition(oldRow.session == nil)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = ActivityStateStore(directory: directory)
         let initial = try store.read()
+        precondition(initial["goal"] is NSNull && initial["sessionID"] is NSNull)
         precondition(initial["mode"] is NSNull && initial["modeStartedAt"] is NSNull && initial["recordingPaused"] as? Bool == false)
         try store.update { $0["mode"] = "Work"; $0["future"] = ["nested": [1, 2, 3]] }
         try ActivityStateStore(directory: directory).update { $0["recordingPaused"] = true }

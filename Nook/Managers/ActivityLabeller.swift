@@ -56,6 +56,7 @@ final class ActivityLabeller {
     private(set) var remembered: [String: PageLabel] = [:]
     private(set) var preferences = AttentionPreferences()
     private(set) var hasJudgeKey = false
+    private(set) var goalRevision = 0
     private(set) var goalDecisions: [String: GoalFitDecision] = [:]
     let files: ActivityFiles
 
@@ -90,7 +91,15 @@ final class ActivityLabeller {
         rulesDate = snapshot.3; labelsDate = snapshot.4; preferencesDate = snapshot.5; hasJudgeKey = snapshot.6
     }
 
-    func reloadIfChanged() async { await reload() }
+    func reloadIfChanged() async {
+        let files = files
+        let current = await Task.detached(priority: .utility) {
+            (files.modificationDate(files.rulesURL), files.modificationDate(files.labelsURL),
+             files.modificationDate(files.preferencesURL), JEVKeychain.hasKey)
+        }.value
+        if current.0 != rulesDate || current.1 != labelsDate || current.2 != preferencesDate { await reload() }
+        else if hasJudgeKey != current.3 { hasJudgeKey = current.3 }
+    }
 
     func goalDecision(session: String, url: URL) -> GoalFitDecision? {
         goalDecisions[goalKey(session: session, url: url)]
@@ -107,13 +116,17 @@ final class ActivityLabeller {
         if let cached = goalDecisions[cacheKey] { return cached }
         guard needsGoalDecision(session: session, url: url) else { return nil }
         goalAttempts.insert(cacheKey)
+        defer {
+            if Task.isCancelled { goalAttempts.remove(cacheKey); goalRevision += 1 }
+        }
         let config = preferences.judge, files = files
         let examples = await Task.detached(priority: .utility) { files.judgeExamples() }.value
         guard !Task.isCancelled, hasJudgeKey, rules.match(url).map({ $0.handling == .judge }) ?? true else { return nil }
-        let judge = Self.judge(for: config.provider)
+        let judge = config.provider.makeJudge()
         guard let body = try? judge.goalBody(url: url.absoluteString, title: title, goal: goal, mode: mode,
                                             examples: examples, config: config),
-              let data = await send(body: body) else { return nil }
+              let data = await send(body: body, endpoint: judge.endpoint) else { return nil }
+        guard !Task.isCancelled else { return nil }
         let answer = judge.goalDecision(from: data, confidenceFloor: config.confidenceFloor)
         goalDecisions[cacheKey] = answer
         return answer
@@ -122,10 +135,6 @@ final class ActivityLabeller {
     func clearGoalDecisions() { goalDecisions = [:]; goalAttempts = [] }
 
     private func goalKey(session: String, url: URL) -> String { session + "|" + (normalizedActivityURL(url) ?? url).absoluteString }
-
-    nonisolated private static func judge(for provider: ActivityJudgeProvider) -> any ActivityJudge {
-        switch provider { case .openAIDecisions: return OpenAIDecisionsJudge() }
-    }
 
     func blockSite(host: String) async throws {
         let files = files
@@ -197,18 +206,19 @@ final class ActivityLabeller {
         defer { Task { await gate.signal() } }
         let config = await preferences.judge
         let profiles = await knownProfiles
-        guard let body = try? ActivityJEV.requestBody(url: url, title: title, profiles: profiles, config: config),
-              let data = await send(body: body) else { return nil }
-        return ActivityJEV.label(from: data, at: activityTimestamp(Date()), profiles: profiles, confidenceFloor: config.confidenceFloor)
+        let judge = config.provider.makeJudge()
+        guard let body = try? judge.labelBody(url: url, title: title, profiles: profiles, config: config),
+              let data = await send(body: body, endpoint: judge.endpoint) else { return nil }
+        return judge.pageLabel(from: data, at: activityTimestamp(Date()), profiles: profiles, confidenceFloor: config.confidenceFloor)
     }
 
     /// Space names are supplied by FocusController, with legacy defaults for the report path.
     var profileNames: [String] = ["work", "personal"]
     private var knownProfiles: [String] { normalizedActivityProfiles(profileNames + rules.rules.flatMap(\.profiles)) }
 
-    nonisolated private func send(body: Data) async -> Data? {
+    nonisolated private func send(body: Data, endpoint: URL) async -> Data? {
         guard !Task.isCancelled, let key = JEVKeychain.key() else { return nil }
-        var request = URLRequest(url: ActivityJEV.endpoint, timeoutInterval: 3)
+        var request = URLRequest(url: endpoint, timeoutInterval: 3)
         request.httpMethod = "POST"
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

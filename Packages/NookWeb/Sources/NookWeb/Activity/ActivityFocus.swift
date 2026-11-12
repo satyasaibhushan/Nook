@@ -6,7 +6,7 @@ public struct FocusMode: Codable, Equatable, Sendable {
     public enum OffMode: String, Codable, Sendable { case friction, block }
     public var name: String
     public var description: String
-    /// Empty means any scope.
+    /// Empty means any profile.
     public var allowProfiles: [String]
     public var allowScopes: [PageScope] {
         get { allowProfiles.compactMap(PageScope.init(rawValue:)) }
@@ -145,9 +145,10 @@ public struct FocusOverride: Codable, Equatable, Sendable {
     }
 }
 
-public func activityTimestamp(_ date: Date) -> String {
+public func activityTimestamp(_ date: Date, timeZone: TimeZone = .current) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = timeZone
     formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSxxx"
     return formatter.string(from: date)
 }
