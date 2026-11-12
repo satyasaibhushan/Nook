@@ -1,0 +1,103 @@
+// Licensed under GPL-3.0. See LICENSE.
+// swiftc Packages/NookWeb/Sources/NookWeb/Activity/*.swift Packages/NookWeb/Checks/AttentionCheck.swift -o /tmp/attention-check && /tmp/attention-check
+
+import Foundation
+
+@main struct AttentionCheck {
+    static func main() throws {
+        let decoder = JSONDecoder()
+        let rules = try decoder.decode(ActivityRules.self, from: Data("""
+        {"rules":[{"host":"fixed.test","profiles":["Work","PERSONAL","work"],"kind":"reading"},
+          {"host":"judge.test","scope":"either"},{"host":"legacy.test","scope":"work"},
+          {"host":"block.test","handling":"block"},{"host":"allow.test","handling":"allow"}]}
+        """.utf8))
+        precondition(rules.rules[0].profiles == ["work", "personal"])
+        precondition(rules.rules[0].source == .you && rules.rules[0].handling == .profile)
+        precondition(rules.rules[1].handling == .judge && rules.rules[2].profiles == ["work"])
+        let mode = FocusMode(name: "Personal", allowProfiles: ["PERSONAL"])
+        func verdict(_ host: String, _ goal: GoalFitDecision? = nil) -> FocusVerdict {
+            let url = URL(string: "https://\(host)/")!
+            return focusVerdict(for: url, label: resolveActivityLabel(url, rules: rules, remembered: [:]), mode: mode,
+                                rule: rules.match(url), goalFit: goal)
+        }
+        precondition(verdict("fixed.test") == .allowed)
+        precondition(verdict("legacy.test") == .covered)
+        precondition(verdict("block.test") == .blocked && verdict("allow.test") == .allowed)
+        precondition(verdict("judge.test") == .allowed)
+        precondition(verdict("judge.test", GoalFitDecision(choice: .off, confidence: 0.9, reason: "Off goal")) == .covered)
+        precondition(!activityLabelNeedsJEV(URL(string: "https://fixed.test/")!, rules: rules, remembered: [:]))
+        let legacyMode = try decoder.decode(FocusMode.self, from: Data(#"{"name":"Work","allowScopes":["work"]}"#.utf8))
+        precondition(legacyMode.allowProfiles == ["work"] && legacyMode.askGoal && legacyMode.filterFeeds)
+        let label = try decoder.decode(PageLabel.self, from: Data(#"{"profiles":["WORK","Personal"],"confidence":0.8,"reason":"Both"}"#.utf8))
+        precondition(label.profiles == ["work", "personal"] && label.confidence == 0.8 && label.reason == "Both")
+        let preferences = try decoder.decode(AttentionPreferences.self, from: Data(#"{"judge":{"confidenceFloor":2},"sites":{"x.com":{"extra":"Less noise"},"bad":false}}"#.utf8))
+        precondition(preferences.judge.confidenceFloor == 1 && preferences.sites.count == 1 && preferences.enabled)
+        let judge = OpenAIDecisionsJudge()
+        func goal(_ choice: String, _ confidence: String) -> GoalFitDecision? {
+            judge.goalDecision(from: Data("{\"answers\":[{\"type\":\"choice\",\"name\":\"goalFit\",\"choice\":\"\(choice)\",\"confidence\":\(confidence),\"reason\":\"Reason\"}]}".utf8))
+        }
+        precondition(goal("off", "0.59")?.choice == .fits)
+        precondition(goal("off", "0.6")?.choice == .off && goal("fits", "1")?.reason == "Reason")
+        precondition(goal("other", "0.9") == nil && goal("off", "null") == nil && goal("off", "2") == nil)
+        precondition(judge.goalDecision(from: Data(#"{"answers":[{"type":"refusal"}]}"#.utf8)) == nil)
+        let body = try JSONSerialization.jsonObject(with: judge.goalBody(url: "https://judge.test", title: "Title", goal: "Ship", mode: "Focus")) as! [String: Any]
+        precondition((body["questions"] as? [[String: Any]])?.count == 1)
+        let posts = (0..<25).map { FeedPost(id: "\($0)", author: "author", text: "Post") }
+        let feed = try JSONSerialization.jsonObject(with: judge.feedBody(posts: posts, preferences: "No spam")) as! [String: Any]
+        precondition((feed["questions"] as? [[String: Any]])?.count == 20)
+        let decisions = judge.feedDecisions(from: Data(#"{"answers":[{"type":"choice","name":"post_1","choice":"hide","confidence":0.9,"reason":"Spam"},{"type":"choice","name":"post_0","choice":"hide","confidence":0.2}]}"#.utf8), posts: posts)
+        precondition(decisions.count == 20 && decisions[0].choice == .show && decisions[1].choice == .hide && decisions[2].choice == .show)
+        precondition(FeedSitePreferences(mutedAccounts: ["@AUTHOR"]).hides(posts[0]))
+        precondition(FeedSitePreferences(keywords: ["post"]).hides(posts[0]))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("attention-check-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = ActivityFiles(directory: root)
+        files.seed()
+        try files.savePreferences(preferences)
+        precondition(files.loadPreferences() == preferences)
+        let start = "2026-11-10T10:00:00.000+00:00", middle = "2026-11-10T10:30:00.000+00:00", end = "2026-11-10T11:00:00.000+00:00"
+        let session = AttentionSession(at: start, event: .start, session: "s", mode: "Focus", goal: "Ship")
+        let ended = AttentionSession(at: end, event: .end, session: "s", mode: "Focus", goal: "Ship")
+        let writer = ActivityLogWriter(directory: root)
+        let date = parseActivityTimestamp(start)!
+        writer.writeSession(session, machine: "Check", date: date)
+        writer.writeSession(ended, machine: "Check", date: date)
+        let event = AttentionEvent(at: middle, session: "s", mode: "Focus", kind: .continue, url: "https://judge.test/", decidedBy: .you, reason: "Needed")
+        writer.writeEvent(event, machine: "Check", date: date)
+        writer.writeEvent(.init(at: end, session: "s", kind: .wrongAllow, url: "https://wrong.test/", decidedBy: .you), machine: "Check", date: date)
+        writer.writeEvent(.init(at: start, kind: .feedHidden, site: "x.com", decidedBy: .judge, count: 4), machine: "Check", date: date)
+        writer.writeEvent(.init(at: start, kind: .feedWrong, site: "x.com", decidedBy: .you, count: 2), machine: "Check", date: date)
+        writer.writeEvent(.init(at: start, kind: .feedShow, site: "x.com", decidedBy: .you), machine: "Check", date: date)
+        let done = DispatchSemaphore(value: 0)
+        writer.drain { done.signal() }; done.wait()
+        precondition(files.loadSessions() == [session, ended] && files.loadEvents().first == event)
+        precondition(files.judgeExamples().count == 2)
+        try Data("bad\n{}\n".utf8).write(to: files.eventsDirectory.appendingPathComponent("bad.jsonl"))
+        precondition(files.loadEvents().count == 5)
+        func row(_ url: String, _ active: Double) -> ActivityRecord {
+            ActivityRecord(start: start, end: end, machine: "Check", space: "Work", url: url, title: "Title", active: active,
+                           media: 60, background: false, mode: "Focus", session: "s")
+        }
+        var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
+        let report = ActivityReport.make(records: [row("https://judge.test/", 600), row("https://wrong.test/", 120)], overrides: [],
+            days: ["2026-11-10"], rules: rules, remembered: [:], generatedAt: end, sessions: files.loadSessions(), events: files.loadEvents(), calendar: utc)
+        precondition(report.sessions.count == 1 && report.sessions[0].active == 720)
+        precondition(report.sessions[0].onGoal == 300 && report.sessions[0].offGoal == 420)
+        precondition(report.sessions[0].continued == 1 && report.sessions[0].wrongAllows == 1)
+        precondition(report.sessions[0].end == end && report.sessions[0].goal == "Ship")
+        precondition(report.modes[0].sessions == 1 && report.modes[0].onGoal == 300)
+        precondition(report.buckets.count == 24 && report.buckets.reduce(0) { $0 + $1.active } == 720)
+        precondition(report.buckets.reduce(0) { $0 + $1.media } == 120)
+        precondition(report.feeds.count == 1 && report.feeds[0].hidden == 4 && report.feeds[0].shown == 1 && report.feeds[0].wrong == 2)
+        let daily = ActivityReport.make(records: [row("https://judge.test/", 600)], overrides: [], days: ["2026-11-10", "2026-11-11"],
+            rules: rules, remembered: [:], generatedAt: end, calendar: utc)
+        precondition(daily.buckets.count == 2 && daily.buckets[0].active == 600)
+        let encoded = try JSONEncoder().encode(report)
+        let decoded = try decoder.decode(ActivityReport.self, from: encoded)
+        precondition(decoded == report)
+        let store = ActivityStateStore(directory: root)
+        let state = try store.update { $0["goal"] = "Ship"; $0["sessionID"] = "s" }
+        precondition(state["goal"] as? String == "Ship" && state["sessionID"] as? String == "s")
+        print("AttentionCheck passed")
+    }
+}

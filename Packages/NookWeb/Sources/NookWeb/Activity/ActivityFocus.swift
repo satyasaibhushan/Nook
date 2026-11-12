@@ -7,7 +7,19 @@ public struct FocusMode: Codable, Equatable, Sendable {
     public var name: String
     public var description: String
     /// Empty means any scope.
-    public var allowScopes: [PageScope]
+    public var allowProfiles: [String]
+    public var allowScopes: [PageScope] {
+        get { allowProfiles.compactMap(PageScope.init(rawValue:)) }
+        set { allowProfiles = newValue.filter { $0 != .either }.map(\.rawValue) }
+    }
+    public var askGoal: Bool
+    public var goalPrompt: String
+    public var filterFeeds: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case name, description, allowProfiles, allowKinds, offMode, blockHosts, forceTweaks, askGoal, goalPrompt, filterFeeds
+    }
+    private enum LegacyKeys: String, CodingKey { case allowScopes }
     /// Empty means any kind.
     public var allowKinds: [PageKind]
     public var offMode: OffMode
@@ -17,15 +29,29 @@ public struct FocusMode: Codable, Equatable, Sendable {
 
     public init(name: String, description: String = "", allowScopes: [PageScope] = [], allowKinds: [PageKind] = [],
                 offMode: OffMode = .friction, blockHosts: [String] = [], forceTweaks: [String] = []) {
-        self.name = name; self.description = description; self.allowScopes = allowScopes; self.allowKinds = allowKinds
+        self.name = name; self.description = description; self.allowProfiles = allowScopes.filter { $0 != .either }.map(\.rawValue); self.allowKinds = allowKinds
         self.offMode = offMode; self.blockHosts = blockHosts; self.forceTweaks = forceTweaks
+        askGoal = true; goalPrompt = "What are you working on?"; filterFeeds = true
+    }
+
+    public init(name: String, description: String = "", allowProfiles: [String], allowKinds: [PageKind] = [],
+                offMode: OffMode = .friction, blockHosts: [String] = [], forceTweaks: [String] = [],
+                askGoal: Bool = true, goalPrompt: String = "What are you working on?", filterFeeds: Bool = true) {
+        self.name = name; self.description = description; self.allowProfiles = normalizedActivityProfiles(allowProfiles)
+        self.allowKinds = allowKinds; self.offMode = offMode; self.blockHosts = blockHosts; self.forceTweaks = forceTweaks
+        self.askGoal = askGoal; self.goalPrompt = goalPrompt; self.filterFeeds = filterFeeds
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
         description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""
-        allowScopes = try c.decodeIfPresent([PageScope].self, forKey: .allowScopes) ?? []
+        let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+        allowProfiles = normalizedActivityProfiles((try? c.decode([String].self, forKey: .allowProfiles))
+            ?? (try? legacy.decode([PageScope].self, forKey: .allowScopes))?.filter { $0 != .either }.map(\.rawValue) ?? [])
+        askGoal = (try? c.decode(Bool.self, forKey: .askGoal)) ?? true
+        goalPrompt = (try? c.decode(String.self, forKey: .goalPrompt)) ?? "What are you working on?"
+        filterFeeds = (try? c.decode(Bool.self, forKey: .filterFeeds)) ?? true
         allowKinds = try c.decodeIfPresent([PageKind].self, forKey: .allowKinds) ?? []
         offMode = (try? c.decodeIfPresent(OffMode.self, forKey: .offMode)) ?? .friction
         blockHosts = try c.decodeIfPresent([String].self, forKey: .blockHosts) ?? []
@@ -83,10 +109,26 @@ public func focusVerdict(for url: URL, label: ResolvedLabel?, mode: FocusMode) -
     guard !isInternalActivityURL(url) else { return .allowed }
     if mode.isBlockedHost(url) { return .blocked }
     guard let label, !label.unsure else { return .allowed }
-    let scopeFits = mode.allowScopes.isEmpty || label.scope == .either || mode.allowScopes.contains(label.scope)
+    let scopeFits = mode.allowProfiles.isEmpty || label.profiles.isEmpty
+        || !Set(normalizedActivityProfiles(mode.allowProfiles)).isDisjoint(with: normalizedActivityProfiles(label.profiles))
     let kindFits = mode.allowKinds.isEmpty || label.kind.map(mode.allowKinds.contains) ?? true
     if scopeFits && kindFits { return .allowed }
     return mode.offMode == .block ? .blocked : .covered
+}
+
+/// Fixed rules take precedence over remembered labels and goal answers.
+public func focusVerdict(for url: URL, label: ResolvedLabel?, mode: FocusMode,
+                         rule: ActivityRule?, goalFit: GoalFitDecision? = nil) -> FocusVerdict {
+    guard !isInternalActivityURL(url) else { return .allowed }
+    if mode.isBlockedHost(url) { return .blocked }
+    switch rule?.handling {
+    case .block: return .blocked
+    case .allow: return .allowed
+    case .profile: return focusVerdict(for: url, label: label, mode: mode)
+    case .judge, nil:
+        guard let goalFit else { return .allowed }
+        return goalFit.choice == .fits ? .allowed : (mode.offMode == .block ? .blocked : .covered)
+    }
 }
 
 /// One "Continue anyway", appended to Overrides/<machine>-YYYY-MM-DD.jsonl.
@@ -96,9 +138,10 @@ public struct FocusOverride: Codable, Equatable, Sendable {
     public var url: String
     public var title: String
     public var reason: String
+    public var session: String?
 
-    public init(at: String, mode: String, url: String, title: String, reason: String) {
-        self.at = at; self.mode = mode; self.url = url; self.title = title; self.reason = reason
+    public init(at: String, mode: String, url: String, title: String, reason: String, session: String? = nil) {
+        self.at = at; self.mode = mode; self.url = url; self.title = title; self.reason = reason; self.session = session
     }
 }
 
@@ -138,6 +181,7 @@ public struct ActivityFiles: Sendable {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         writeIfAbsent(ActivityRules.seed, to: rulesURL)
         writeIfAbsent(FocusModes.seed, to: modesURL)
+        writeIfAbsent(AttentionPreferences(), to: preferencesURL)
     }
 
     private func writeIfAbsent<T: Encodable>(_ value: T, to url: URL) {
@@ -192,19 +236,7 @@ public struct ActivityFiles: Sendable {
     }
 
     public func appendOverride(_ line: FocusOverride, machine: String, date: Date, calendar: Calendar = .current) throws {
-        let name = activityLogFileName(machine: machine, start: date, calendar: calendar)
-        try FileManager.default.createDirectory(at: overridesDirectory, withIntermediateDirectories: true)
-        let url = overridesDirectory.appendingPathComponent(name)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let data = try encoder.encode(line) + Data("\n".utf8)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: data)
+        try appendLine(line, in: overridesDirectory, machine: machine, date: date, calendar: calendar)
     }
 
     /// Every override line in Overrides, from all machines, skipping lines that do not parse.

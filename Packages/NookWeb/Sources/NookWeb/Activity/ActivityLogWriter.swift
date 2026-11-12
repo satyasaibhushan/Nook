@@ -177,3 +177,13 @@ public final class ActivityLogWriter: @unchecked Sendable {
         try saveJournal()
     }
 }
+
+// These share the activity writer's serial queue and drain boundary.
+extension ActivityLogWriter {
+    public func writeSession(_ line: AttentionSession, machine: String, date: Date = Date()) {
+        queue.async { self.perform { try ActivityFiles(directory: self.directory).appendSession(line, machine: machine, date: date) } }
+    }
+    public func writeEvent(_ line: AttentionEvent, machine: String, date: Date = Date()) {
+        queue.async { self.perform { try ActivityFiles(directory: self.directory).appendEvent(line, machine: machine, date: date) } }
+    }
+}
