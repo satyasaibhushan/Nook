@@ -105,8 +105,8 @@ public struct SpaceTab: View, Equatable {
                     .frame(width: NookDesign.Size.favicon, height: NookDesign.Size.favicon)
                     .clipShape(NookDesign.Radius.shape(NookDesign.Radius.xs))
                     .overlay(alignment: .bottomTrailing) {
-                        // The tab DevMCP page tools act on.
-                        if tabs.agentItemID == item.id {
+                        // A tab some DevMCP agent's tools act on.
+                        if tabs.isAgentCurrentTab(item.id) {
                             Image(systemName: "sparkle")
                                 .font(NookDesign.Font.micro)
                                 .foregroundStyle(.primary)
