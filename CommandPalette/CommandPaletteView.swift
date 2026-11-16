@@ -274,9 +274,6 @@ struct CommandPaletteView: View {
             if isVisible {
                 text = newValue
                 userTypedText = newValue
-                DispatchQueue.main.async {
-                    isSearchFocused = true
-                }
             }
         }
     }
