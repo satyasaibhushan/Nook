@@ -1,4 +1,7 @@
 import unittest
+import json
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -35,6 +38,47 @@ class CalibrationTests(unittest.TestCase):
         self.raw["frames"][0]["t"] = 9.7
         with self.assertRaisesRegex(uibench.Invalid, "synthetic calibration failed"):
             self.validate()
+
+
+class HelperOptionsTests(unittest.TestCase):
+    def setUp(self):
+        self.helper_patch = patch.object(uibench, "HELPER")
+        self.timeout_patch = patch.object(uibench, "HELPER_TIMEOUT")
+        self.helper_patch.start()
+        self.timeout_patch.start()
+        self.addCleanup(self.helper_patch.stop)
+        self.addCleanup(self.timeout_patch.stop)
+
+    def test_custom_helper_is_not_rebuilt_and_uses_requested_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory)/"approved-capture"
+            helper.write_text("#!/bin/sh\nexit 0\n")
+            helper.chmod(0o700)
+            with patch.object(uibench, "run", return_value=json.dumps({"screen": False})) as run:
+                result = uibench.main([
+                    "--out", str(Path(directory)/"out.json"), "--only", "keyboard",
+                    "--helper-path", str(helper), "--helper-timeout", "650",
+                ])
+            self.assertEqual(result, 1)
+            run.assert_called_once_with([helper.resolve(), "permissions"], timeout=650)
+
+    def test_rejects_missing_or_nonexecutable_helper_before_running_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory)/"not-executable"
+            for exists in (False, True):
+                if exists:
+                    helper.write_text("#!/bin/sh\n")
+                with self.subTest(exists=exists), patch.object(uibench, "run") as run:
+                    with self.assertRaises(SystemExit), patch("sys.stderr"):
+                        uibench.main(["--out", "unused.json", "--helper-path", str(helper)])
+                    run.assert_not_called()
+
+    def test_rejects_nonpositive_or_nonfinite_timeout_before_running_commands(self):
+        for value in ("0", "-1", "nan", "inf"):
+            with self.subTest(value=value), patch.object(uibench, "run") as run:
+                with self.assertRaises(SystemExit), patch("sys.stderr"):
+                    uibench.main(["--out", "unused.json", "--helper-timeout", value])
+                run.assert_not_called()
 
 
 if __name__ == "__main__":
