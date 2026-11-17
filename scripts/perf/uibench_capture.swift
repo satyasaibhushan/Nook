@@ -291,7 +291,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             let a = Array(CommandLine.arguments.dropFirst())
             guard let command = a.first else { throw NSError(domain: "missing command", code: 1) }
             if command == "permissions" {
-                emit(["screen": CGPreflightScreenCaptureAccess(), "accessibility": AXIsProcessTrusted(), "post_events": CGPreflightPostEventAccess()]); return
+                let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+                let unlocked = session != nil && session?["CGSSessionScreenIsLocked"] as? Bool != true
+                emit(["screen": CGPreflightScreenCaptureAccess(), "accessibility": AXIsProcessTrusted(), "post_events": CGPreflightPostEventAccess(), "unlocked": unlocked]); return
             }
             if command == "front" {
                 emit(["pid": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1]); return
