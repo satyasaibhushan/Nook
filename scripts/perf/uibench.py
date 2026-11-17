@@ -28,6 +28,9 @@ import bench
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("uibench_capture.swift")
 HELPER = ROOT / "build/hillclimb/bin/uibench-capture"
+VIDEO = ROOT / "build/hillclimb/bin/loop.mp4"
+DEFAULT_HELPER_TIMEOUT = 40
+HELPER_TIMEOUT = DEFAULT_HELPER_TIMEOUT
 SCENARIOS = ["keyboard", "click", "command", "navigate", "close", "sidebar_hide", "sidebar_show", "activate", "link", "scroll"]
 ALIASES = dict(zip("abcdefghi", ["keyboard","click","command","navigate","close","sidebar_hide","activate","link","scroll"]))
 COLORS = {"red": "#bd3645", "blue": "#285ea8", "green": "#269454"}
@@ -77,7 +80,7 @@ def run(args, timeout=40):
 
 
 def helper(command, *args):
-    result = json.loads(run([HELPER, command, *args]))
+    result = json.loads(run([HELPER, command, *args], timeout=HELPER_TIMEOUT))
     if isinstance(result, dict) and result.get("error"):
         raise Invalid(result["error"])
     return result
@@ -222,8 +225,7 @@ class Handler(bench.Handler):
             return super().do_GET()
         kind = url.path.split("/")[-1]
         if kind == "video.mp4":
-            video = ROOT / "build/hillclimb/bin/loop.mp4"
-            return self.reply("video/mp4", video.read_bytes()) if video.exists() else self.reply("text/plain", "unavailable", 404)
+            return self.reply("video/mp4", VIDEO.read_bytes()) if VIDEO.exists() else self.reply("text/plain", "unavailable", 404)
         q = urllib.parse.parse_qs(url.query)
         ident = q.get("id", ["unknown"])[0]
         color = q.get("color", ["red"])[0]
@@ -538,12 +540,12 @@ class Browser:
 def validation(browser, record):
     ident = browser.page(kind="validate")
     w = window(browser.pid)["kCGWindowBounds"]
-    wall_offset = time.time()-time.monotonic()
     raw = capture(browser.pid, [{"kind": "click", "x": w["X"]+w["Width"]*.7,
                                 "y": w["Y"]+w["Height"]*.7, "at": .5}], 2, record)
     event = Handler.events.get((ident, "color"))
     if not event:
         raise Invalid("synthetic color-change beacon missing")
+    wall_offset = raw["clock"]["wall_seconds"]-raw["clock"]["host_seconds"]
     known = event["wall"]/1000-wall_offset
     first = next((f["t"] for f in raw["frames"] if f.get("green", 0) > .2), None)
     delta = (first-known)*1000 if first else None
@@ -846,8 +848,7 @@ def resource_scenarios(browser, allow_arc_quit=False):
                 result["idle_10_tabs"] = {"status":"discarded","reason":str(error)}
     for _ in range(20):
         browser.close_tab(); time.sleep(.08)
-    video = ROOT / "build/hillclimb/bin/loop.mp4"
-    if video.exists():
+    if VIDEO.exists():
         ident = browser.page(kind="video", new=True)
         act(browser.click(browser.locate("Start local video", {"AXButton"})))
         time.sleep(2)
@@ -1014,7 +1015,8 @@ def markdown(result):
     return "\n".join(lines)+"\n"
 
 
-def main():
+def main(argv=None):
+    global HELPER, HELPER_TIMEOUT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browsers", default="nook,arc,zen,chrome")
     parser.add_argument("--only", default=",".join(SCENARIOS+["cold", "resources", "shots"]),
@@ -1025,10 +1027,20 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--wait-build", type=int, default=1800)
+    parser.add_argument("--helper-path", type=Path, help="use an existing executable capture helper instead of building the bundled helper")
+    parser.add_argument("--helper-timeout", type=float, default=DEFAULT_HELPER_TIMEOUT,
+                        help=f"helper command timeout in seconds, default: {DEFAULT_HELPER_TIMEOUT}; cold-launch capture retains its 15-second limit")
     parser.add_argument("--signposts", type=Path, help="stream Nook.Perf events as ndjson during this invocation")
     parser.add_argument("--sample-main", action="store_true", help="collect a 1 ms process stack sample alongside each recorded trial")
     parser.add_argument("--allow-arc-quit",action="store_true",help="explicitly allow graceful Arc restarts for cold launch and resource measurements; leave it running afterward")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.helper_timeout) or args.helper_timeout <= 0:
+        parser.error("--helper-timeout must be a finite positive number")
+    HELPER_TIMEOUT = args.helper_timeout
+    if args.helper_path:
+        HELPER = args.helper_path.expanduser().resolve()
+        if not HELPER.is_file() or not os.access(HELPER, os.X_OK):
+            parser.error("--helper-path must name an existing executable file")
     if args.runs < 10:
         parser.error("at least 10 repetitions are required")
     names = args.browsers.split(",")
@@ -1039,11 +1051,13 @@ def main():
         only.remove("sidebar"); only.update(("sidebar_show","sidebar_hide"))
     if only-set(SCENARIOS+["cold", "resources", "shots"]):
         parser.error("unknown scenario")
-    HELPER.parent.mkdir(parents=True, exist_ok=True)
-    if not HELPER.exists() or HELPER.stat().st_mtime < SOURCE.stat().st_mtime:
-        run(["swiftc", "-O", "-parse-as-library", SOURCE, "-o", HELPER], timeout=120)
-    if "resources" in only and not (HELPER.parent/"loop.mp4").exists():
-        helper("video", HELPER.parent/"loop.mp4")
+    if not args.helper_path:
+        HELPER.parent.mkdir(parents=True, exist_ok=True)
+        if not HELPER.exists() or HELPER.stat().st_mtime < SOURCE.stat().st_mtime:
+            run(["swiftc", "-O", "-parse-as-library", SOURCE, "-o", HELPER], timeout=120)
+    if "resources" in only and not VIDEO.exists():
+        VIDEO.parent.mkdir(parents=True, exist_ok=True)
+        helper("video", VIDEO)
     permissions = helper("permissions")
     result = {"label": args.label, "when": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "method": {"fps": 60, "sample_grid": [160,100], "change_fraction": .0015,
