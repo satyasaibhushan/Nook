@@ -538,12 +538,12 @@ class Browser:
 def validation(browser, record):
     ident = browser.page(kind="validate")
     w = window(browser.pid)["kCGWindowBounds"]
-    wall_offset = time.time()-time.monotonic()
     raw = capture(browser.pid, [{"kind": "click", "x": w["X"]+w["Width"]*.7,
                                 "y": w["Y"]+w["Height"]*.7, "at": .5}], 2, record)
     event = Handler.events.get((ident, "color"))
     if not event:
         raise Invalid("synthetic color-change beacon missing")
+    wall_offset = raw["clock"]["wall_seconds"]-raw["clock"]["host_seconds"]
     known = event["wall"]/1000-wall_offset
     first = next((f["t"] for f in raw["frames"] if f.get("green", 0) > .2), None)
     delta = (first-known)*1000 if first else None
