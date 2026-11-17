@@ -28,7 +28,9 @@ import bench
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("uibench_capture.swift")
 HELPER = ROOT / "build/hillclimb/bin/uibench-capture"
-HELPER_TIMEOUT = 40
+VIDEO = ROOT / "build/hillclimb/bin/loop.mp4"
+DEFAULT_HELPER_TIMEOUT = 40
+HELPER_TIMEOUT = DEFAULT_HELPER_TIMEOUT
 SCENARIOS = ["keyboard", "click", "command", "navigate", "close", "sidebar_hide", "sidebar_show", "activate", "link", "scroll"]
 ALIASES = dict(zip("abcdefghi", ["keyboard","click","command","navigate","close","sidebar_hide","activate","link","scroll"]))
 COLORS = {"red": "#bd3645", "blue": "#285ea8", "green": "#269454"}
@@ -223,8 +225,7 @@ class Handler(bench.Handler):
             return super().do_GET()
         kind = url.path.split("/")[-1]
         if kind == "video.mp4":
-            video = ROOT / "build/hillclimb/bin/loop.mp4"
-            return self.reply("video/mp4", video.read_bytes()) if video.exists() else self.reply("text/plain", "unavailable", 404)
+            return self.reply("video/mp4", VIDEO.read_bytes()) if VIDEO.exists() else self.reply("text/plain", "unavailable", 404)
         q = urllib.parse.parse_qs(url.query)
         ident = q.get("id", ["unknown"])[0]
         color = q.get("color", ["red"])[0]
@@ -579,7 +580,7 @@ def cold_launch(name, path, runs, record, allow_arc_quit=False):
                 time.sleep(.25)
                 browser.launch(normalize=False,prepare=False)
                 start = browser.launch_time
-                output, errors = process.communicate(timeout=HELPER_TIMEOUT)
+                output, errors = process.communicate(timeout=15)
                 if process.returncode:
                     raise Invalid(errors or output)
                 raw = json.loads(output)
@@ -847,8 +848,7 @@ def resource_scenarios(browser, allow_arc_quit=False):
                 result["idle_10_tabs"] = {"status":"discarded","reason":str(error)}
     for _ in range(20):
         browser.close_tab(); time.sleep(.08)
-    video = ROOT / "build/hillclimb/bin/loop.mp4"
-    if video.exists():
+    if VIDEO.exists():
         ident = browser.page(kind="video", new=True)
         act(browser.click(browser.locate("Start local video", {"AXButton"})))
         time.sleep(2)
@@ -1028,7 +1028,8 @@ def main(argv=None):
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--wait-build", type=int, default=1800)
     parser.add_argument("--helper-path", type=Path, help="use an existing executable capture helper instead of building the bundled helper")
-    parser.add_argument("--helper-timeout", type=float, default=40, help="capture helper subprocess timeout in seconds, default: 40")
+    parser.add_argument("--helper-timeout", type=float, default=DEFAULT_HELPER_TIMEOUT,
+                        help=f"helper command timeout in seconds, default: {DEFAULT_HELPER_TIMEOUT}; cold-launch capture retains its 15-second limit")
     parser.add_argument("--signposts", type=Path, help="stream Nook.Perf events as ndjson during this invocation")
     parser.add_argument("--sample-main", action="store_true", help="collect a 1 ms process stack sample alongside each recorded trial")
     parser.add_argument("--allow-arc-quit",action="store_true",help="explicitly allow graceful Arc restarts for cold launch and resource measurements; leave it running afterward")
@@ -1054,8 +1055,9 @@ def main(argv=None):
         HELPER.parent.mkdir(parents=True, exist_ok=True)
         if not HELPER.exists() or HELPER.stat().st_mtime < SOURCE.stat().st_mtime:
             run(["swiftc", "-O", "-parse-as-library", SOURCE, "-o", HELPER], timeout=120)
-    if "resources" in only and not (HELPER.parent/"loop.mp4").exists():
-        helper("video", HELPER.parent/"loop.mp4")
+    if "resources" in only and not VIDEO.exists():
+        VIDEO.parent.mkdir(parents=True, exist_ok=True)
+        helper("video", VIDEO)
     permissions = helper("permissions")
     result = {"label": args.label, "when": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "method": {"fps": 60, "sample_grid": [160,100], "change_fraction": .0015,
