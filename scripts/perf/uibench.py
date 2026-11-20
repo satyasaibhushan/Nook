@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Compare native browser UI from visible, timestamped 60 Hz display capture.
 
-Requires macOS Screen Recording and Accessibility permissions. Uses only Python's
-standard library and a Swift helper, built into build/hillclimb/bin on demand.
-No browser automation protocol supplies the latency measurements.
+Runs preflight, desktop capture and offline analysis by default. Use --phase
+preflight, --phase capture or --phase analyze with the same --out path to run
+the phases separately. Only capture uses the browser. --ax-mode none uses fresh
+profiles, native window metadata and fixture beacons, with no target-app AX calls.
 """
+from collections import Counter
 import argparse
 import base64
 import ctypes
@@ -13,7 +15,6 @@ import math
 import os
 from pathlib import Path
 import plistlib
-import shutil
 import statistics
 import subprocess
 import sys
@@ -24,6 +25,10 @@ import urllib.parse
 import uuid
 
 import bench
+from experiment import (CAPTURE_FREE_GIB, LOCK_WAIT, MAX_LOAD1, Interrupted, Invalid,
+                        check_evidence, check_load, cooperative_signals, disk_headroom,
+                        exclusive, finish_on_interrupt)
+from uibench_evidence import Evidence, event_clock, recognize_input, validate_timeline, write_atomic, write_json
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(__file__).with_name("uibench_capture.swift")
@@ -38,7 +43,19 @@ KEYS = {"t": 17, "w": 13, "l": 37, "s": 1, "f": 3, "j": 38, "a": 0,
         "return": 36, "escape": 53, "tab": 48, "home": 115, "backspace":51, ",": 43}
 
 
-class Invalid(RuntimeError):
+BUNDLED_HELPER = HELPER
+OCR_TIMEOUT = 12
+OCR_BUDGET = 120
+INPUT_PROBE = "NOKPROBE"
+AX_ONLY_SCENARIOS = {"click", "link", "sidebar_hide", "sidebar_show", "resources", "shots"}
+WINDOW_KEYS = ("X", "Y", "Width", "Height")
+
+
+class InstrumentationUnavailable(Invalid):
+    pass
+
+
+class Obstruction(Invalid):
     pass
 
 
@@ -47,6 +64,8 @@ class OwnedProcess:
     def __init__(self, pid):
         self.pid = pid
         self.identity = run(["ps","-p",pid,"-o","lstart=,comm="]).strip()
+        if not self.identity:
+            raise Invalid(f"ps could not identify process {pid}")
 
     def poll(self):
         identity = subprocess.run(["ps","-p",str(self.pid),"-o","lstart=,comm="], capture_output=True, text=True).stdout.strip()
@@ -72,24 +91,22 @@ def log(text):
     print(text, file=sys.stderr, flush=True)
 
 
-def run(args, timeout=40):
-    result = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=timeout)
+def run(args, timeout=40, **kwargs):
+    result = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=timeout, **kwargs)
     if result.returncode:
         raise Invalid(f"{Path(str(args[0])).name}: {result.stderr.strip() or result.stdout.strip()}")
     return result.stdout
 
 
-def helper(command, *args):
-    result = json.loads(run([HELPER, command, *args], timeout=HELPER_TIMEOUT))
+def helper(command, *args, timeout=None, **kwargs):
+    result = json.loads(run([HELPER, command, *args], timeout=HELPER_TIMEOUT if timeout is None else timeout, **kwargs))
     if isinstance(result, dict) and result.get("error"):
         raise Invalid(result["error"])
     return result
 
 
 def spec_call(command, spec):
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
-        json.dump(spec, f); f.flush()
-        return helper(command, f.name)
+    return helper(command, "-", input=json.dumps(spec))
 
 
 def key(name, *flags, at=0.5):
@@ -101,11 +118,18 @@ KEYBOARD_OWNER = None
 
 
 def guarded(actions):
-    return [{**a, "guard": KEYBOARD_OWNER} if KEYBOARD_OWNER and a.get("kind") in ("key", "text") else a for a in actions]
+    return [{**a, "guard": KEYBOARD_OWNER} if KEYBOARD_OWNER and a.get("kind")
+             in {"key", "text", "click", "move", "scroll"} else a for a in actions]
 
 
-def act(*actions):
-    return spec_call("action", guarded(actions))
+def act(*actions, require_window=True):
+    if KEYBOARD_OWNER and any(a["kind"] in {"key", "text", "click", "scroll"} for a in actions):
+        if require_window or window(KEYBOARD_OWNER):
+            wait_for_clear_window(KEYBOARD_OWNER)
+    events = spec_call("action", guarded(actions))
+    if any(e.get("posted") is False for e in events):
+        raise Invalid("setup input was withheld because the owned browser lost focus")
+    return events
 
 
 def text(value):
@@ -122,10 +146,75 @@ def processes():
     return rows
 
 
-def window(pid):
-    return next((w for w in helper("windows") if w.get("kCGWindowOwnerPID") == pid
+def target_window(pid, rows):
+    return next((w for w in rows if w.get("kCGWindowOwnerPID") == pid
                  and w.get("kCGWindowLayer") == 0 and w["kCGWindowBounds"]["Width"] > 300
                  and w["kCGWindowBounds"]["Height"] > 300), None)
+
+
+def window(pid):
+    return target_window(pid, helper("windows"))
+
+
+def obstruction_rows(pid, target, rows, allowed_owner=None):
+    x, y, width, height = (target["kCGWindowBounds"][k] for k in WINDOW_KEYS)
+    for row in rows:
+        if row["kCGWindowNumber"] == target["kCGWindowNumber"]:
+            break
+        owner = row.get("kCGWindowOwnerPID")
+        name, layer = row.get("kCGWindowOwnerName"), row.get("kCGWindowLayer")
+        if owner == pid or (allowed_owner is not None and owner == allowed_owner):
+            continue
+        if (name, row.get("kCGWindowName"), layer) == ("Window Server", "Cursor", 2147483630):
+            continue  # ScreenCaptureKit omits the cursor.
+        rx, ry, rw, rh = (row["kCGWindowBounds"][k] for k in WINDOW_KEYS)
+        if (rw > 0 and rh > 0
+                and min(x+width, rx+rw) > max(x, rx) and min(y+height, ry+rh) > max(y, ry)):
+            yield row
+
+
+def wait_for_clear_window(pid, *, retry=True, allowed_owner=None):
+    # The budget includes every helper call and each retry sleep.
+    deadline = time.monotonic() + min(HELPER_TIMEOUT, 3)
+    reported = set()
+    while True:
+        rows = helper("windows", timeout=max(.01, deadline-time.monotonic()))
+        target = target_window(pid, rows)
+        if not target:
+            raise Invalid("benchmark window is not on screen")
+        blocked = []
+        for row in obstruction_rows(pid, target, rows, allowed_owner):
+            owner = row.get("kCGWindowOwnerName", "unknown")
+            detail = f"{owner} (pid {row.get('kCGWindowOwnerPID')}, layer {row.get('kCGWindowLayer')})"
+            if owner in {"Dock", "Notification Center", "NotificationCenter"} and not row.get("kCGWindowName"):
+                try:
+                    remaining = deadline-time.monotonic()
+                    if remaining > 0 and helper("transparent-container", row["kCGWindowNumber"],
+                                                row["kCGWindowOwnerPID"], timeout=remaining)["transparent"]:
+                        continue
+                except (Invalid, subprocess.TimeoutExpired):
+                    pass  # An unverified surface can block input or contain a prompt.
+            blocked.append(detail)
+            if detail not in reported:
+                log(f"foreign window overlaps benchmark: {detail}")
+                reported.add(detail)
+        if not blocked:
+            return target
+        report = "foreign window overlaps benchmark: " + ", ".join(blocked)
+        remaining = deadline-time.monotonic()
+        if not retry or remaining <= .2:
+            raise Obstruction(report)
+        time.sleep(min(.2, remaining))
+
+
+def park_pointer(pid):
+    visible = window(pid)
+    if not visible:
+        raise Invalid("cannot park pointer without an owned browser window")
+    x, y, w, h = (visible["kCGWindowBounds"][k] for k in WINDOW_KEYS)
+    pointer = {"kind": "move", "x": x+w*.85, "y": y+h*.75}
+    act(pointer)
+    return pointer
 
 
 def quit_arc(path):
@@ -158,16 +247,25 @@ def leave_arc_running(path):
     raise Invalid("Arc did not relaunch")
 
 
-def capture(pid, actions=(), duration=2, record=None, ocr=None, signatures=False, native=False, region=None, attribution=None):
-    visible = window(pid)
-    result = spec_call("capture", {"pid": pid, "window_id": visible["kCGWindowNumber"] if visible else None,
-                                   "actions": guarded(actions), "duration": duration, "ocr_needle":ocr,"signatures":signatures,
-                                   "region":region,
-                                   "native_resolution":native, **(attribution or {}),
-                                   **({"record_dir": str(record)} if record else {})})
+def capture(pid, actions=(), duration=2, record=None, signatures=False, native=False, region=None,
+            attribution=None, *, evidence, still=False, input_region=None, allowed_owner=None):
+    visible = wait_for_clear_window(pid, allowed_owner=allowed_owner)
+    with finish_on_interrupt():
+        result = spec_call("capture", {
+            "pid": pid, "window_id": visible["kCGWindowNumber"], "actions": guarded(actions),
+            "duration": duration, "record": record is not None, "still": still,
+            "signatures": signatures, "region": region, "native_resolution": native,
+            "input_region": input_region, "input_until": 1.3, **(attribution or {}),
+        })
+        evidence.collect(result, record, still, needle=INPUT_PROBE if input_region else None)
+    if result.get("capture_error"):
+        raise Invalid(f"display capture failed: {result['capture_error']}")
+    wait_for_clear_window(pid, retry=False)
+    if any(event.get("posted") is False for event in result["events"]):
+        raise Invalid("capture input was withheld because the owned browser lost focus")
     if len([f for f in result["frames"] if "changed" in f]) < (2 if actions else 1):
         raise Invalid("capture delivered too few complete frames")
-    result["record_dir"] = str(Path(record).resolve()) if record else None
+    validate_timeline(result)
     return result
 
 
@@ -182,7 +280,8 @@ def summary(values):
 
 
 def analyze(raw, target=None, scroll=False):
-    t0 = raw["events"][0]["t"]
+    event = raw["events"][0]
+    t0, key_time = event_clock(event, raw.get("start"))
     complete = [f for f in raw["frames"] if "changed" in f]
     before = [f for f in complete if f["t"] < t0]
     if not before:
@@ -191,6 +290,8 @@ def analyze(raw, target=None, scroll=False):
     changed = [f for f in post if f["changed"] >= .0015]
     if not changed:
         raise Invalid("no visible response to input")
+    if key_time is not None and changed[0]["t"] < event["key_post_time"]:
+        raise Invalid("first changed frame precedes the target key post")
     if target:
         hits = [f for f in post if f.get(target, 0) > .20]
         if not hits or before[-1].get(target, 0) > .20:
@@ -205,7 +306,9 @@ def analyze(raw, target=None, scroll=False):
     moving = [f for f in changed if f["t"] <= motion_end]
     gaps = [(b["t"] - a["t"])*1000 for a, b in zip(moving, moving[1:])]
     repeats = sum(max(0, round(g/1000*60)-1) for g in gaps)
-    return {"first_change_ms": (changed[0]["t"]-t0)*1000,
+    latency = (changed[0]["t"]-t0)*1000
+    return {"first_change_ms": latency, "action_start_ms": latency,
+            "key_to_frame_ms": (changed[0]["t"]-key_time)*1000 if key_time is not None else None,
             "first_paint_ms": paint, "settled_ms": None if scroll else (last-t0)*1000,
             "transition_ms": None if scroll else (last-changed[0]["t"])*1000,
             "dropped_frames": repeats, "worst_frame_gap_ms": max(gaps, default=0),
@@ -245,13 +348,15 @@ class Handler(bench.Handler):
               document.body.style.background='#269454';
               navigator.sendBeacon('/ui-event',JSON.stringify({id:ID,kind:'color',wall:Date.now()}));
             },500);"""
-        body = """<!doctype html><html><head><meta charset=utf-8><title>UIBENCH IDENT</title>
+        body = """<!doctype html><html lang=en><head><meta charset=utf-8><title>UIBENCH IDENT</title>
         <style>*{box-sizing:border-box}body{min-height:100vh;margin:0;background:COLOR;color:white;font:24px system-ui}
         header{padding:40px}a{color:white;display:block;padding:28px;background:#172c46}section{padding:20px}</style>
         </head><body><header>UIBENCH IDENT<br>Local browser benchmark</header>
         <a id=next href='DEST'>Open next local page</a>EXTRA<script>
         const ID='IDENT';
-        window.onload=()=>navigator.sendBeacon('/ui-event',JSON.stringify({id:ID,kind:'load',wall:Date.now()}));
+        function beacon(kind) { navigator.sendBeacon('/ui-event',JSON.stringify({id:ID,kind,wall:Date.now()})) }
+        window.onload=()=>beacon('load');
+        document.addEventListener('visibilitychange',()=>{ if (!document.hidden) beacon('visible') });
         SCRIPT
         </script></body></html>"""
         for token, value in [("COLOR", COLORS[color]), ("DEST", dest), ("EXTRA", extra), ("SCRIPT", script), ("IDENT", ident)]:
@@ -270,8 +375,10 @@ class Handler(bench.Handler):
 
 
 class Browser:
-    def __init__(self, name, path):
+    def __init__(self, name, path, evidence):
         self.name, self.path = name, Path(path).resolve()
+        self.evidence = evidence
+        self.ax_mode = evidence.ax_mode
         with open(self.path / "Contents/Info.plist", "rb") as f:
             info = plistlib.load(f)
         self.bundle, self.version = info["CFBundleIdentifier"], info.get("CFBundleShortVersionString")
@@ -297,12 +404,8 @@ class Browser:
             self.app.defaults()
             args = [str(self.app.exe),"-NookStateDir",self.temp.name,"-NookDevMCPPort",str(bench.MCP_PORT),
                     "-ApplePersistenceIgnoreState","YES"]
-            launched = spec_call("launch",{"app":str(self.path),"args":args})
-            if launched["pid"] in initial:
-                raise Invalid("launch reused a pre-existing instance; refusing to drive or terminate it")
-            self.launch_time = launched["start"]
-            self.proc = self.app.proc = OwnedProcess(launched["pid"])
-            self.pid = self.proc.pid
+            self.spawn(args, initial)
+            self.app.proc = self.proc
             token = Path.home()/"Library/Application Support"/self.bundle/"dev-mcp-token"
             self.app.token = token.read_text().strip() if token.exists() else None
         elif not self.pid:
@@ -312,12 +415,7 @@ class Browser:
             if self.name == "zen":
                 (Path(self.temp.name)/"user.js").write_text('user_pref("browser.shell.checkDefaultBrowser", false);\nuser_pref("zen.welcome-screen.seen", true);\nuser_pref("browser.startup.homepage_override.mstone", "ignore");\n')
                 args += ["-profile", self.temp.name, "-no-remote", "-new-instance"]
-            launched = spec_call("launch",{"app":str(self.path),"args":args})
-            if launched["pid"] in initial:
-                raise Invalid("launch reused a pre-existing instance; refusing to drive or terminate it")
-            self.launch_time = launched["start"]
-            self.proc = OwnedProcess(launched["pid"])
-            self.pid = self.proc.pid
+            self.spawn(args, initial)
         global KEYBOARD_OWNER
         KEYBOARD_OWNER = self.pid
         deadline = time.monotonic() + 30
@@ -325,35 +423,57 @@ class Browser:
         if self.name == "arc":
             time.sleep(.5)
             if not window(self.pid):
-                act({"kind":"key", "code":45, "flags":["cmd"]})
+                act({"kind":"key", "code":45, "flags":["cmd"]}, require_window=False)
         while not window(self.pid) and time.monotonic() < deadline:
             time.sleep(.2)
         if not window(self.pid):
             raise Invalid("no browser window within 30 seconds; onboarding or launch blocked")
-        if normalize:
+        if normalize and self.ax_mode == "inspected":
             if self.name == "arc":
                 self.original_bounds = window(self.pid)["kCGWindowBounds"]
-            helper("resize", self.pid)
+            self.inspect("resize")
             time.sleep(1)
         self.activate()
         if self.name == "arc" and prepare:
             self.close_library()
             self.navigate(self.url()[0], new=True)
 
+    def spawn(self, args, initial):
+        with finish_on_interrupt():
+            launched = spec_call("launch", {"app": str(self.path), "args": args})
+            if launched["pid"] in initial:
+                raise Invalid("launch reused a pre-existing instance; refusing to drive or terminate it")
+            self.proc = OwnedProcess(launched["pid"])
+            self.pid, self.launch_time = self.proc.pid, launched["start"]
+
+    def capture(self, *args, **kwargs):
+        return capture(self.pid, *args, evidence=self.evidence, **kwargs)
+
     def close_library(self):
         if self.name != "arc":
             return
         menu = [r for r in self.ax() if r.get("AXRole") == "AXMenuItem" and r.get("AXTitle") == "Close Library"]
         if menu:
-            helper("press", self.pid, ",".join(map(str,menu[0]["path"])))
+            self.inspect("press", ",".join(map(str,menu[0]["path"])))
             time.sleep(.3)
 
     def activate(self):
         act({"kind": "activate", "pid": self.pid})
         time.sleep(.15)
 
+    def inspect(self, command, *args):
+        if self.ax_mode != "inspected":
+            raise Invalid(f"AX command {command} is unavailable in --ax-mode none")
+        return helper(command, self.pid, *args)
+
     def ax(self):
-        return helper("ax", self.pid)
+        for attempt in range(3):
+            rows = self.inspect("ax")
+            if rows:
+                return rows
+            if attempt < 2:
+                time.sleep(.1)
+        raise InstrumentationUnavailable("AX returned an empty tree after three checks")
 
     def url(self, color="red", kind="page", ident=None):
         ident = ident or f"{self.session}-{uuid.uuid4().hex[:8]}"
@@ -363,6 +483,7 @@ class Browser:
         self.activate()
         if helper("front")["pid"] != self.pid:
             raise Invalid("browser did not become the foreground application")
+        park_pointer(self.pid)
         act(key("escape"))
         act(key("t" if new else "l", "cmd")); time.sleep(.2)
         if new:
@@ -391,7 +512,7 @@ class Browser:
         return ident
 
     def owns_current_tab(self, ident=None):
-        rows = helper("ax-focused", self.pid)
+        rows = self.inspect("ax-focused")
         for row in rows:
             url = str(row.get("AXURL", ""))
             ids = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("id", [])
@@ -405,7 +526,7 @@ class Browser:
             raise Invalid("tab identity is not owned by this benchmark")
         ident = title.split()[1]
         try:
-            helper("press",self.pid,",".join(map(str,row["path"])))
+            self.inspect("press", ",".join(map(str,row["path"])))
         except Invalid:
             act(self.click(row))
         time.sleep(.1)
@@ -494,11 +615,25 @@ class Browser:
                 "seconds": elapsed, "start": start, "end": end}
 
     def cleanup(self):
+        global KEYBOARD_OWNER
         if self.closed:
             return
         self.closed = True
-        if self.name == "arc" and self.pid:
-            # Close only explicitly-created local benchmark tabs, selected by AX.
+        with finish_on_interrupt():
+            try:
+                if self.name == "arc" and self.pid:
+                    self.cleanup_arc_tabs()
+            finally:
+                try:
+                    self.stop_owned_process()
+                finally:
+                    self.temp.cleanup()
+                    if KEYBOARD_OWNER == self.pid:
+                        KEYBOARD_OWNER = None
+
+    def cleanup_arc_tabs(self):
+        # Close only explicitly-created local benchmark tabs, selected by AX.
+        try:
             self.activate()
             self.close_library()
             for _ in range(self.owned_tabs+3):
@@ -506,47 +641,63 @@ class Browser:
                 tabs = [r for r in tabs if r.get("rect", [0,0,9999])[2] < 500]
                 if not tabs:
                     break
-                try:
-                    self.select_owned_tab(tabs[0]); self.close_tab(); time.sleep(.15)
-                except Invalid as error:
-                    self.cleanup_error = str(error)
-                    log(f"Arc cleanup stopped: {error}")
-                    break
+                self.select_owned_tab(tabs[0])
+                self.close_tab()
+                time.sleep(.15)
+        except (Invalid, subprocess.TimeoutExpired) as error:
+            self.cleanup_error = str(error)
+            log(f"Arc cleanup stopped: {error}")
+        finally:
             if self.original_bounds:
-                helper("resize", self.pid, *[self.original_bounds[k] for k in ("X","Y","Width","Height")])
-        if self.proc and self.proc.poll() is None:
-            if self.name == "arc":
-                quit_arc(self.path)
-                self.proc = None
-                self.temp.cleanup()
-                return
-            # Descendants and responsible helpers were verified against this root.
-            ids = self.pids()
-            self.proc.terminate()
+                self.inspect("resize", *(self.original_bounds[k] for k in WINDOW_KEYS))
+
+    def stop_owned_process(self):
+        if not self.proc or self.proc.poll() is not None:
+            return
+        if self.name == "arc":
+            quit_arc(self.path)
+            return
+        children = []
+        try:
+            for pid in self.pids():
+                if pid != self.pid:
+                    try:
+                        children.append(OwnedProcess(pid))
+                    except Invalid:
+                        continue  # The helper exited between process snapshots.
+        finally:
             try:
-                self.proc.wait(8)
-            except subprocess.TimeoutExpired:
-                self.proc.kill(); self.proc.wait()
-            for pid in ids:
-                if pid == self.pid:
-                    continue
+                self.proc.terminate()
                 try:
-                    os.kill(pid, 15)
-                except ProcessLookupError:
-                    pass
-        self.temp.cleanup()
+                    self.proc.wait(8)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait()
+            finally:
+                for child in children:
+                    try:
+                        child.terminate()
+                    except ProcessLookupError:
+                        pass
+
+
+def wait_for_beacon(ident, kind, timeout=2):
+    deadline = time.monotonic()+timeout
+    while (ident, kind) not in Handler.events and time.monotonic() < deadline:
+        time.sleep(.05)
+    return Handler.events.get((ident, kind))
 
 
 def validation(browser, record):
     ident = browser.page(kind="validate")
     w = window(browser.pid)["kCGWindowBounds"]
-    raw = capture(browser.pid, [{"kind": "click", "x": w["X"]+w["Width"]*.7,
+    raw = browser.capture([{"kind": "click", "x": w["X"]+w["Width"]*.7,
                                 "y": w["Y"]+w["Height"]*.7, "at": .5}], 2, record)
     event = Handler.events.get((ident, "color"))
     if not event:
         raise Invalid("synthetic color-change beacon missing")
-    wall_offset = raw["clock"]["wall_seconds"]-raw["clock"]["host_seconds"]
-    known = event["wall"]/1000-wall_offset
+    clock = raw["clock"]
+    known = event["wall"]/1000 + clock["host_seconds"] - clock["wall_seconds"]
     first = next((f["t"] for f in raw["frames"] if f.get("green", 0) > .2), None)
     delta = (first-known)*1000 if first else None
     delay = (known-raw["events"][0]["t"])*1000
@@ -589,23 +740,28 @@ def launch_label(name):
     return f"Fresh process with warm filesystem cache and {history[name]}"
 
 
-def cold_launch(name, path, runs, record, allow_arc_quit=False):
-    label = launch_label(name)
+def cold_launch(name, path, runs, record, allow_arc_quit=False, *, evidence, entry):
+    entry["label"] = launch_label(name)
     if name == "arc" and not allow_arc_quit:
-        return {"status":"discarded", "label":label, "reason":"Arc has no profile flag and its existing instance must remain running"}
-    samples = []
+        entry.update(status="discarded", reason="Arc has no profile flag and its existing instance must remain running")
+        return
+    samples = entry["runs"] = []
     for index in range(runs):
         if name == "arc":
             quit_arc(path)
-        browser = Browser(name, path)
-        with tempfile.TemporaryDirectory(prefix="uibench-cold-") as temporary:
+        trial = {"status": "pending"}
+        samples.append(trial)
+        with evidence.attach(trial), tempfile.TemporaryDirectory(prefix="uibench-cold-") as temporary:
             ready = Path(temporary)/"ready"
-            spec = {"duration":8, "signatures":True, "ready_file":str(ready)}
-            if record:
-                spec["record_dir"] = str(record/f"{index+1:02d}")
+            recording = record/f"{index+1:02d}" if record else None
+            spec = {"duration":8, "signatures":True, "ready_file":str(ready), "record": bool(recording)}
             specpath = Path(temporary)/"spec.json"; specpath.write_text(json.dumps(spec))
-            process = subprocess.Popen([str(HELPER), "capture", str(specpath)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            process = browser = raw = None
             try:
+                with finish_on_interrupt():
+                    process = subprocess.Popen([str(HELPER), "capture", str(specpath)], stdout=subprocess.PIPE,
+                                               stderr=subprocess.PIPE, text=True)
+                browser = Browser(name, path, evidence)
                 deadline = time.monotonic()+10
                 while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
                     time.sleep(.01)
@@ -614,19 +770,22 @@ def cold_launch(name, path, runs, record, allow_arc_quit=False):
                 time.sleep(.25)
                 browser.launch(normalize=False,prepare=False)
                 start = browser.launch_time
-                output, errors = process.communicate(timeout=15)
-                if process.returncode:
-                    raise Invalid(errors or output)
-                raw = json.loads(output)
-                w = window(browser.pid)
-                if not w:
-                    raise Invalid("cold launch ended without a visible window")
+                with finish_on_interrupt():
+                    output, errors = process.communicate(timeout=15)
+                    if process.returncode:
+                        raise Invalid(errors or output)
+                    raw = evidence.collect(json.loads(output), recording)
+                if raw.get("capture_error"):
+                    raise Invalid(f"display capture failed: {raw['capture_error']}")
+                w = wait_for_clear_window(browser.pid, retry=False)
                 bounds = w["kCGWindowBounds"]
                 x0,y0,width,height = raw["rect"]
                 cells = [(y*160+x)*3 for y in range(100) for x in range(160)
                          if bounds["X"]+10 <= x0+x*width/160 < bounds["X"]+bounds["Width"]-10
                          and bounds["Y"]+40 <= y0+y*height/100 < bounds["Y"]+bounds["Height"]-10]
                 frames = [f for f in raw["frames"] if "pixels" in f]
+                if not frames or not cells:
+                    raise Invalid("cold launch capture has no complete frames or visible window pixels")
                 reference = base64.b64decode(frames[-1]["pixels"])
                 matches = []
                 for frame in frames:
@@ -639,18 +798,29 @@ def cold_launch(name, path, runs, record, allow_arc_quit=False):
                         raise Invalid("pre-launch desktop already matches final browser window")
                 if not matches:
                     raise Invalid("no captured full window matching settled frame")
-                samples.append({"status":"valid", "first_full_window_ms":(matches[0]-start)*1000,
-                                "raw":raw, "reference_rect":bounds})
-            except (Invalid, subprocess.TimeoutExpired) as error:
-                samples.append({"status":"discarded", "reason":str(error)})
+                trial.update(status="valid", first_full_window_ms=(matches[0]-start)*1000,
+                             raw=raw, reference_rect=bounds)
+            except (Invalid, OSError, subprocess.TimeoutExpired) as error:
+                trial.update(status="discarded", reason=str(error))
             finally:
-                if process.poll() is None:
-                    process.terminate(); process.communicate(timeout=5)
-                browser.cleanup()
+                with finish_on_interrupt():
+                    try:
+                        if process:
+                            if ready.exists() and raw is None and trial.get("status") != "valid":
+                                try:
+                                    output, _ = process.communicate(timeout=10)
+                                    if process.returncode == 0:
+                                        evidence.collect(json.loads(output), recording)
+                                except (ValueError, subprocess.TimeoutExpired):
+                                    pass
+                            stop_child(process)
+                    finally:
+                        if browser:
+                            browser.cleanup()
     valid = [s["first_full_window_ms"] for s in samples if s["status"] == "valid"]
-    return {"status":"valid" if len(valid) >= 10 else "discarded", "label":label, "n":len(valid),
-            "first_full_window_ms":summary(valid), "runs":samples,
-            "definition":"Launch start to the first post-launch frame 97% matching the final window content"}
+    entry.update(status="valid" if len(valid) >= 10 else "discarded", n=len(valid),
+                 first_full_window_ms=summary(valid),
+                 definition="Launch start to the first post-launch frame 97% matching the final window content")
 
 
 def scenario(browser, name, index, record):
@@ -658,7 +828,7 @@ def scenario(browser, name, index, record):
     actions, target, duration = [], None, 2.2
     occluder = None
     region = None
-    pointer = None
+    pointer = park_pointer(browser.pid)
     if name in ("keyboard", "click", "close"):
         source = browser.page("red")
         destination = browser.page("blue", new=True)
@@ -734,45 +904,62 @@ def scenario(browser, name, index, record):
         pointer = {"kind":"move","x":bounds["X"]+bounds["Width"]*.85,"y":bounds["Y"]+bounds["Height"]*.75}
         act(pointer); time.sleep(.3)
         x,y,w,h = window_rect
-        page = [r["rect"] for r in browser.ax() if r.get("AXRole") == "AXWebArea" and browser.session in str(r.get("AXURL","")) and "rect" in r]
-        if not page:
-            raise Invalid("cannot identify the benchmark page rectangle")
-        page = page[0]
-        px,py,pw,ph = page
-        attribution = {"attribute":True,"full_display":True,"window_rect":window_rect,"regions":[
-            {"name":"traffic_lights","rect":[x,y,90,38]},
-            {"name":"link_pill","rect":[px,y+h-44,min(500,pw),44]},
-            {"name":"page","rect":page},
-            {"name":"chrome_title","rect":[x,y,w,max(40,py-y)]},
-            {"name":"sidebar","rect":[x,y,max(0,px-x),h]},
-            {"name":"chrome_title","rect":window_rect}]}
+        regions = []
+        if browser.ax_mode == "inspected":
+            page = next((r["rect"] for r in browser.ax() if r.get("AXRole") == "AXWebArea"
+                         and browser.session in str(r.get("AXURL", "")) and "rect" in r), None)
+            if not page:
+                raise Invalid("cannot identify the benchmark page rectangle")
+            px, py, pw, _ = page
+            regions = [
+                {"name":"traffic_lights","rect":[x,y,90,38]},
+                {"name":"link_pill","rect":[px,y+h-44,min(500,pw),44]},
+                {"name":"page","rect":page},
+                {"name":"chrome_title","rect":[x,y,w,max(40,py-y)]},
+                {"name":"sidebar","rect":[x,y,max(0,px-x),h]},
+            ]
+        regions.append({"name": "window", "rect": window_rect})
+        attribution = {"attribute":True,"full_display":True,"window_rect":window_rect,"regions":regions}
         region = [x-20,y-20,w+40,h+40]
-    if name == "activate":
-        attribution["window_id"] = window(browser.pid)["kCGWindowNumber"]
-        occluder = subprocess.Popen([str(HELPER), "occlude", *map(str,window_rect)],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(.35)
     sampler = None
-    if getattr(browser,"sample_main",False) and record:
-        record.mkdir(parents=True,exist_ok=True)
-        sampler = subprocess.Popen(["/usr/bin/sample",str(browser.pid),str(math.ceil(duration+1)),"1","-file",str(record/"main-thread.sample.txt")],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     start = browser.resources() if name == "scroll" else None
     t0 = time.monotonic()
     try:
-        raw = capture(browser.pid, actions, duration, record, signatures=name == "activate",region=region,attribution=attribution)
+        if name == "activate":
+            attribution["window_id"] = window(browser.pid)["kCGWindowNumber"]
+            occluder = subprocess.Popen([str(HELPER), "occlude", *map(str,window_rect)],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(.35)
+        if getattr(browser, "sample_main", False) and record:
+            sampler = subprocess.Popen(
+                ["/usr/bin/sample", str(browser.pid), str(math.ceil(duration+1)), "1", "-file", "/dev/stdout"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+        raw = browser.capture(actions, duration, record, signatures=name == "activate",
+                              region=region, attribution=attribution, allowed_owner=occluder.pid if occluder else None)
+        if start is not None:
+            end = browser.resources()
+            elapsed = time.monotonic()-t0
     finally:
-        if sampler:
+        with finish_on_interrupt():
             try:
-                sampler.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                sampler.terminate(); sampler.wait(timeout=5)
-        if occluder:
-            occluder.terminate(); occluder.wait(timeout=5)
+                if sampler:
+                    try:
+                        output, _ = sampler.communicate(timeout=20)
+                        if sampler.returncode == 0:
+                            browser.evidence.files[record/"main-thread.sample.txt"] = output
+                    except subprocess.TimeoutExpired:
+                        stop_child(sampler)
+            finally:
+                if occluder:
+                    stop_child(occluder)
     if name in ("sidebar_hide", "sidebar_show"):
-        sidebar_after = browser.ax()
-        # Leave the fixture visible for subsequent activation and scroll scenarios.
-        if name == "sidebar_hide":
-            act(actions[0]); time.sleep(.3)
+        try:
+            sidebar_after = browser.ax()
+        finally:
+            # Restore the known precondition even if AX instrumentation went away.
+            if name == "sidebar_hide":
+                act(actions[0]); time.sleep(.3)
         def viewport(rows):
             return [r["rect"] for r in rows if r.get("AXRole") == "AXWebArea" and browser.session in str(r.get("AXURL","")) and "rect" in r]
         def labels(rows):
@@ -784,13 +971,11 @@ def scenario(browser, name, index, record):
         raw["sidebar_validation"] = {"before":before,"after":after,"menu_before":sorted(labels(sidebar_before)),"menu_after":sorted(labels(sidebar_after))}
     raw["window_frame"] = bounds
     raw["pointer_park"] = pointer
-    if name in ("activate", "sidebar_show", "sidebar_hide"):
+    if actions[0]["kind"] in ("activate", "key"):
         observed = raw["events"][0].get("pointer_before")
         raw["pointer_park_verified"] = bool(observed and abs(observed[0]-pointer["x"]) < 2 and abs(observed[1]-pointer["y"]) < 2)
         if not raw["pointer_park_verified"]:
-            if record:
-                (record/"unverified-pointer.json").write_text(json.dumps(raw)+"\n")
-            raise Invalid(f"activation pointer was not parked: {observed}")
+            raise Invalid(f"pointer was not parked in the owned window: {observed}")
     if name == "activate":
         for frame in raw["frames"]:
             if "window_changed_fraction" in frame:
@@ -821,40 +1006,97 @@ def scenario(browser, name, index, record):
                                 for f in frames if f["t"] > matches[0] and f.get("regions")]
         raw["region_definitions"] = attribution["regions"]
     if name == "scroll":
-        end = browser.resources()
         moving = [f["t"] for f in raw["frames"] if raw["events"][0]["t"] <= f["t"] <= raw["events"][0]["t"]+3 and f.get("changed",0) >= .0015]
         raw["frame_intervals"] = [{"start":a,"end":b,"ms":(b-a)*1000} for a,b in zip(moving,moving[1:])]
-        metrics["cpu_percent"] = (end["cpu_s"]-start["cpu_s"])/(time.monotonic()-t0)*100
+        raw["resources"] = {"before": start, "after": end, "elapsed_s": elapsed}
+        metrics["cpu_percent"] = (end["cpu_s"]-start["cpu_s"])/elapsed*100
     if name == "command":
-        act(text("uibench-check")); time.sleep(.1)
-        focused = [r for r in browser.ax() if r.get("AXFocused") and "uibench-check" in str(r.get("AXValue", ""))]
-        if not focused:
-            raise Invalid("Cmd+T did not expose a focused text field accepting input")
-        act(key("escape"))
-        if browser.name == "chrome":
-            act(key("w","cmd"))
-        probes = [{"kind":"text", "text":"READY ", "at":.55+i*.05} for i in range(10)]
-        ready = capture(browser.pid, [key("t","cmd"), *probes], 1.6,
-                        record/"readiness" if record else None, ocr="ready")
-        if ready.get("first_text_frame") is None:
-            raise Invalid("no visually recognized readiness probe in captured frames")
-        metrics["input_ready_ms"] = (ready["first_text_frame"]-ready["events"][0]["t"])*1000
-        metrics["readiness_probe_interval_ms"] = 50
-        act(key("escape"))
-        if browser.name == "chrome":
-            act(key("w","cmd"))
-        raw["readiness"] = ready
+        raw["readiness"] = {}
+        command_readiness(browser, bounds, record, raw["readiness"])
     if name in ("keyboard", "click"):
-        # The inactive blue tab is ours; select it and close it.
-        row = browser.locate(destination, {"AXRadioButton", "AXTab", "AXButton"})
-        if browser.name == "arc":
-            browser.select_owned_tab(row)
+        # Select the known blue fixture before closing that tab.
+        if browser.ax_mode == "none":
+            Handler.events.pop((destination, "visible"), None)
+            act(key("tab", "ctrl", *(("shift",) if browser.name != "chrome" else ())))
+            if not wait_for_beacon(destination, "visible"):
+                raise Invalid("blue fixture did not confirm visibility before tab cleanup")
         else:
-            act(browser.click(row)); time.sleep(.15)
-        browser.close_tab(); browser.owned_tabs -= 1
+            row = browser.locate(destination, {"AXRadioButton", "AXTab", "AXButton"})
+            if browser.name == "arc":
+                browser.select_owned_tab(row)
+            else:
+                act(browser.click(row)); time.sleep(.15)
+        browser.close_tab()
+        browser.owned_tabs -= 1
     if name == "close":
         browser.owned_tabs -= 1
     return {"status": "valid", **metrics, "raw": raw}
+
+
+def stop_child(process):
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate(timeout=5)
+
+
+def input_region(bounds, focused=None):
+    x, y, w, h = (bounds[k] for k in WINDOW_KEYS)
+    if focused and "rect" in focused:
+        fx, fy, fw, fh = focused["rect"]
+        if 4 <= fw <= w and 4 <= fh <= 120:
+            return [fx-8, fy-8, fw+16, fh+16]
+    # The toolbar and the centered command palette both live in this band.
+    return [x, y, w, min(h*.45, 360)]
+
+
+def command_readiness(browser, bounds, record, readiness):
+    readiness.update(capture_status="pending", browser_status="unchecked", recognition={"status": "pending"})
+    focused = None
+    if browser.ax_mode == "inspected":
+        try:
+            focused = next((r for r in browser.ax() if r.get("AXFocused")
+                            and r.get("AXRole") in {"AXTextField", "AXSearchField", "AXComboBox"}), None)
+            readiness["instrumentation"] = "inspected" if focused else "focused field absent"
+        except (Invalid, subprocess.TimeoutExpired) as error:
+            readiness["instrumentation"] = str(error)
+    try:
+        act(key("escape"))
+        if browser.name == "chrome":
+            act(key("w", "cmd"))
+        park_pointer(browser.pid)
+    except (Invalid, subprocess.TimeoutExpired) as error:
+        readiness.update(capture_status="failed", capture_reason=str(error))
+        return
+    url, ident = browser.url()
+    probes = [{"kind": "text", "text": f"{INPUT_PROBE} ", "at": .55+i*.05} for i in range(10)]
+    try:
+        # Submit a unique local URL through the same field after the timed probes.
+        # A beacon proves input worked even if the OCR process later stalls.
+        raw = browser.capture([key("t", "cmd"), *probes, key("a", "cmd", at=1.3),
+                               {**text(url), "at": 1.4}, key("return", at=1.6)],
+                              2, record/"readiness" if record else None,
+                              input_region=input_region(bounds, focused))
+        readiness.update(capture_status="captured", capture=raw)
+    except (Invalid, subprocess.TimeoutExpired) as error:
+        readiness.update(capture_status="failed", capture_reason=str(error))
+    beacon = wait_for_beacon(ident, "load")
+    if beacon:
+        readiness.update(browser_status="responsive", functional_input=beacon)
+        try:
+            browser.close_tab()
+        except (Invalid, subprocess.TimeoutExpired) as error:
+            readiness["cleanup_reason"] = str(error)
+    else:
+        readiness.update(browser_status="failed", browser_reason="submitted local URL did not load")
+        try:
+            act(key("escape"))
+        except (Invalid, subprocess.TimeoutExpired) as error:
+            readiness["cleanup_reason"] = str(error)
 
 
 def resource_scenarios(browser, allow_arc_quit=False):
@@ -900,7 +1142,6 @@ def resource_scenarios(browser, allow_arc_quit=False):
 
 
 def screenshots(browser, folder):
-    folder.mkdir(parents=True, exist_ok=True)
     result = {}
     def close_created_window(before):
         created = [w for w in helper("windows") if w.get("kCGWindowOwnerPID") == browser.pid
@@ -910,7 +1151,7 @@ def screenshots(browser, folder):
             return False
         target = created[0]
         bounds = target["kCGWindowBounds"]
-        helper("close-window",browser.pid,*[bounds[k] for k in ("X","Y","Width","Height")])
+        browser.inspect("close-window", *(bounds[k] for k in WINDOW_KEYS))
         deadline = time.monotonic()+2
         while any(w["kCGWindowNumber"] == target["kCGWindowNumber"] for w in helper("windows")) and time.monotonic() < deadline:
             time.sleep(.1)
@@ -920,9 +1161,7 @@ def screenshots(browser, folder):
     def shot(name, verify=None, region=None):
         if verify and not verify():
             raise Invalid(f"{name} surface did not appear")
-        raw = capture(browser.pid, duration=.6, record=folder/f".{name}",native=True,region=region)
-        shutil.copyfile(folder/f".{name}"/"last.png", folder/f"{name}.png")
-        shutil.rmtree(folder/f".{name}")
+        browser.capture(duration=.6, record=folder/f"{name}.png", native=True, region=region, still=True)
         result[name] = str(folder/f"{name}.png")
     browser.page()
     shot("default")
@@ -978,7 +1217,7 @@ def screenshots(browser, folder):
     before_windows = {w["kCGWindowNumber"] for w in helper("windows") if w.get("kCGWindowOwnerPID") == browser.pid}
     menu = [r for r in browser.ax() if r.get("AXRole") == "AXMenuItem" and r.get("AXTitle", "").lower().rstrip(".\u2026") in {"settings","preferences"}]
     if menu:
-        helper("press", browser.pid, ",".join(map(str,menu[0]["path"])))
+        browser.inspect("press", ",".join(map(str,menu[0]["path"])))
     else:
         act(key(",", "cmd"))
     time.sleep(1)
@@ -1000,25 +1239,27 @@ def screenshots(browser, folder):
 
 
 def markdown(result):
-    lines = ["| Browser | Scenario | n | First change ms med/p95 | Paint ms med/p95 | Ready/full ms med/p95 | Settle ms med/p95 | Repeats med | Worst gap ms p95 |",
-             "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
+    lines = [f"AX mode: {result.get('ax_mode', 'unspecified')}", "",
+             "| Browser | Scenario | n | Action start ms med/p95 | Key to frame ms med/p95 | Paint ms med/p95 | Ready/full ms med/p95 | Settle ms med/p95 | Repeats med | Worst gap ms p95 |",
+             "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
     def fmt(value):
         return f"{value['median']:.1f}/{value['p95']:.1f}" if value else "-"
     for browser, data in result["browsers"].items():
-        if data.get("status") == "blocked":
-            lines.append(f"| {browser} | blocked: {data['reason']} | 0 | - | - | - | - | - | - |")
+        if data.get("status") in {"blocked", "skipped", "interrupted"}:
+            lines.append(f"| {browser} | {data['status']}: {data['reason']} | 0 | - | - | - | - | - | - | - |")
         for name, entry in data.get("scenarios", {}).items():
             if entry.get("status") != "valid":
-                lines.append(f"| {browser} | {name}: discarded | {entry.get('n',0)} | - | - | - | - | - | - |")
+                lines.append(f"| {browser} | {name}: {entry.get('status', 'pending')} | {entry.get('n',0)} | - | - | - | - | - | - | - |")
                 continue
             s = entry["summary"]
             ready = s.get("input_ready_ms") or s.get("first_full_frame_ms")
-            lines.append(f"| {browser} | {name} | {entry['n']}/{len(entry['runs'])} | {fmt(s['first_change_ms'])} | {fmt(s['first_paint_ms'])} | {fmt(ready)} | {fmt(s['settled_ms'])} | {s['dropped_frames']['median']:.0f} | {s['worst_frame_gap_ms']['p95']:.1f} |")
+            lines.append(f"| {browser} | {name} | {entry['n']}/{len(entry['runs'])} | {fmt(s['first_change_ms'])} | {fmt(s.get('key_to_frame_ms'))} | {fmt(s['first_paint_ms'])} | {fmt(ready)} | {fmt(s['settled_ms'])} | {s['dropped_frames']['median']:.0f} | {s['worst_frame_gap_ms']['p95']:.1f} |")
     lines += ["", "60 Hz visible display capture. Latencies are quantized to about 16.7 ms. "
               "Settle means the last changed frame followed by at least 250 ms of stability. "
               "Repeated frames between visible changes are a dropped-frame proxy, not GPU telemetry. "
               "Ready/full is captured typed-text echo for Cmd+T, or a 97% match to the final full window for activation. "
-              "Cmd+T text probes run every 50 ms, so readiness is an upper-bound estimate. "
+              "Cmd+T text probes run every 50 ms, so OCR readiness is an upper-bound estimate. "
+              "Input capture, browser response and recognition statuses are reported independently. "
               "n is accepted/attempted trials. Percentiles use accepted trials. "
               "Raw samples, min/max, standard deviation, validation evidence and rejection reasons are in the JSON.", ""]
     lines += ["| Browser | Fresh-process full window ms med/p95 | RSS MB 1/10/30 tabs | Physical MB 1/10/30 tabs | Idle CPU % | Background video CPU % | Scroll CPU % med | Scroll fps med/min |",
@@ -1053,11 +1294,19 @@ def markdown(result):
             if not s: continue
             interval = "/".join(f"{s[k]['median']:.1f}" for k in ("frame_interval_median_ms","frame_interval_p95_ms","frame_interval_max_ms") if s.get(k))
             lines.append(f"| {browser} | {name} | {fmt(s.get('visually_complete_ms'))} | {interval} | {s['frame_intervals_over_20ms']['median']:.0f} |")
+    lines += ["", "| Browser | Command input capture | Browser readiness | Offline recognition |",
+              "|---|---|---|---|"]
+    for name, data in result["browsers"].items():
+        command = data.get("scenarios", {}).get("command", {})
+        counts = command.get("readiness_counts")
+        if counts:
+            values = ["; ".join(f"{key} {n}" for key, n in sorted(counts[field].items()))
+                      for field in ("capture_status", "browser_status", "recognition")]
+            lines.append("| " + " | ".join([name, *values]) + " |")
     return "\n".join(lines)+"\n"
 
 
-def main(argv=None):
-    global HELPER, HELPER_TIMEOUT
+def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browsers", default="nook,arc,zen,chrome")
     parser.add_argument("--only", default=",".join(SCENARIOS+["cold", "resources", "shots"]),
@@ -1066,6 +1315,16 @@ def main(argv=None):
     parser.add_argument("--label", default="base")
     parser.add_argument("--record-dir", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--phase", choices=("all", "preflight", "capture", "analyze"), default="all")
+    parser.add_argument("--ax-mode", choices=("inspected", "none"), default="inspected",
+                        help="none skips shared Arc and trials that need target-app accessibility")
+    parser.add_argument("--max-load1", type=float, default=MAX_LOAD1)
+    parser.add_argument("--lock-wait", type=float, default=LOCK_WAIT)
+    parser.add_argument("--min-free-gib", type=float, default=CAPTURE_FREE_GIB)
+    parser.add_argument("--ocr-timeout", type=float, default=OCR_TIMEOUT,
+                        help="offline Vision deadline in seconds per readiness trial")
+    parser.add_argument("--ocr-budget", type=float, default=OCR_BUDGET,
+                        help="total offline Vision budget in seconds")
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--wait-build", type=int, default=1800)
     parser.add_argument("--helper-path", type=Path, help="use an existing executable capture helper instead of building the bundled helper")
@@ -1075,16 +1334,17 @@ def main(argv=None):
     parser.add_argument("--sample-main", action="store_true", help="collect a 1 ms process stack sample alongside each recorded trial")
     parser.add_argument("--allow-arc-quit",action="store_true",help="explicitly allow graceful Arc restarts for cold launch and resource measurements; leave it running afterward")
     args = parser.parse_args(argv)
-    if not math.isfinite(args.helper_timeout) or args.helper_timeout <= 0:
-        parser.error("--helper-timeout must be a finite positive number")
-    HELPER_TIMEOUT = args.helper_timeout
+    for option in ("helper_timeout", "max_load1", "min_free_gib", "ocr_timeout", "ocr_budget", "lock_wait"):
+        value = getattr(args, option)
+        if not math.isfinite(value) or value < 0 or (value == 0 and option != "lock_wait"):
+            parser.error(f"--{option.replace('_', '-')} must be finite and {'nonnegative' if option == 'lock_wait' else 'positive'}")
     if args.helper_path:
-        HELPER = args.helper_path.expanduser().resolve()
-        if not HELPER.is_file() or not os.access(HELPER, os.X_OK):
+        args.helper_path = args.helper_path.expanduser().resolve()
+        if not args.helper_path.is_file() or not os.access(args.helper_path, os.X_OK):
             parser.error("--helper-path must name an existing executable file")
     if args.runs < 10:
         parser.error("at least 10 repetitions are required")
-    names = args.browsers.split(",")
+    args.names = names = args.browsers.split(",")
     if set(names)-{"nook", "arc", "zen", "chrome"}:
         parser.error("unknown browser")
     only = {ALIASES.get(n, n) for n in args.only.split(",")}
@@ -1092,15 +1352,25 @@ def main(argv=None):
         only.remove("sidebar"); only.update(("sidebar_show","sidebar_hide"))
     if only-set(SCENARIOS+["cold", "resources", "shots"]):
         parser.error("unknown scenario")
-    if not args.helper_path:
-        HELPER.parent.mkdir(parents=True, exist_ok=True)
-        if not HELPER.exists() or HELPER.stat().st_mtime < SOURCE.stat().st_mtime:
-            run(["swiftc", "-O", "-parse-as-library", SOURCE, "-o", HELPER], timeout=120)
-    if "resources" in only and not VIDEO.exists():
-        VIDEO.parent.mkdir(parents=True, exist_ok=True)
-        helper("video", VIDEO)
-    permissions = helper("permissions")
-    result = {"label": args.label, "when": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    args.only = only
+    if args.out.suffix.lower() != ".json":
+        parser.error("--out must name a .json evidence file")
+    args.out = args.out.expanduser().resolve()
+    if args.record_dir:
+        args.record_dir = args.record_dir.expanduser().resolve()
+    if args.signposts:
+        args.signposts = args.signposts.expanduser().resolve()
+        if args.signposts in {args.out, args.out.with_suffix(".md"), args.out.parent/"BLOCKERS.md"}:
+            parser.error("--signposts must have a separate output path")
+    args.nook_app = Path(args.nook_app).expanduser().resolve()
+    if args.phase != "analyze" and "nook" in names:
+        if args.nook_app.is_relative_to(Path("/Applications").resolve()):
+            parser.error("--nook-app must be an isolated build outside /Applications")
+    return args
+
+
+def new_result(args):
+    return {"label": args.label, "when": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "method": {"fps": 60, "sample_grid": [160,100], "change_fraction": .0015,
                          "pixel_rgb_delta": 30, "settle_guard_ms": 250,
                          "capture": "ScreenCaptureKit full-display buffer, explicit crop, cursor excluded; activation retains the full display",
@@ -1112,152 +1382,434 @@ def main(argv=None):
                          "dropped_frames": "60 Hz repeated refresh slots between changed frames during motion",
                          "cpu": "kernel process Mach ticks converted with mach_timebase_info / wall seconds, 100% is one core",
                          "footprint": "proc_pid_rusage RUSAGE_INFO_V4, descendants plus responsible PID helpers",
-                         "input_ready": "first captured echo of repeated text probes, recognized offline with Vision; 50 ms probe interval"},
-              "isolation_manifest": isolation_manifest(names),
-              "permissions": permissions, "load1": os.getloadavg()[0], "browsers": {}}
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    blockers = []
-    def save():
-        args.out.write_text(json.dumps(result, indent=2)+"\n")
-        args.out.with_suffix(".md").write_text(markdown(result))
-        (args.out.parent/"BLOCKERS.md").write_text("# UI benchmark blockers and discarded measurements\n\n"+"\n".join(f"- {b}" for b in blockers)+"\n")
-    if not all(permissions.values()):
-        reason = "macOS desktop is locked" if permissions.get("unlocked") is False else f"macOS permission missing: {permissions}"
-        result["browsers"] = {name:{"status":"blocked","reason":reason} for name in names}
-        blockers.append(reason); save(); return 1
+                         "action_start": "host monotonic time before modifier and key dispatch",
+                         "key_to_frame": "target CGEvent key-down timestamp to the first changed frame",
+                         "input_ready": "cropped 50 ms text probes, with offline Vision and a separate local URL beacon"},
+              "ax_mode": args.ax_mode, "isolation_manifest": isolation_manifest(args.names),
+              "preflight": {}, "browsers": {}, "blockers": []}
+
+
+def save_result(args, result):
+    write_json(args.out, result)
+    write_atomic(args.out.with_suffix(".md"), lambda stream: stream.write(markdown(result)))
+    blockers = "# UI benchmark blockers and discarded measurements\n\n"
+    blockers += "".join(f"- {item}\n" for item in result["blockers"])
+    write_atomic(args.out.parent/"BLOCKERS.md", lambda stream: stream.write(blockers))
+
+
+def prepare_helper(args):
+    if not args.helper_path and (not HELPER.exists() or HELPER.stat().st_mtime < SOURCE.stat().st_mtime):
+        HELPER.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".uibench-build-", dir=HELPER.parent) as directory:
+            binary = Path(directory)/HELPER.name
+            run(["swiftc", "-O", "-parse-as-library", SOURCE, "-o", binary], timeout=120)
+            binary.replace(HELPER)
+
+
+def desktop_preflight(args, result, output_paths, space_paths):
+    report = result["preflight"]
+    report["volumes"] = disk_headroom(space_paths, args.min_free_gib)
+    check_evidence(output_paths)
+    report["evidence_writable"] = True
+    prepare_helper(args)
+    try:
+        permissions = helper("permissions")
+    except (Invalid, subprocess.TimeoutExpired, OSError, ValueError) as error:
+        raise Invalid(f"permission probe failed for {HELPER}: {error}") from error
+    result["permissions"] = permissions
+    if permissions.get("console_session") is False:
+        raise Invalid("no active macOS console session; run from the logged-in desktop user")
+    if permissions.get("unlocked") is False:
+        raise Invalid("macOS desktop is locked; unlock it before running capture")
+    required = {"unlocked": "active desktop session", "screen": "Screen Recording",
+                "post_events": "synthetic input (Accessibility)"}
+    if args.ax_mode == "inspected":
+        required["accessibility"] = "Accessibility"
+    missing = [label for field, label in required.items() if permissions.get(field) is not True]
+    if missing:
+        raise Invalid(f"macOS permission missing for {HELPER}: {', '.join(missing)}. Check the runner's permission profile.")
+    if permissions.get("capture_protocol") != 2:
+        raise Invalid("capture helper uses an incompatible evidence protocol; rebuild it from uibench_capture.swift")
+    try:
+        pid = os.getpid()
+        if pid not in processes() or not OwnedProcess(pid).identity:
+            raise Invalid("ps could not identify the runner")
+        if "physical_bytes" not in helper("footprint", pid).get(str(pid), {}):
+            raise Invalid("kernel footprint query was denied")
+        if not isinstance(helper("windows"), list):
+            raise Invalid("Window Server did not return a window list")
+    except (Invalid, subprocess.TimeoutExpired, OSError, ValueError) as error:
+        raise Invalid(f"process or Window Server inspection failed; check the runner's permission profile: {error}") from error
+    report["process_inspection"] = True
+
+
+def summarize_scenario(entry, runs):
+    valid = [trial for trial in entry["runs"] if trial["status"] == "valid"]
+    entry["n"] = len(valid)
+    entry["status"] = "valid" if len(valid) >= runs else "discarded"
+    if entry["status"] == "valid":
+        fields = set().union(*(trial.keys() for trial in valid)) - {"raw", "status"}
+        entry["summary"] = {field: summary([trial.get(field) for trial in valid]) for field in sorted(fields)}
+    else:
+        reasons = sorted({trial["reason"] for trial in entry["runs"] if "reason" in trial})
+        entry["reason"] = "; ".join(reasons) or "fewer than the requested validated repetitions"
+
+
+def collect_scenarios(args, data, browser, record):
+    for name in SCENARIOS:
+        if name not in args.only:
+            continue
+        if args.ax_mode == "none" and name in AX_ONLY_SCENARIOS:
+            data["scenarios"][name] = {"status": "skipped", "reason": "requires target-app AX controls"}
+            continue
+        entry = data["scenarios"][name] = {"runs": []}
+        log(f"{browser.name}: {name}, {args.runs} repetitions")
+        for index in range(args.runs*2):
+            trial = {"status": "pending"}
+            entry["runs"].append(trial)
+            with browser.evidence.attach(trial):
+                try:
+                    directory = record/name/f"{index+1:02d}" if record else None
+                    trial.update(scenario(browser, name, index, directory))
+                except InstrumentationUnavailable as error:
+                    trial.update(status="discarded", failure_stage="instrumentation", reason=str(error))
+                except (Invalid, subprocess.TimeoutExpired, OSError) as error:
+                    trial.update(status="discarded", reason=str(error))
+                    # An unsupported control cannot yield the requested repetitions.
+                    if index == 0 and any(reason in str(error) for reason in (
+                        "no comparable", "no visible accessible control", "foreground application",
+                    )):
+                        break
+            if sum(trial["status"] == "valid" for trial in entry["runs"]) >= args.runs:
+                break
+        summarize_scenario(entry, args.runs)
+
+
+def collect_browser(args, name, path, data, result, calibrated, evidence):
+    if args.ax_mode == "none" and name == "arc":
+        data.update(status="skipped", reason="Arc's existing tabs require AX ownership checks")
+        return calibrated
+    record = args.record_dir/name if args.record_dir else None
+    shots = args.out.parent/"shots"/name
+    browser = None
+    restart_arc = args.allow_arc_quit and name == "arc"
+    with evidence.attach(data):
+        try:
+            if "cold" in args.only:
+                log(f"{name}: {args.runs} launch trials. {launch_label(name)}.")
+                entry = data["cold_launch"] = {"status": "pending"}
+                with evidence.attach(entry):
+                    cold_launch(name, path, args.runs, record/"cold" if record else None,
+                                args.allow_arc_quit, evidence=evidence, entry=entry)
+                if entry["status"] != "valid":
+                    result["blockers"].append(f"{name} cold: {entry.get('reason', 'too few validated cold trials')}")
+                if restart_arc:
+                    data["left_running_pid"] = leave_arc_running(path)
+            if not args.only - {"cold"} or (args.ax_mode == "none" and not args.only - (AX_ONLY_SCENARIOS | {"cold"})):
+                for scenario_name in args.only & set(SCENARIOS):
+                    data["scenarios"][scenario_name] = {"status": "skipped", "reason": "requires target-app AX controls"}
+                for field in args.only & {"shots", "resources"}:
+                    data[field] = {"status": "skipped", "reason": "requires target-app AX controls"}
+                data["status"] = "captured"
+                return calibrated
+            log(f"{name}: opening benchmark session")
+            browser = Browser(name, path, evidence)
+            browser.sample_main = args.sample_main
+            browser.launch()
+            data.update(version=browser.version, pid=browser.pid, profile={
+                "arc": "persistent Arc profile",
+                "nook": "temporary tab state and persistent bundle data",
+                "chrome": "temporary user data directory",
+                "zen": "temporary profile",
+            }[name])
+            if not calibrated:
+                trial = data["validation"] = {"status": "pending"}
+                with evidence.attach(trial):
+                    trial.update(validation(browser, record/"calibration" if record else None))
+                calibrated = True
+                log(f"{name}: synthetic capture calibration passed")
+            if args.only & set(SCENARIOS):
+                browser.page(new=name != "zen")
+                collect_scenarios(args, data, browser, record)
+            for label, action in (("shots", lambda: screenshots(browser, shots)),
+                                  ("resources", lambda: resource_scenarios(browser, args.allow_arc_quit))):
+                if label not in args.only:
+                    continue
+                if args.ax_mode == "none":
+                    data[label] = {"status": "skipped", "reason": "requires target-app AX controls"}
+                    continue
+                if name != "arc" or (label == "resources" and restart_arc):
+                    browser.cleanup()
+                    if name == "arc":
+                        quit_arc(path)
+                        leave_arc_running(path)
+                    browser = Browser(name, path, evidence)
+                    browser.launch()
+                try:
+                    data[label] = action()
+                except (Invalid, subprocess.TimeoutExpired, OSError) as error:
+                    data[label] = {"status": "discarded", "reason": str(error)}
+                    result["blockers"].append(f"{name} {label}: {error}")
+            data["status"] = "captured"
+        except (Invalid, OSError, subprocess.TimeoutExpired) as error:
+            data.update(status="blocked", reason=str(error))
+            result["blockers"].append(f"{name}: {error}")
+            log(f"{name}: blocked: {error}")
+        finally:
+            with finish_on_interrupt():
+                if browser:
+                    try:
+                        browser.cleanup()
+                    except (Invalid, OSError, subprocess.TimeoutExpired) as error:
+                        browser.cleanup_error = str(error)
+                    if getattr(browser, "cleanup_error", None):
+                        data["cleanup_error"] = browser.cleanup_error
+                        result["blockers"].append(f"{name} cleanup: {browser.cleanup_error}")
+                if restart_arc and Path(path).exists():
+                    try:
+                        data["left_running_pid"] = leave_arc_running(path)
+                    except (Invalid, OSError, subprocess.TimeoutExpired) as error:
+                        result["blockers"].append(f"{name} relaunch: {error}")
+    return calibrated
+
+
+def capture_desktop(args, result, evidence):
+    paths = {"nook": args.nook_app, "arc": "/Applications/Arc.app", "zen": "/Applications/Zen.app",
+             "chrome": "/Applications/Google Chrome.app"}
+    calibrated = False
+    trace = trace_reader = None
+    trace_data = bytearray()
+    trace_limit = 64 * 1024**2
+    trace_truncated = False
+
+    def read_trace(pipe):
+        nonlocal trace_truncated
+        with pipe:
+            while chunk := pipe.read1(64 * 1024):
+                room = max(0, trace_limit - len(trace_data))
+                trace_data.extend(chunk[:room])
+                trace_truncated |= len(chunk) > room
+
     server = bench.DualStackServer(("::", bench.PORT), Handler)
     server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    paths = {"nook": args.nook_app, "arc": "/Applications/Arc.app", "zen": "/Applications/Zen.app", "chrome": "/Applications/Google Chrome.app"}
-    trace = None
-    trace_file = None
-    if args.signposts:
-        args.signposts.parent.mkdir(parents=True,exist_ok=True)
-        trace_file = args.signposts.open("w")
-        trace = subprocess.Popen(["/usr/bin/log","stream","--signpost","--level","debug","--style","ndjson","--predicate",'subsystem == "Nook.Perf"'],stdout=trace_file,stderr=subprocess.STDOUT)
-        time.sleep(.5)
-        if trace.poll() is not None:
-            trace_file.close()
-            raise Invalid("signpost stream exited before launch")
-    result["desktop_settings"] = {f"{domain}.{key}":subprocess.run(["defaults","read",domain,key],capture_output=True,text=True).stdout.strip()
-                                  for domain,key in (("com.apple.WindowManager","GloballyEnabled"),
-                                                     ("NSGlobalDomain","NSAutomaticWindowAnimationsEnabled"),
-                                                     ("com.apple.universalaccess","reduceMotion"),
-                                                     ("com.apple.universalaccess","reduceTransparency"))}
-    result["os_version"] = run(["sw_vers"]).strip()
-    calibrated = False
+    Handler.events.clear()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     try:
-        for name in names:
+        if args.signposts:
+            trace = subprocess.Popen(
+                ["/usr/bin/log", "stream", "--signpost", "--level", "debug", "--style", "ndjson",
+                 "--predicate", 'subsystem == "Nook.Perf"'],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            trace_reader = threading.Thread(target=read_trace, args=(trace.stdout,), daemon=True)
+            trace_reader.start()
+            time.sleep(.5)
+            if trace.poll() is not None:
+                raise Invalid("signpost stream exited before launch")
+        settings = (("com.apple.WindowManager", "GloballyEnabled"),
+                    ("NSGlobalDomain", "NSAutomaticWindowAnimationsEnabled"),
+                    ("com.apple.universalaccess", "reduceMotion"),
+                    ("com.apple.universalaccess", "reduceTransparency"))
+        result["desktop_settings"] = {
+            f"{domain}.{key}": subprocess.run(["defaults", "read", domain, key], capture_output=True,
+                                              text=True, timeout=5).stdout.strip()
+            for domain, key in settings
+        }
+        result["os_version"] = run(["sw_vers"]).strip()
+        result["load1"] = check_load(args.max_load1)
+        result["preflight"]["status"] = "ready"
+        for name in args.names:
             data = result["browsers"][name] = {"scenarios": {}}
-            browser = None
             try:
-                if name == "nook":
-                    deadline = time.monotonic()+args.wait_build
-                    exe = Path(args.nook_app)/"Contents/MacOS/Nook"
-                    while not exe.exists() and time.monotonic() < deadline:
-                        log("waiting for baseline Nook build"); time.sleep(5)
-                    if not exe.exists():
-                        raise Invalid("baseline build did not appear before wait deadline")
-                browser = Browser(name, paths[name])
-                browser.sample_main = args.sample_main
-                if "cold" in only:
-                    log(f"{name}: {args.runs} launch trials. {launch_label(name)}.")
-                    try:
-                        data["cold_launch"] = cold_launch(name, paths[name], args.runs, args.record_dir/name/"cold" if args.record_dir else None,args.allow_arc_quit)
-                    finally:
-                        if name == "arc" and args.allow_arc_quit:
-                            data["left_running_pid"] = leave_arc_running(paths[name])
-                    if data["cold_launch"]["status"] != "valid":
-                        blockers.append(f"{name} cold: {data['cold_launch'].get('reason', 'fewer than ten validated cold trials')}")
-                    save()
-                log(f"{name}: opening benchmark session")
-                browser.launch()
-                data.update({"version": browser.version, "pid": browser.pid, "profile": {
-                    "arc": "persistent Arc profile",
-                    "nook": "temporary tab state and persistent bundle data",
-                    "chrome": "temporary user data directory",
-                    "zen": "temporary profile",
-                }[name]})
-                if not calibrated:
-                    data["validation"] = validation(browser, args.record_dir/name/"calibration" if args.record_dir else None)
-                    calibrated = True
-                    log(f"{name}: synthetic capture calibration passed")
-                browser.page(new=name != "zen")
-                for scenario_name in SCENARIOS:
-                    if scenario_name not in only:
-                        continue
-                    entry = data["scenarios"][scenario_name] = {"runs": []}
-                    log(f"{name}: {scenario_name}, {args.runs} repetitions")
-                    for i in range(args.runs*2):
-                        try:
-                            rec = args.record_dir/name/scenario_name/f"{i+1:02d}" if args.record_dir else None
-                            entry["runs"].append(scenario(browser, scenario_name, i, rec))
-                        except (Invalid, subprocess.TimeoutExpired) as error:
-                            entry["runs"].append({"status":"discarded", "reason":str(error)})
-                            # An unsupported control cannot yield ten validated trials.
-                            if i == 0 and any(reason in str(error) for reason in ("no comparable", "no visible accessible control", "foreground application")):
-                                break
-                        if sum(r["status"] == "valid" for r in entry["runs"]) >= args.runs:
-                            break
-                    valid = [r for r in entry["runs"] if r["status"] == "valid"]
-                    entry["n"] = len(valid)
-                    entry["status"] = "valid" if len(valid) >= 10 else "discarded"
-                    if entry["status"] == "valid":
-                        entry["summary"] = {field:summary([r.get(field) for r in valid]) for field in valid[0] if field not in ("raw","status")}
-                    else:
-                        reasons = sorted({r["reason"] for r in entry["runs"] if "reason" in r})
-                        entry["reason"] = "; ".join(reasons) or "fewer than ten validated repetitions"
-                        blockers.append(f"{name} {scenario_name}: {entry['reason']}")
-                    save()
-                if "shots" in only:
-                    if name != "arc":
-                        browser.cleanup(); browser = Browser(name, paths[name]); browser.launch()
-                    try:
-                        data["shots"] = screenshots(browser, args.out.parent/"shots"/name)
-                    except (Invalid, subprocess.TimeoutExpired) as error:
-                        data["shots_error"] = str(error); blockers.append(f"{name} screenshots: {error}")
-                        if window(browser.pid):
-                            try:
-                                capture(browser.pid,duration=.6,record=args.out.parent/"shots"/name/"blocked-shots")
-                            except (Invalid,subprocess.TimeoutExpired):
-                                pass
-                if "resources" in only:
-                    # Relaunch so UI trials and screenshots cannot contaminate tab count.
-                    if name != "arc":
-                        browser.cleanup(); browser = Browser(name, paths[name]); browser.launch()
-                    elif args.allow_arc_quit:
-                        browser.cleanup()
-                        quit_arc(paths[name]); leave_arc_running(paths[name])
-                        browser = Browser(name, paths[name]); browser.launch()
-                    try:
-                        data["resources"] = resource_scenarios(browser,args.allow_arc_quit)
-                    except (Invalid, subprocess.TimeoutExpired) as error:
-                        data["resources"] = {"status":"discarded", "reason":str(error)}
-                        blockers.append(f"{name} resources: {error}")
-            except (Invalid, OSError, subprocess.TimeoutExpired) as error:
-                data.update({"status":"blocked", "reason":str(error)})
-                blockers.append(f"{name}: {error}"); log(f"{name}: blocked: {error}")
-                if browser and browser.pid and window(browser.pid):
-                    try:
-                        capture(browser.pid, duration=.6, record=args.out.parent/"shots"/name/"blocked")
-                    except (Invalid, subprocess.TimeoutExpired):
-                        pass
+                calibrated = collect_browser(args, name, paths[name], data, result, calibrated, evidence)
             finally:
-                if browser:
-                    browser.cleanup()
-                    if getattr(browser,"cleanup_error",None):
-                        data["cleanup_error"] = browser.cleanup_error
-                        blockers.append(f"{name} cleanup: {browser.cleanup_error}")
-                if name == "arc" and args.allow_arc_quit:
-                    data["left_running_pid"] = leave_arc_running(paths[name])
-                save()
+                # The browser and its throwaway profile are gone before either write.
+                with finish_on_interrupt():
+                    for scenario_name, entry in data["scenarios"].items():
+                        if entry.get("status") == "discarded":
+                            result["blockers"].append(f"{name} {scenario_name}: {entry['reason']}")
+                    write_json(args.out, result)
+                    if errors := evidence.flush():
+                        result.setdefault("artifact_errors", {}).update(errors)
+                        write_json(args.out, result)
     finally:
-        if trace:
-            trace.terminate(); trace.wait(timeout=5); trace_file.close()
-        server.shutdown()
-        bench.forget_favicons([bench.PORT])
+        with finish_on_interrupt():
+            try:
+                if trace:
+                    if trace.poll() is None:
+                        trace.terminate()
+                        try:
+                            trace.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            trace.kill()
+                            trace.wait(timeout=5)
+                    if trace_reader:
+                        trace_reader.join(timeout=5)
+                    if trace_truncated or (trace_reader and trace_reader.is_alive()):
+                        result["blockers"].append("signposts reached the 64 MiB in-memory limit")
+                    try:
+                        saved_trace = bytes(trace_data)
+                        length = saved_trace.rfind(b"\n") + 1
+                        write_atomic(args.signposts, lambda stream: stream.write(saved_trace[:length]), "wb")
+                    except OSError as error:
+                        result.setdefault("artifact_errors", {})[str(args.signposts)] = str(error)
+            finally:
+                server.shutdown()
+                server.server_close()
+                bench.forget_favicons([bench.PORT])
+
+
+def offline_analysis(args, result):
+    deadline = time.monotonic() + args.ocr_budget
+    for data in result["browsers"].values():
+        for name, entry in data.get("scenarios", {}).items():
+            for trial in entry.get("runs", []):
+                raw = trial.get("raw")
+                if raw is None:
+                    continue
+                try:
+                    validate_timeline(raw)
+                    raw["timestamp_validation"] = "valid"
+                except (Invalid, KeyError, TypeError, ValueError) as error:
+                    raw["timestamp_validation"] = str(error)
+                    trial.update(status="discarded", failure_stage="timing", reason=str(error))
+                    continue
+                readiness = raw.get("readiness")
+                if name != "command" or not readiness:
+                    continue
+                trial.pop("input_ready_ms", None)
+                trial.pop("input_ready_key_to_frame_ms", None)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 and readiness["capture_status"] == "captured":
+                    readiness["recognition"] = {"status": "budget_exhausted", "reason": "offline Vision budget elapsed"}
+                    continue
+                recognition = readiness["recognition"] = recognize_input(
+                    readiness, lambda path: helper("ocr", path, timeout=min(args.ocr_timeout, remaining)),
+                    root=args.out.parent,
+                )
+                if recognition["status"] == "matched" and readiness["browser_status"] == "responsive":
+                    trial["input_ready_ms"] = recognition["action_start_ms"]
+                    if "key_to_frame_ms" in recognition:
+                        trial["input_ready_key_to_frame_ms"] = recognition["key_to_frame_ms"]
+            if entry.get("runs"):
+                summarize_scenario(entry, result.get("requested_runs", args.runs))
+                if name == "command":
+                    update_readiness_counts(entry)
+    result["analysis_status"] = "complete"
+
+
+def update_readiness_counts(entry):
+    trials = [trial.get("raw", {}).get("readiness", {}) for trial in entry["runs"]]
+    entry["readiness_counts"] = {
+        field: dict(Counter(trial.get(field, "unavailable") for trial in trials))
+        for field in ("capture_status", "browser_status")
+    }
+    entry["readiness_counts"]["recognition"] = dict(
+        Counter(trial.get("recognition", {}).get("status", "unavailable") for trial in trials)
+    )
+
+
+def wait_for_build(args):
+    exe = Path(args.nook_app)/"Contents/MacOS/Nook"
+    if exe.exists():
+        return
+    deadline = time.monotonic()+args.wait_build
+    log(f"waiting for isolated Nook build at {exe}")
+    while not exe.exists() and time.monotonic() < deadline:
+        time.sleep(min(5, max(0, deadline-time.monotonic())))
+
+
+def run_phases(args):
+    result = new_result(args)
+    result["requested_runs"] = args.runs
+    evidence = Evidence(args.out.with_name(args.out.stem+"-evidence"), args.ax_mode)
+    output_paths = [args.out, evidence.folder.parent/"crop.json"]
+    if "shots" in args.only and args.ax_mode == "inspected":
+        output_paths.append(args.out.parent/"shots"/"capture.png")
+    if args.record_dir:
+        output_paths.append(args.record_dir/"capture.png")
+    if args.signposts:
+        output_paths.append(args.signposts)
+    space_paths = [*output_paths, HELPER, tempfile.gettempdir()]
+    if "resources" in args.only and args.ax_mode == "inspected":
+        space_paths.append(VIDEO)
+    if args.phase == "analyze":
+        with exclusive(args.lock_wait, log):
+            result = json.loads(args.out.read_text())
+            if result.get("capture_status") not in {"complete", "interrupted"}:
+                raise Invalid("the evidence file does not contain a finished or interrupted capture")
+            prepare_helper(args)
+            offline_analysis(args, result)
+            save_result(args, result)
+    else:
+        # Reject low space even when another experiment owns the lock.
+        disk_headroom(space_paths, args.min_free_gib)
+        while True:
+            with exclusive(args.lock_wait, log):
+                try:
+                    desktop_preflight(args, result, output_paths, space_paths)
+                    if args.phase == "preflight":
+                        result["load1"] = check_load(args.max_load1)
+                        result["preflight"]["status"] = "ready"
+                        save_result(args, result)
+                        return 0
+                    needs_build = "nook" in args.names and not (Path(args.nook_app)/"Contents/MacOS/Nook").exists()
+                    if not needs_build:
+                        if "resources" in args.only and args.ax_mode == "inspected" and not VIDEO.exists():
+                            VIDEO.parent.mkdir(parents=True, exist_ok=True)
+                            helper("video", VIDEO)
+                        result["capture_status"] = "running"
+                        capture_desktop(args, result, evidence)
+                        result["capture_status"] = "complete"
+                        result["analysis_status"] = "pending"
+                        for data in result["browsers"].values():
+                            if "runs" in (entry := data.get("scenarios", {}).get("command", {})):
+                                update_readiness_counts(entry)
+                        save_result(args, result)
+                        if args.phase == "all":
+                            offline_analysis(args, result)
+                            save_result(args, result)
+                        break
+                    if args.wait_build <= 0:
+                        raise Invalid("isolated Nook build did not appear before the wait deadline")
+                except Interrupted:
+                    if result.get("capture_status") == "running":
+                        result["capture_status"] = "interrupted"
+                        with finish_on_interrupt():
+                            save_result(args, result)
+                    raise
+                except (Invalid, OSError, subprocess.TimeoutExpired, ValueError) as error:
+                    result["blockers"].append(str(error))
+                    if result.get("capture_status") != "complete":
+                        result["capture_status"] = "blocked"
+                    if result["preflight"].get("status") != "ready":
+                        result["preflight"].update(status="blocked", reason=str(error))
+                        result["browsers"] = {name: {"status": "blocked", "reason": str(error)} for name in args.names}
+                    save_result(args, result)
+                    log(str(error))
+                    return 1
+            # The coordinated build may need the same lock while we wait.
+            wait_for_build(args)
+            args.wait_build = 0
     print(markdown(result))
     return 0
+
+
+def main(argv=None):
+    global HELPER, HELPER_TIMEOUT
+    args = parse_args(argv)
+    HELPER = args.helper_path or BUNDLED_HELPER
+    HELPER_TIMEOUT = args.helper_timeout
+    try:
+        with cooperative_signals():
+            return run_phases(args)
+    except Interrupted as error:
+        log(str(error))
+        return 128 + error.signum
+    except (Invalid, OSError, subprocess.TimeoutExpired, ValueError) as error:
+        log(str(error))
+        return 1
 
 
 if __name__ == "__main__":

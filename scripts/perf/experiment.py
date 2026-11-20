@@ -86,7 +86,7 @@ def worktree_caches(root, device):
         )
     except (OSError, subprocess.SubprocessError):
         return []
-    opened = [line[1:] for line in files.stdout.splitlines() if line.startswith("n/")]
+    opened = {os.path.realpath(line[1:]) for line in files.stdout.splitlines() if line.startswith("n/")}
     if not opened:
         return []
     candidates = []
@@ -94,7 +94,7 @@ def worktree_caches(root, device):
         if not entry.startswith("worktree "):
             continue
         tree = Path(entry.removeprefix("worktree ")).resolve()
-        if tree == root:
+        if tree == Path(root).resolve():
             continue
         cache = tree / "build"
         if (cache.is_symlink() or not cache.is_dir() or cache.stat().st_dev != device
