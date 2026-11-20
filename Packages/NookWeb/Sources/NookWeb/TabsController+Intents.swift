@@ -175,29 +175,42 @@ extension TabsController {
         tabEvents?.tabClosed(itemID: session.itemID)
     }
 
-    /// A WebKit-created popup from `opener`: a new selected tab in the opener's window whose
-    /// session owns `webView`. WebKit drives the popup's first navigation.
+    /// Adds WebKit's popup view to a tab before selection can load a view of its own.
     @discardableResult
     func adoptPopup(webView: WKWebView, url: URL?, opener: PageSession) -> UUID? {
-        guard let window = window(for: opener), let position = childTabPosition(in: window, opener: opener.itemID)
-        else { return nil }
+        let window = window(for: opener)
+        let isAgentPopup = opener.isAgentPage
+        let position: (Parent, UUID?)
+        let owner: Owner
+        if let window, let inWindow = childTabPosition(in: window, opener: opener.itemID) {
+            position = inWindow
+            owner = self.owner(of: window)
+        } else if isAgentPopup, let item = tree.item(opener.itemID) {
+            position = (item.parent, opener.itemID)
+            owner = .main
+        } else {
+            return nil
+        }
+
         let id = UUID()
         let pageURL = url ?? URL(string: "about:blank")!
-        guard perform(owner(of: window), "popup", {
+        guard perform(owner, "popup", {
             try $0.createTab(id: id, url: pageURL, title: "New Tab", in: position.0, after: position.1)
-        }) != nil else { return nil }
+        }) != nil, let session = ensureSession(for: id) else { return nil }
         revealTrail(position.0)
-        let session = PageSession(
-            itemID: id, url: pageURL, title: "New Tab", isPrivate: window.privateTree != nil,
-            controller: self)
         session.isPopupHost = true
-        register(session, in: window)
         session.installPopupWebView(webView)
-        if let url, url.scheme != nil, url.absoluteString != "about:blank" {
-            session.load(url)
+
+        if isAgentPopup {
+            session.onClose = { [weak self] in self?.close(id, archive: false) }
+            // WebKit loads the request from the opener after the delegate returns.
+            selectForAgent(id)
+        } else if let window {
+            if let url, url.scheme != nil, url.absoluteString != "about:blank" {
+                session.load(url)
+            }
+            select(id, in: window)
         }
-        // Select only after the session owns its view, so selection cannot create a second one.
-        select(id, in: window)
         return id
     }
 
