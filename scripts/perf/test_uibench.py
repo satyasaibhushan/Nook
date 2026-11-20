@@ -341,6 +341,22 @@ class ObstructionTests(unittest.TestCase):
 
 
 class CaptureModeTests(unittest.TestCase):
+    def test_scroll_samples_resources_before_inspecting_captured_rows(self):
+        events = []
+        raw = raw_capture()
+        raw["events"][0]["action"] = {"kind": "scroll"}
+        browser = SimpleNamespace(
+            pid=42, ax_mode="none", activate=Mock(), page=Mock(),
+            resources=Mock(side_effect=lambda: events.append("resources") or {"cpu_s": 1}),
+            capture=Mock(side_effect=lambda *a, **kw: events.append("capture") or raw),
+        )
+        with patch.object(uibench, "window", return_value=row()), patch.object(uibench, "act"), patch.object(
+            uibench, "analyze", side_effect=lambda *a: events.append("analyze") or {},
+        ):
+            trial = uibench.scenario(browser, "scroll", 0, None)
+        self.assertEqual(events, ["resources", "capture", "resources", "analyze"])
+        self.assertEqual(trial["cpu_percent"], 0)
+
     def test_ax_none_refuses_to_send_any_target_accessibility_command(self):
         browser = object.__new__(uibench.Browser)
         browser.ax_mode = "none"
@@ -483,6 +499,24 @@ class PersistenceTests(unittest.TestCase):
                 browser.spawn(["isolated"], {})
         self.assertIs(browser.proc, process)
         self.assertEqual(browser.pid, 42)
+
+    def test_signal_during_occluder_handoff_stops_the_child(self):
+        browser = SimpleNamespace(pid=42, ax_mode="none", activate=Mock(), page=Mock(), capture=Mock())
+        process = SimpleNamespace(pid=43, poll=Mock(return_value=None), terminate=Mock(), communicate=Mock())
+
+        def spawn(*args, **kwargs):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return process
+
+        with uibench.cooperative_signals(), patch.object(uibench, "window", return_value=row()), patch.object(
+            uibench, "act",
+        ), patch.object(uibench.time, "sleep"), patch.object(uibench.subprocess, "Popen", side_effect=spawn):
+            with self.assertRaises(experiment.Interrupted):
+                uibench.scenario(browser, "activate", 0, None)
+
+        process.terminate.assert_called_once()
+        process.communicate.assert_called_once_with(timeout=5)
+        browser.capture.assert_not_called()
 
 
 class OfflineAnalysisTests(unittest.TestCase):

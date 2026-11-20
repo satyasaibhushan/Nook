@@ -61,6 +61,23 @@ class ScreenPreflightTests(unittest.TestCase):
         self.assertEqual(commands, ["permissions", "footprint"])
         self.assertIn("kernel footprint query was denied", result["preflight"]["reason"])
 
+    def test_blocked_summary_path_stops_preflight_before_helper_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root/"result.json"
+            out.write_text("existing capture")
+            out.with_suffix(".md").mkdir()
+            with patch.object(experiment, "LOCK_PATH", root/"lock"), patch.object(
+                uibench, "disk_headroom", return_value=[],
+            ), patch.object(uibench, "prepare_helper") as prepare:
+                status = uibench.main(["--phase", "preflight", "--out", str(out)])
+
+            self.assertEqual(status, 1)
+            self.assertEqual(out.read_text(), "existing capture")
+            report = json.loads((root/"result-preflight.json").read_text())
+            self.assertIn("result.md is not a regular file", report["preflight"]["reason"])
+            prepare.assert_not_called()
+
     def test_pure_mode_needs_posting_permission_but_does_not_require_ax(self):
         import os
         status, result, commands = self.preflight({

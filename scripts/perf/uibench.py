@@ -927,14 +927,16 @@ def scenario(browser, name, index, record):
     try:
         if name == "activate":
             attribution["window_id"] = window(browser.pid)["kCGWindowNumber"]
-            occluder = subprocess.Popen([str(HELPER), "occlude", *map(str,window_rect)],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with finish_on_interrupt():
+                occluder = subprocess.Popen([str(HELPER), "occlude", *map(str,window_rect)],
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(.35)
         if getattr(browser, "sample_main", False) and record:
-            sampler = subprocess.Popen(
-                ["/usr/bin/sample", str(browser.pid), str(math.ceil(duration+1)), "1", "-file", "/dev/stdout"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            )
+            with finish_on_interrupt():
+                sampler = subprocess.Popen(
+                    ["/usr/bin/sample", str(browser.pid), str(math.ceil(duration+1)), "1", "-file", "/dev/stdout"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                )
         raw = browser.capture(actions, duration, record, signatures=name == "activate",
                               region=region, attribution=attribution, allowed_owner=occluder.pid if occluder else None)
         if start is not None:
@@ -1356,11 +1358,15 @@ def parse_args(argv):
     if args.out.suffix.lower() != ".json":
         parser.error("--out must name a .json evidence file")
     args.out = args.out.expanduser().resolve()
+    args.preflight_path = args.out.with_name(args.out.stem+"-preflight.json")
+    args.report_paths = (args.out.with_suffix(".md"), args.out.parent/"BLOCKERS.md")
+    if args.report_paths[0].name.casefold() == args.report_paths[1].name.casefold():
+        parser.error("--out must use a stem other than BLOCKERS")
     if args.record_dir:
         args.record_dir = args.record_dir.expanduser().resolve()
     if args.signposts:
         args.signposts = args.signposts.expanduser().resolve()
-        if args.signposts in {args.out, args.out.with_suffix(".md"), args.out.parent/"BLOCKERS.md"}:
+        if args.signposts in {args.out, args.preflight_path, *args.report_paths}:
             parser.error("--signposts must have a separate output path")
     args.nook_app = Path(args.nook_app).expanduser().resolve()
     if args.phase != "analyze" and "nook" in names:
@@ -1390,11 +1396,12 @@ def new_result(args):
 
 
 def save_result(args, result):
+    summary_path, blockers_path = args.report_paths
     write_json(args.out, result)
-    write_atomic(args.out.with_suffix(".md"), lambda stream: stream.write(markdown(result)))
+    write_atomic(summary_path, lambda stream: stream.write(markdown(result)))
     blockers = "# UI benchmark blockers and discarded measurements\n\n"
     blockers += "".join(f"- {item}\n" for item in result["blockers"])
-    write_atomic(args.out.parent/"BLOCKERS.md", lambda stream: stream.write(blockers))
+    write_atomic(blockers_path, lambda stream: stream.write(blockers))
 
 
 def prepare_helper(args):
@@ -1598,13 +1605,14 @@ def capture_desktop(args, result, evidence):
     thread.start()
     try:
         if args.signposts:
-            trace = subprocess.Popen(
-                ["/usr/bin/log", "stream", "--signpost", "--level", "debug", "--style", "ndjson",
-                 "--predicate", 'subsystem == "Nook.Perf"'],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            )
-            trace_reader = threading.Thread(target=read_trace, args=(trace.stdout,), daemon=True)
-            trace_reader.start()
+            with finish_on_interrupt():
+                trace = subprocess.Popen(
+                    ["/usr/bin/log", "stream", "--signpost", "--level", "debug", "--style", "ndjson",
+                     "--predicate", 'subsystem == "Nook.Perf"'],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                )
+                trace_reader = threading.Thread(target=read_trace, args=(trace.stdout,), daemon=True)
+                trace_reader.start()
             time.sleep(.5)
             if trace.poll() is not None:
                 raise Invalid("signpost stream exited before launch")
@@ -1727,10 +1735,8 @@ def run_phases(args):
     result = new_result(args)
     result["requested_runs"] = args.runs
     evidence = Evidence(args.out.with_name(args.out.stem+"-evidence"), args.ax_mode)
-    preflight_path = args.out.with_name(args.out.stem+"-preflight.json")
-    output_paths = [args.out, evidence.folder.parent/"crop.json"]
-    if args.phase == "preflight":
-        output_paths.append(preflight_path)
+    preflight_path = args.preflight_path
+    output_paths = [args.out, *args.report_paths, preflight_path, evidence.folder.parent/"crop.json"]
     if "shots" in args.only and args.ax_mode == "inspected":
         output_paths.append(args.out.parent/"shots"/"capture.png")
     if args.record_dir:
@@ -1745,6 +1751,7 @@ def run_phases(args):
             result = json.loads(args.out.read_text())
             if result.get("capture_status") not in {"complete", "interrupted"}:
                 raise Invalid("the evidence file does not contain a finished or interrupted capture")
+            check_evidence([args.out, *args.report_paths])
             prepare_helper(args)
             offline_analysis(args, result)
             save_result(args, result)
