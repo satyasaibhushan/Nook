@@ -319,6 +319,13 @@ func recognize(_ path: String) throws {
           let frames = spec["frames"] as? [[String: Any]] else {
         throw NSError(domain: "invalid input evidence", code: 16)
     }
+    if frames.isEmpty { emit(["first_text_frame": NSNull()]); return }
+    let request = VNRecognizeTextRequest()
+    // The short ASCII probe is compatible with Vision's fast path, which
+    // avoids loading the accurate model for each offline process.
+    request.recognitionLevel = .fast
+    request.recognitionLanguages = ["en-US"]
+    request.usesLanguageCorrection = false
     for frame in frames {
         guard let timestamp = frame["t"] as? Double, timestamp.isFinite,
               let encoded = frame["png"] as? String,
@@ -326,11 +333,6 @@ func recognize(_ path: String) throws {
               let bitmap = NSBitmapImageRep(data: data), let image = bitmap.cgImage else {
             throw NSError(domain: "cannot decode cropped input frame", code: 16)
         }
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.recognitionLanguages = ["en-US"]
-        request.usesLanguageCorrection = false
-        request.customWords = [needle]
         try VNImageRequestHandler(cgImage: image).perform([request])
         let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined().lowercased().filter { !$0.isWhitespace }
         if text.contains(needle.lowercased()) {
@@ -414,7 +416,10 @@ func transparentContainer(windowID: CGWindowID, pid: pid_t) async throws -> Bool
                 application.run(); return
             }
             if command == "windows" {
-                let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+                guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                            kCGNullWindowID) as? [[String: Any]] else {
+                    throw NSError(domain: "Window Server did not return a window list", code: 17)
+                }
                 emit(list); return
             }
             if command == "ax" || command == "ax-focused" {
