@@ -261,7 +261,7 @@ final class DevMCPServer {
     /// A tool that never returns must not hold its connection open for ever, so
     /// every call races a deadline and nil means the deadline won. The losing work
     /// is cancelled but may not notice: `evaluateJavaScript` cannot be cancelled.
-    private func withTimeout<T: Sendable>(_ seconds: Double, operation: @escaping @MainActor () async -> T) async -> T? {
+    func withTimeout<T: Sendable>(_ seconds: Double, operation: @escaping @MainActor () async -> T) async -> T? {
         // Not a task group: a group waits for its children even after cancelAll(),
         // so an abandoned evaluateJavaScript would still hold the connection open
         // for as long as it took. These two tasks race and the loser is dropped.

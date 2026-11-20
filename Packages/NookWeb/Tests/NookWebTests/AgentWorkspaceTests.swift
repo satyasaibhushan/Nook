@@ -106,6 +106,28 @@ struct AgentWorkspaceTests {
         }
     }
 
+    @Test func nativeClickPreflightExplainsObscuredAndDisabledTargets() async throws {
+        let fixture = Workspace()
+        defer { fixture.cleanUp() }
+        let tabs = fixture.tabs
+        let caller = try tabs.startAgentCaller(id: "test", name: "Test", logins: nil)
+        let id = try #require(await tabs.openAgentTab(blank, for: caller))
+        let page = try #require(tabs.session(for: id))
+        let view = try #require(page.webView)
+        #expect(await page.waitForLoad(timeout: .seconds(3), startGrace: .milliseconds(100)))
+        _ = try await view.evaluateJavaScript("""
+            document.body.innerHTML =
+              '<button id="covered">Continue</button>' +
+              '<div style="position:fixed;inset:0;z-index:1" aria-label="Overlay"></div>' +
+              '<fieldset disabled><button id="disabled">Submit</button></fieldset>';
+            """)
+
+        let covered = try await page.agentScript("return __nookAgent.locate({ selector: '#covered' })") as? [String: Any]
+        #expect((covered?["covered"] as? String)?.contains("Overlay") == true)
+        let disabled = try await page.agentScript("return __nookAgent.locate({ selector: '#disabled' })") as? [String: Any]
+        #expect(disabled?["disabled"] as? Bool == true)
+    }
+
     private func cookie(_ name: String, _ value: String) -> HTTPCookie {
         HTTPCookie(properties: [.name: name, .value: value, .domain: "workspace.example", .path: "/"])!
     }

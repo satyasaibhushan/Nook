@@ -125,22 +125,34 @@ enum AgentInputScript {
       }
 
       // Where to click `spec`: its centre after scrolling it into view, and what covers it there.
+      function matchesClickTarget(el, hit) {
+        return hit === el || el.contains(hit) || el.control === hit || hit.control === el;
+      }
       let clickSeen = null, clickTarget = null;
       window.addEventListener('click', e => {
-        if (clickTarget && (e.target === clickTarget || clickTarget.contains(e.target))) clickSeen = { trusted: e.isTrusted };
+        if (!clickTarget || !(e.target instanceof Element)) return;
+        if (matchesClickTarget(clickTarget, e.target)) {
+          clickSeen = { trusted: e.isTrusted };
+        } else if (e.isTrusted && !clickSeen) {
+          clickSeen = { unexpected: describe(e.target) };
+        }
       }, true);
       function locate(spec) {
         const el = find(Object.assign({ clickable: true }, spec));
         el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         const r = el.getBoundingClientRect();
         const out = { element: describe(el), ref: P.ref(el), width: window.innerWidth };
-        if (r.width === 0 || r.height === 0) { out.hidden = true; return out; }
+        if (!visible(el)) { out.hidden = true; return out; }
+        if (el.matches(':disabled, [aria-disabled="true"]') || el.control?.matches(':disabled')) {
+          out.disabled = true;
+          return out;
+        }
+        out.frame = el.matches('iframe, frame');
         out.x = r.left + r.width / 2;
         out.y = r.top + r.height / 2;
         const hit = document.elementFromPoint(out.x, out.y);
-        if (!hit || !(hit === el || el.contains(hit) || (el.control && el.control === hit) || (hit.control && hit.control === el))) {
-          out.covered = hit ? describe(hit) : 'nothing (outside the viewport)';
-        }
+        if (!hit) out.outside = true;
+        else if (!matchesClickTarget(el, hit)) out.covered = describe(hit);
         clickSeen = null;
         clickTarget = el;
         return out;
@@ -149,6 +161,8 @@ enum AgentInputScript {
       function scriptClick(ref) {
         const el = P.resolve(ref);
         if (!el) throw new Error('The element left the page');
+        if (el.matches(':disabled')) throw new Error(describe(el) + ' is disabled.');
+        if (typeof el.click !== 'function') throw new Error(describe(el) + ' cannot be clicked from script.');
         el.click();
       }
 
