@@ -12,6 +12,8 @@ import argparse, json, os, plistlib, shutil, socket, statistics, subprocess, sys
 import struct, urllib.parse, urllib.request, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import experiment
+
 PORT = 8765
 MCP_PORT = 47901
 HOST = f"http://127.0.0.1:{PORT}"
@@ -577,6 +579,16 @@ def main():
     ap.add_argument("--only", default="cold,single,newhost,burst")
     ap.add_argument("--no-favicon", action="store_true", help="sites answer 404 for their icon")
     a = ap.parse_args()
+    paths = [tempfile.gettempdir(), a.out or os.curdir]
+    experiment.disk_headroom(paths, experiment.CAPTURE_FREE_GIB)
+    with experiment.exclusive():
+        experiment.disk_headroom(paths, experiment.CAPTURE_FREE_GIB)
+        with experiment.cooperative_signals():
+            benchmark(a)
+
+
+def benchmark(a):
+    load = experiment.check_load()
     SERVE_FAVICON[0] = not a.no_favicon
     ports = start_new_sites()
 
@@ -585,11 +597,11 @@ def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     app = App(a.app)
-    app.defaults()
     kinds = ["light", "dom", "js", "res", "dyn"]
     result = {"label": a.label, "app": app.path, "when": time.strftime("%H:%M:%S"),
-              "load1": os.getloadavg()[0]}
+              "load1": load}
     try:
+        app.defaults()
         if "cold" in a.only: result["cold"] = scenario_cold(app, 5)
         if "single" in a.only: result["single"] = scenario_single(app, a.runs, kinds)
         if "newhost" in a.only: result["newhost"] = scenario_single(app, a.runs, kinds, new_hosts=True)
@@ -598,12 +610,23 @@ def main():
         if "busy" in a.only: result["busy"] = scenario_busy(app, 10)
         if "switch" in a.only: result["switch"] = scenario_switch(app, 12, ["light", "dom", "res"])
     finally:
-        app.quit(graceful=False)
-        forget_favicons(ports + [PORT])
+        with experiment.finish_on_interrupt():
+            try:
+                app.quit(graceful=False)
+            finally:
+                server.shutdown()
+                server.server_close()
+                forget_favicons(ports + [PORT])
     text = json.dumps(result, indent=1)
     if a.out:
         with open(a.out, "w") as f: f.write(text)
     print(text)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except experiment.Interrupted as error:
+        print(error, file=sys.stderr)
+        sys.exit(128 + error.signum)
+    except experiment.Invalid as error:
+        sys.exit(str(error))
