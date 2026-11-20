@@ -25,8 +25,8 @@ struct AgentWorkspaceTests {
         }
         let visibleSpace = window.spaceID
 
-        let caller = try await tabs.startAgentCaller(id: "test", name: "Test", logins: nil)
-        let openerID = try #require(tabs.openAgentTab(blank, for: caller))
+        let caller = try tabs.startAgentCaller(id: "test", name: "Test", logins: nil)
+        let openerID = try #require(await tabs.openAgentTab(blank, for: caller))
         let opener = try #require(tabs.session(for: openerID))
         let openerView = try #require(opener.webView)
         #expect(await opener.waitForLoad(timeout: .seconds(3), startGrace: .milliseconds(100)))
@@ -66,6 +66,53 @@ struct AgentWorkspaceTests {
         #expect(tabs.agentTabs(of: caller) == [openerID])
         #expect(tabs.agentCurrentTab(of: caller) == openerID)
     }
+
+    @Test func emptyWorkspaceRecopiesTheSourceCookiesOnNextOpen() async throws {
+        let fixture = Workspace()
+        defer { fixture.cleanUp() }
+        let tabs = fixture.tabs
+        let space = try #require(tabs.tree.orderedSpaces.first)
+        let source = try #require(tabs.profile(forSpace: space.id))
+        defer { fixture.removeSourceStore() }
+        let sourceCookies = source.dataStore.httpCookieStore
+        await sourceCookies.setCookie(cookie("session", "first"))
+        await sourceCookies.setCookie(cookie("removed", "first"))
+
+        let caller = try tabs.startAgentCaller(id: "test", name: "Test", logins: space.name)
+        _ = try #require(await tabs.openAgentTab(blank, for: caller))
+        let firstStore = caller.profile.dataStore
+        let firstCookies = firstStore.httpCookieStore
+        #expect(await values(firstCookies) == ["session": "first", "removed": "first"])
+
+        await sourceCookies.setCookie(cookie("session", "second"))
+        await sourceCookies.deleteCookie(cookie("removed", "first"))
+        await firstCookies.setCookie(cookie("session", "agent"))
+        await firstCookies.setCookie(cookie("agent-only", "agent"))
+        _ = try #require(await tabs.openAgentTab(blank, for: caller, name: "second"))
+        #expect(caller.profile.dataStore === firstStore)
+        #expect(await values(firstCookies)["session"] == "agent")
+        #expect(await values(sourceCookies) == ["session": "second"])
+
+        tabs.closeAgentTabs(of: caller)
+        async let firstOpen = tabs.openAgentTab(blank, for: caller, name: "reopened")
+        async let secondOpen = tabs.openAgentTab(blank, for: caller, name: "parallel")
+        let (firstID, secondID) = try await (firstOpen, secondOpen)
+        let refreshedStore = caller.profile.dataStore
+        #expect(refreshedStore !== firstStore)
+        #expect(await values(refreshedStore.httpCookieStore) == ["session": "second"])
+        for id in [try #require(firstID), try #require(secondID)] {
+            let view = try #require(tabs.session(for: id)?.webView)
+            #expect(view.configuration.websiteDataStore === refreshedStore)
+        }
+    }
+
+    private func cookie(_ name: String, _ value: String) -> HTTPCookie {
+        HTTPCookie(properties: [.name: name, .value: value, .domain: "workspace.example", .path: "/"])!
+    }
+
+    private func values(_ store: WKHTTPCookieStore) async -> [String: String] {
+        Dictionary(uniqueKeysWithValues: await store.allCookies().map { ($0.name, $0.value) })
+    }
 }
 
 @MainActor
@@ -88,6 +135,11 @@ private final class Workspace: WebViewProvider, PageSessionDelegate {
     func cleanUp() {
         for id in Array(tabs.agentCallers.keys) { tabs.endAgentCaller(id) }
         try? FileManager.default.removeItem(at: directory)
+    }
+
+    func removeSourceStore() {
+        tabs.forgetProfile(sourceID)
+        WKWebsiteDataStore.remove(forIdentifier: sourceID) { _ in }
     }
 
     func makeWebView(configuration: WKWebViewConfiguration) -> WKWebView {
