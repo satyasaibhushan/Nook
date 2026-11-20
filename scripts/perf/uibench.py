@@ -2,8 +2,8 @@
 """Compare native browser UI from visible, timestamped 60 Hz display capture.
 
 Runs preflight, desktop capture and offline analysis by default. Use --phase
-preflight, --phase capture or --phase analyze with the same --out path to run
-the phases separately. Only capture uses the browser. --ax-mode none uses fresh
+preflight, --phase capture or --phase analyze with the same --out destination
+to run the phases separately. Preflight writes a sibling -preflight.json report. Only capture uses the browser. --ax-mode none uses fresh
 profiles, native window metadata and fixture beacons, with no target-app AX calls.
 """
 from collections import Counter
@@ -1408,6 +1408,7 @@ def prepare_helper(args):
 
 def desktop_preflight(args, result, output_paths, space_paths):
     report = result["preflight"]
+    report["experiment_lock"] = "acquired"
     report["volumes"] = disk_headroom(space_paths, args.min_free_gib)
     check_evidence(output_paths)
     report["evidence_writable"] = True
@@ -1646,8 +1647,10 @@ def capture_desktop(args, result, evidence):
                             trace.wait(timeout=5)
                     if trace_reader:
                         trace_reader.join(timeout=5)
-                    if trace_truncated or (trace_reader and trace_reader.is_alive()):
+                    if trace_truncated:
                         result["blockers"].append("signposts reached the 64 MiB in-memory limit")
+                    if trace_reader and trace_reader.is_alive():
+                        result["blockers"].append("signpost reader did not drain within five seconds")
                     try:
                         saved_trace = bytes(trace_data)
                         length = saved_trace.rfind(b"\n") + 1
@@ -1724,7 +1727,10 @@ def run_phases(args):
     result = new_result(args)
     result["requested_runs"] = args.runs
     evidence = Evidence(args.out.with_name(args.out.stem+"-evidence"), args.ax_mode)
+    preflight_path = args.out.with_name(args.out.stem+"-preflight.json")
     output_paths = [args.out, evidence.folder.parent/"crop.json"]
+    if args.phase == "preflight":
+        output_paths.append(preflight_path)
     if "shots" in args.only and args.ax_mode == "inspected":
         output_paths.append(args.out.parent/"shots"/"capture.png")
     if args.record_dir:
@@ -1752,7 +1758,8 @@ def run_phases(args):
                     if args.phase == "preflight":
                         result["load1"] = check_load(args.max_load1)
                         result["preflight"]["status"] = "ready"
-                        save_result(args, result)
+                        write_json(preflight_path, result)
+                        log(f"desktop preflight ready; report at {preflight_path}")
                         return 0
                     needs_build = "nook" in args.names and not (Path(args.nook_app)/"Contents/MacOS/Nook").exists()
                     if not needs_build:
@@ -1786,8 +1793,11 @@ def run_phases(args):
                     if result["preflight"].get("status") != "ready":
                         result["preflight"].update(status="blocked", reason=str(error))
                         result["browsers"] = {name: {"status": "blocked", "reason": str(error)} for name in args.names}
-                    save_result(args, result)
                     log(str(error))
+                    if args.phase == "preflight" or (args.out.exists() and result["preflight"].get("status") == "blocked"):
+                        write_json(preflight_path, result)
+                    else:
+                        save_result(args, result)
                     return 1
             # The coordinated build may need the same lock while we wait.
             wait_for_build(args)

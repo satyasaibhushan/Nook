@@ -261,7 +261,8 @@ class ExperimentTests(unittest.TestCase):
             ), patch.object(uibench, "check_load", check_load), patch.object(uibench, "Browser") as browser:
                 status = uibench.main(["--phase", "preflight", "--out", str(out)])
                 self.assertEqual(status, 1)
-                self.assertEqual(json.loads(out.read_text())["preflight"]["reason"], "load1 rose while waiting")
+                self.assertEqual(json.loads((out.parent/"out-preflight.json").read_text())["preflight"]["reason"],
+                                 "load1 rose while waiting")
                 browser.assert_not_called()
 
 
@@ -497,7 +498,7 @@ class OfflineAnalysisTests(unittest.TestCase):
             root = Path(directory)
             evidence = root/"crop.json"
             evidence.touch()
-            readiness = self.readiness(evidence)
+            readiness = self.readiness(Path(evidence.name))
             trial = {"status": "valid", **uibench.analyze(raw_capture()),
                      "raw": {**raw_capture(), "readiness": readiness}}
             data = {"capture_status": "complete", "requested_runs": 1, "blockers": [],
@@ -507,7 +508,7 @@ class OfflineAnalysisTests(unittest.TestCase):
 
             def timeout(command, path, **kwargs):
                 self.assertEqual(command, "ocr")
-                self.assertEqual(path, str(evidence))
+                self.assertEqual(Path(path), evidence.resolve())
                 saved = json.loads(out.read_text())["browsers"]["nook"]["scenarios"]["command"]["runs"][0]
                 self.assertEqual(saved["raw"]["readiness"]["functional_input"]["id"], "expected")
                 self.assertEqual(saved["raw"]["readiness"]["recognition"]["status"], "pending")

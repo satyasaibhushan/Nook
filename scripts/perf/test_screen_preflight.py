@@ -15,6 +15,7 @@ class ScreenPreflightTests(unittest.TestCase):
             helper = root/"capture-helper"
             helper.touch(mode=0o700)
             output = root/"result.json"
+            output.write_text("existing capture")
             commands = {"permissions": permissions, "footprint": footprint or {}, "windows": []}
             with patch.object(experiment, "LOCK_PATH", root/"lock"), patch.object(
                 uibench, "disk_headroom", return_value=[],
@@ -25,7 +26,9 @@ class ScreenPreflightTests(unittest.TestCase):
                                        "--helper-path", str(helper), "--max-load1", "1000", *options])
                 browser.assert_not_called()
                 server.assert_not_called()
-            return status, json.loads(output.read_text()), [c.args[0] for c in command.call_args_list]
+            self.assertEqual(output.read_text(), "existing capture")
+            report = root/"result-preflight.json"
+            return status, json.loads(report.read_text()), [c.args[0] for c in command.call_args_list]
 
     def test_locked_desktop_stops_before_process_inspection_and_capture(self):
         status, result, commands = self.preflight({"screen": True, "accessibility": True,

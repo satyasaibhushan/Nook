@@ -17,3 +17,29 @@ WebKit website data uses persistent profile IDs, and the favicon disk cache
 is shared across Nook bundle IDs. Chrome and Zen use temporary profiles. Arc
 uses its persistent profile, and its launch timing requires
 `--allow-arc-quit`.
+
+## Running the phases
+
+The default run checks the desktop, captures evidence, then runs offline Vision
+recognition. Use the same JSON destination for separate runs.
+
+```sh
+scripts/perf/uibench.py --phase preflight --out measurements.json
+scripts/perf/uibench.py --phase capture --out measurements.json
+scripts/perf/uibench.py --phase analyze --out measurements.json
+```
+
+Preflight reports to `measurements-preflight.json`. Capture requires 3 GiB free
+on each volume it uses by default. The release build requires 10 GiB. The
+desktop lock is shared across worktrees, and the load1 limit defaults to 4.
+
+`--ax-mode inspected` normalizes window size and uses Accessibility controls.
+`--ax-mode none` keeps the browser's window geometry and skips trials that
+need AX controls. Arc is skipped in this mode because its shared tabs require
+AX ownership checks. Both modes still need Screen Recording and synthetic
+input permission.
+
+Copy the JSON and its sibling `measurements-evidence` directory to run analysis
+offline elsewhere. The report keeps browser input validation and OCR status
+independent. `--ocr-timeout` bounds each Vision invocation and `--ocr-budget`
+bounds recognition across the batch.
