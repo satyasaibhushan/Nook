@@ -63,6 +63,29 @@ class HelperOptionsTests(unittest.TestCase):
             self.assertEqual(result, 1)
             run.assert_called_once_with([helper.resolve(), "permissions"], timeout=650)
 
+    def test_report_lists_temporary_and_shared_stores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory)/"capture"
+            helper.touch()
+            helper.chmod(0o700)
+            output = Path(directory)/"out.json"
+            with patch.object(uibench, "run", return_value=json.dumps({"screen": False})):
+                result = uibench.main([
+                    "--out", str(output), "--only", "cold", "--helper-path", str(helper),
+                ])
+            self.assertEqual(result, 1)
+            manifest = json.loads(output.read_text())["isolation_manifest"]
+
+        self.assertIn("warm", manifest["filesystem_cache"])
+        stores = manifest["browsers"]
+        self.assertEqual(stores["nook"]["temporary"], ["Tab state under -NookStateDir"])
+        self.assertTrue(any("history" in store and "com.gstudios.nook.perf/default.store" in store
+                            for store in stores["nook"]["bundle_shared"]))
+        self.assertTrue(any("FaviconCache" in store for store in stores["nook"]["shared"]))
+        self.assertTrue(stores["chrome"]["temporary"])
+        self.assertTrue(stores["zen"]["temporary"])
+        self.assertTrue(stores["arc"]["shared"])
+
     def test_custom_helper_keeps_video_in_the_served_fixture_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -112,9 +135,15 @@ class HelperOptionsTests(unittest.TestCase):
         ), patch.object(uibench.time, "sleep"), patch.object(uibench, "window", return_value={
             "kCGWindowBounds": {"X": 0, "Y": 0, "Width": 1000, "Height": 800},
         }):
-            uibench.cold_launch("nook", "unused", 1, None)
+            launch = uibench.cold_launch("nook", "unused", 1, None)
         process.communicate.assert_called_once_with(timeout=15)
         browser.cleanup.assert_called_once()
+        self.assertEqual(launch["runs"][0]["first_full_window_ms"], 1000)
+        self.assertEqual(launch["label"], "Fresh process with warm filesystem cache and shared SwiftData history")
+        report = uibench.markdown({"browsers": {"nook": {"cold_launch": launch}}})
+        self.assertIn("Fresh-process full window ms", report)
+        self.assertIn(launch["label"], report)
+        self.assertIn("`cold_launch` and `first_full_window_ms`", report)
 
     def test_rejects_missing_or_nonexecutable_helper_before_running_commands(self):
         with tempfile.TemporaryDirectory() as directory:

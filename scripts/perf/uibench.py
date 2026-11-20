@@ -556,9 +556,43 @@ def validation(browser, record):
             "capture_after_known_change_ms": delta, "raw": raw}
 
 
+def isolation_manifest(names):
+    stores = {
+        "nook": {
+            "temporary": ["Tab state under -NookStateDir"],
+            "bundle_shared": [
+                "SwiftData store and browsing history at ~/Library/Application Support/com.gstudios.nook.perf/default.store",
+                "User defaults and Dev MCP token for com.gstudios.nook.perf",
+            ],
+            "shared": [
+                "Persistent WebKit website data keyed by profile ID",
+                "Favicon disk cache at ~/Library/Caches/FaviconCache, shared across Nook bundle IDs",
+            ],
+        },
+        "chrome": {"temporary": ["Chrome user data, including history and profile caches, under --user-data-dir"]},
+        "zen": {"temporary": ["Zen profile, including history and profile caches, under -profile"]},
+        "arc": {"shared": ["Persistent Arc profile, including history and caches"]},
+    }
+    return {
+        "filesystem_cache": "Left warm (no cache flush)",
+        "browsers": {name: stores[name] for name in names},
+    }
+
+
+def launch_label(name):
+    history = {
+        "nook": "shared SwiftData history",
+        "arc": "shared Arc profile history",
+        "chrome": "temporary Chrome profile",
+        "zen": "temporary Zen profile",
+    }
+    return f"Fresh process with warm filesystem cache and {history[name]}"
+
+
 def cold_launch(name, path, runs, record, allow_arc_quit=False):
+    label = launch_label(name)
     if name == "arc" and not allow_arc_quit:
-        return {"status":"discarded", "reason":"Arc has no profile flag and its existing instance must remain running"}
+        return {"status":"discarded", "label":label, "reason":"Arc has no profile flag and its existing instance must remain running"}
     samples = []
     for index in range(runs):
         if name == "arc":
@@ -614,9 +648,9 @@ def cold_launch(name, path, runs, record, allow_arc_quit=False):
                     process.terminate(); process.communicate(timeout=5)
                 browser.cleanup()
     valid = [s["first_full_window_ms"] for s in samples if s["status"] == "valid"]
-    return {"status":"valid" if len(valid) >= 10 else "discarded", "n":len(valid),
+    return {"status":"valid" if len(valid) >= 10 else "discarded", "label":label, "n":len(valid),
             "first_full_window_ms":summary(valid), "runs":samples,
-            "definition":"pre-launch display capture to first frame 97% matching the final window content; filesystem cache remains warm"}
+            "definition":"Launch start to the first post-launch frame 97% matching the final window content"}
 
 
 def scenario(browser, name, index, record):
@@ -987,7 +1021,7 @@ def markdown(result):
               "Cmd+T text probes run every 50 ms, so readiness is an upper-bound estimate. "
               "n is accepted/attempted trials. Percentiles use accepted trials. "
               "Raw samples, min/max, standard deviation, validation evidence and rejection reasons are in the JSON.", ""]
-    lines += ["| Browser | Cold full window ms med/p95 | RSS MB 1/10/30 tabs | Physical MB 1/10/30 tabs | Idle CPU % | Background video CPU % | Scroll CPU % med | Scroll fps med/min |",
+    lines += ["| Browser | Fresh-process full window ms med/p95 | RSS MB 1/10/30 tabs | Physical MB 1/10/30 tabs | Idle CPU % | Background video CPU % | Scroll CPU % med | Scroll fps med/min |",
               "|---|---:|---:|---:|---:|---:|---:|---:|"]
     for name, data in result["browsers"].items():
         r = data.get("resources", {})
@@ -1004,6 +1038,13 @@ def markdown(result):
         scroll_cpu_text = f"{scroll_cpu['median']:.2f}" if scroll_cpu else "-"
         fps_text = f"{fps['median']:.1f}/{fps['min']:.1f}" if fps else "-"
         lines.append(f"| {name} | {cold} | {memory('rss_mb')} | {memory('physical_mb')} | {cpu('idle_10_tabs')} | {cpu('background_video')} | {scroll_cpu_text} | {fps_text} |")
+    launch_context = [
+        f"- {name}: {data['cold_launch']['label']}."
+        for name, data in result["browsers"].items()
+        if data.get("cold_launch", {}).get("label")
+    ]
+    if launch_context:
+        lines += ["", "Fresh-process timings use the JSON keys `cold_launch` and `first_full_window_ms`.", "", *launch_context]
     lines += ["", "| Browser | Scenario | Visually complete ms med/p95 | Frame interval ms median/p95/max | Intervals over 20 ms med |",
               "|---|---|---:|---:|---:|"]
     for browser,data in result["browsers"].items():
@@ -1067,11 +1108,12 @@ def main(argv=None):
                          "regions": "first matching region wins; rectangles use global top-left display coordinates; outside includes the entire captured display",
                          "frame_intervals": "time between changed presentations during the first 3 seconds of scroll input",
                          "resolution": "window in logical pixels for timings; display-native pixels for still screenshots",
-                         "launcher": "LaunchServices new instance with explicit throwaway profile arguments, existing Arc reused",
+                         "launcher": "LaunchServices launches new instances. Regular Arc measurements reuse its existing instance when available.",
                          "dropped_frames": "60 Hz repeated refresh slots between changed frames during motion",
                          "cpu": "kernel process Mach ticks converted with mach_timebase_info / wall seconds, 100% is one core",
                          "footprint": "proc_pid_rusage RUSAGE_INFO_V4, descendants plus responsible PID helpers",
                          "input_ready": "first captured echo of repeated text probes, recognized offline with Vision; 50 ms probe interval"},
+              "isolation_manifest": isolation_manifest(names),
               "permissions": permissions, "load1": os.getloadavg()[0], "browsers": {}}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     blockers = []
@@ -1119,7 +1161,7 @@ def main(argv=None):
                 browser = Browser(name, paths[name])
                 browser.sample_main = args.sample_main
                 if "cold" in only:
-                    log(f"{name}: {args.runs} cold launches with pre-launch capture")
+                    log(f"{name}: {args.runs} launch trials. {launch_label(name)}.")
                     try:
                         data["cold_launch"] = cold_launch(name, paths[name], args.runs, args.record_dir/name/"cold" if args.record_dir else None,args.allow_arc_quit)
                     finally:
@@ -1128,9 +1170,14 @@ def main(argv=None):
                     if data["cold_launch"]["status"] != "valid":
                         blockers.append(f"{name} cold: {data['cold_launch'].get('reason', 'fewer than ten validated cold trials')}")
                     save()
-                log(f"{name}: launching isolated benchmark session")
+                log(f"{name}: opening benchmark session")
                 browser.launch()
-                data.update({"version": browser.version, "pid": browser.pid, "profile": "existing Arc, benchmark tabs only" if name == "arc" else "throwaway"})
+                data.update({"version": browser.version, "pid": browser.pid, "profile": {
+                    "arc": "persistent Arc profile",
+                    "nook": "temporary tab state and persistent bundle data",
+                    "chrome": "temporary user data directory",
+                    "zen": "temporary profile",
+                }[name]})
                 if not calibrated:
                     data["validation"] = validation(browser, args.record_dir/name/"calibration" if args.record_dir else None)
                     calibrated = True
