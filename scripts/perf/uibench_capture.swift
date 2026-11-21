@@ -132,6 +132,55 @@ func perform(_ action: [String: Any]) -> [String: Any] {
     return timing
 }
 
+func onScreenWindows() -> [[String: Any]]? {
+    CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                              kCGNullWindowID) as? [[String: Any]]
+}
+
+struct WindowVisibility {
+    let pid: pid_t
+    let windowID: CGWindowID
+    let allowedOwner: pid_t?
+    let transparentWindows: [[String: Any]]
+
+    func bounds(_ row: [String: Any]) -> CGRect? {
+        guard let bounds = row[kCGWindowBounds as String] as? [String: Any] else { return nil }
+        return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+    }
+
+    func obstruction(in rows: [[String: Any]]?) -> String? {
+        guard let rows else { return "Window Server did not return a window list" }
+        guard let target = rows.firstIndex(where: {
+            $0[kCGWindowNumber as String] as? CGWindowID == windowID
+                && $0[kCGWindowOwnerPID as String] as? pid_t == pid
+        }), let targetBounds = bounds(rows[target]), !targetBounds.isEmpty else {
+            return "benchmark window is not on screen"
+        }
+        for row in rows[..<target] {
+            let owner = row[kCGWindowOwnerPID as String] as? pid_t
+            let name = row[kCGWindowOwnerName as String] as? String ?? "unknown"
+            let title = row[kCGWindowName as String] as? String
+            let layer = row[kCGWindowLayer as String] as? Int
+            if owner == pid || (allowedOwner != nil && owner == allowedOwner) { continue }
+            if name == "Window Server" && title == "Cursor" && layer == 2147483630 { continue }
+            guard let overlap = bounds(row)?.intersection(targetBounds), !overlap.isEmpty else { continue }
+            // Only the exact, preflight-verified desktop container may be ignored.
+            // Other windows from the same system process can contain prompts.
+            let keys = [kCGWindowNumber, kCGWindowOwnerPID, kCGWindowLayer,
+                        kCGWindowName, kCGWindowBounds, kCGWindowAlpha]
+            if transparentWindows.contains(where: { verified in
+                keys.allSatisfy { key in
+                    verified[key as String] as? NSObject == row[key as String] as? NSObject
+                }
+            }) { continue }
+            let pidText = owner.map(String.init) ?? "unknown"
+            let layerText = layer.map(String.init) ?? "unknown"
+            return "\(name) (pid \(pidText), layer \(layerText))"
+        }
+        return nil
+    }
+}
+
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     let queue = DispatchQueue(label: "window.capture")
     var frames: [[String: Any]] = []
@@ -142,6 +191,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     var windowRect = CGRect.zero
     var regionRects: [(String, CGRect)] = []
     var windowID: CGWindowID?
+    var visibility: WindowVisibility?
+    var visibilitySamples = 0
+    var obstruction: [String: Any]?
     var attribute = false
     var regionByPixel: [UInt8] = []
     var strips: [CGImage] = []
@@ -166,12 +218,22 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         queue.async { self.streamError = error.localizedDescription }
     }
+    func sampleVisibility(_ windows: () -> [[String: Any]]? = onScreenWindows) {
+        guard let visibility, obstruction == nil else { return }
+        visibilitySamples += 1
+        let t = now()
+        if let reason = visibility.obstruction(in: windows()) {
+            obstruction = ["t": t, "reason": reason]
+        }
+    }
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, sample.isValid else { return }
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]]
         let status = (attachments?.first?[.status] as? Int) ?? -1
         let t = CMTimeGetSeconds(sample.presentationTimeStamp)
         guard t.isFinite else { return }
+        // Sample the display stack even for idle buffers and retain the first obstruction.
+        sampleVisibility()
         // Idle buffers can carry no pixels. Retain their timestamps as repeated presentation samples.
         guard status == SCFrameStatus.complete.rawValue else {
             if status == SCFrameStatus.idle.rawValue { frames.append(["t": t, "idle": true]) }
@@ -393,7 +455,7 @@ func transparentContainer(windowID: CGWindowID, pid: pid_t) async throws -> Bool
                 let unlocked = active && session?["CGSSessionScreenIsLocked"] as? Bool != true
                 emit(["screen": CGPreflightScreenCaptureAccess(), "accessibility": AXIsProcessTrusted(),
                       "post_events": CGPreflightPostEventAccess(), "unlocked": unlocked,
-                      "console_session": active, "capture_protocol": 2]); return
+                      "console_session": active, "capture_protocol": 3]); return
             }
             if command == "ocr" { try recognize(a[1]); return }
             if command == "transparent-container" {
@@ -416,8 +478,7 @@ func transparentContainer(windowID: CGWindowID, pid: pid_t) async throws -> Bool
                 application.run(); return
             }
             if command == "windows" {
-                guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                            kCGNullWindowID) as? [[String: Any]] else {
+                guard let list = onScreenWindows() else {
                     throw NSError(domain: "Window Server did not return a window list", code: 17)
                 }
                 emit(list); return
@@ -579,6 +640,11 @@ func transparentContainer(windowID: CGWindowID, pid: pid_t) async throws -> Bool
                 }
             }
             capture.windowID = requestedWindow
+            if let pid, let requestedWindow {
+                capture.visibility = WindowVisibility(
+                    pid: pid, windowID: requestedWindow, allowedOwner: spec["allowed_owner"] as? Int32,
+                    transparentWindows: spec["transparent_windows"] as? [[String: Any]] ?? [])
+            }
             let wr = (spec["window_rect"] as? [Double]) ?? [rect.minX, rect.minY, rect.width, rect.height]
             capture.windowRect = CGRect(x: wr[0], y: wr[1], width: wr[2], height: wr[3])
             capture.attribute = spec["attribute"] as? Bool ?? false
@@ -624,7 +690,7 @@ func transparentContainer(windowID: CGWindowID, pid: pid_t) async throws -> Bool
             try await Task.sleep(nanoseconds: UInt64(max(0, end - now()) * 1e9))
             do { try await stream.stopCapture() }
             catch { capture.queue.sync { capture.streamError = error.localizedDescription } }
-            capture.queue.sync {}
+            capture.queue.sync { capture.sampleVisibility() }
             let endStamp = now()
             let inputFrames: [[String: Any]] = capture.textFrames.compactMap { t, image in
                 guard let png = capture.png(image) else { return nil }
@@ -641,6 +707,8 @@ func transparentContainer(windowID: CGWindowID, pid: pid_t) async throws -> Bool
                   "start": start, "end": endStamp, "events": events, "frames": capture.frames,
                   "capture_end": endStamp, "artifacts": capture.artifacts(), "input_frames": inputFrames,
                   "rect": [rect.minX, rect.minY, rect.width, rect.height],
+                  "visibility_samples": capture.visibilitySamples,
+                  "obstruction": capture.obstruction as Any? ?? NSNull(),
                   "capture_error": capture.streamError as Any? ?? NSNull()])
         } catch {
             emit(["error": error.localizedDescription]); exit(1)

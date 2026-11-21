@@ -193,7 +193,7 @@ def row(pid=42, name="Nook", layer=0, number=1, bounds=(50, 50, 1000, 800), titl
 
 def raw_capture():
     return {
-        "start": 10, "end": 12,
+        "start": 10, "end": 12, "visibility_samples": 120,
         "events": [{"action": {"kind": "key"}, "t": 10.5, "action_start": 10.5,
                     "key_event_ns": 10_510_000_000, "key_post_time": 10.511, "key_post_return": 10.512}],
         "frames": [{"t": 9.99, "changed": 0}, {"t": 10.55, "changed": .1}, {"t": 11, "changed": 0}],
@@ -299,6 +299,27 @@ class TimingTests(unittest.TestCase):
 
 
 class ObstructionTests(unittest.TestCase):
+    def test_transient_obstruction_invalidates_capture_with_clear_endpoints(self):
+        raw = raw_capture()
+        raw["obstruction"] = {"t": 10.55, "reason": "Notification Center (pid 43, layer 25)"}
+        evidence = Mock()
+        with patch.object(uibench, "wait_for_clear_window", return_value=row()), patch.object(
+            uibench, "spec_call", return_value=raw,
+        ) as native:
+            with self.assertRaisesRegex(uibench.Obstruction, "during capture.*Notification Center"):
+                uibench.capture(42, allowed_owner=56, evidence=evidence)
+        self.assertEqual(native.call_args.args[1]["allowed_owner"], 56)
+        evidence.collect.assert_called_once()
+
+    def test_capture_requires_in_stream_window_samples(self):
+        raw = raw_capture()
+        del raw["visibility_samples"]
+        with patch.object(uibench, "wait_for_clear_window", return_value=row()), patch.object(
+            uibench, "spec_call", return_value=raw,
+        ):
+            with self.assertRaisesRegex(uibench.Invalid, "no in-stream window visibility samples"):
+                uibench.capture(42, evidence=Mock())
+
     def test_transparent_os_container_does_not_hide_opaque_prompt_from_same_owner(self):
         target = row()
         container = row(10, "Notification Center", 24, 2, (0, 0, 1920, 1080))

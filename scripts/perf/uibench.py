@@ -190,7 +190,7 @@ def obstruction_rows(pid, target, rows, allowed_owner=None):
             yield row
 
 
-def wait_for_clear_window(pid, *, retry=True, allowed_owner=None):
+def wait_for_clear_window(pid, *, retry=True, allowed_owner=None, transparent_windows=None):
     # The budget includes every helper call and each retry sleep.
     deadline = time.monotonic() + min(HELPER_TIMEOUT, 3)
     reported = set()
@@ -200,6 +200,7 @@ def wait_for_clear_window(pid, *, retry=True, allowed_owner=None):
         if not target:
             raise Invalid("benchmark window is not on screen")
         blocked = []
+        verified = []
         for row in obstruction_rows(pid, target, rows, allowed_owner):
             owner = row.get("kCGWindowOwnerName", "unknown")
             detail = f"{owner} (pid {row.get('kCGWindowOwnerPID')}, layer {row.get('kCGWindowLayer')})"
@@ -208,6 +209,7 @@ def wait_for_clear_window(pid, *, retry=True, allowed_owner=None):
                     remaining = deadline-time.monotonic()
                     if remaining > 0 and helper("transparent-container", row["kCGWindowNumber"],
                                                 row["kCGWindowOwnerPID"], timeout=remaining)["transparent"]:
+                        verified.append(row)
                         continue
                 except (Invalid, subprocess.TimeoutExpired):
                     pass  # An unverified surface can block input or contain a prompt.
@@ -216,6 +218,8 @@ def wait_for_clear_window(pid, *, retry=True, allowed_owner=None):
                 log(f"foreign window overlaps benchmark: {detail}")
                 reported.add(detail)
         if not blocked:
+            if transparent_windows is not None:
+                transparent_windows.extend(verified)
             return target
         report = "foreign window overlaps benchmark: " + ", ".join(blocked)
         remaining = deadline-time.monotonic()
@@ -266,17 +270,23 @@ def leave_arc_running(path):
 
 def capture(pid, actions=(), duration=2, record=None, signatures=False, native=False, region=None,
             attribution=None, *, evidence, still=False, input_region=None, allowed_owner=None):
-    visible = wait_for_clear_window(pid, allowed_owner=allowed_owner)
+    transparent_windows = []
+    visible = wait_for_clear_window(pid, allowed_owner=allowed_owner, transparent_windows=transparent_windows)
     with finish_on_interrupt():
         result = spec_call("capture", {
             "pid": pid, "window_id": visible["kCGWindowNumber"], "actions": guarded(actions),
             "duration": duration, "record": record is not None, "still": still,
             "signatures": signatures, "region": region, "native_resolution": native,
             "input_region": input_region, "input_until": 1.3, **(attribution or {}),
+            "allowed_owner": allowed_owner, "transparent_windows": transparent_windows,
         })
         evidence.collect(result, record, still, needle=INPUT_PROBE if input_region else None)
     if result.get("capture_error"):
         raise Invalid(f"display capture failed: {result['capture_error']}")
+    if obstruction := result.get("obstruction"):
+        raise Obstruction(f"window obstructed during capture: {obstruction['reason']}")
+    if not result.get("visibility_samples"):
+        raise Invalid("capture delivered no in-stream window visibility samples")
     wait_for_clear_window(pid, retry=False)
     if any(event.get("posted") is False for event in result["events"]):
         raise Invalid("capture input was withheld because the owned browser lost focus")
@@ -1454,7 +1464,7 @@ def desktop_preflight(args, result, output_paths, space_paths):
     missing = [label for field, label in required.items() if permissions.get(field) is not True]
     if missing:
         raise Invalid(f"macOS permission missing for {HELPER}: {', '.join(missing)}. Check the runner's permission profile.")
-    if permissions.get("capture_protocol") != 2:
+    if permissions.get("capture_protocol") != 3:
         raise Invalid("capture helper uses an incompatible evidence protocol; rebuild it from uibench_capture.swift")
     try:
         pid = os.getpid()

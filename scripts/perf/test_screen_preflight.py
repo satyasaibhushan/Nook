@@ -55,11 +55,20 @@ class ScreenPreflightTests(unittest.TestCase):
     def test_inspection_denial_blocks_before_launch(self):
         status, result, commands = self.preflight({
             "screen": True, "accessibility": True, "post_events": True,
-            "unlocked": True, "capture_protocol": 2,
+            "unlocked": True, "capture_protocol": 3,
         })
         self.assertEqual(status, 1)
         self.assertEqual(commands, ["permissions", "footprint"])
         self.assertIn("kernel footprint query was denied", result["preflight"]["reason"])
+
+    def test_helper_without_in_stream_visibility_is_incompatible(self):
+        status, result, commands = self.preflight({
+            "screen": True, "accessibility": True, "post_events": True,
+            "unlocked": True, "capture_protocol": 2,
+        })
+        self.assertEqual(status, 1)
+        self.assertEqual(commands, ["permissions"])
+        self.assertIn("incompatible evidence protocol", result["preflight"]["reason"])
 
     def test_blocked_summary_path_stops_preflight_before_helper_setup(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -82,7 +91,7 @@ class ScreenPreflightTests(unittest.TestCase):
         import os
         status, result, commands = self.preflight({
             "screen": True, "accessibility": False, "post_events": True,
-            "unlocked": True, "capture_protocol": 2,
+            "unlocked": True, "capture_protocol": 3,
         }, "--ax-mode", "none", footprint={str(os.getpid()): {"physical_bytes": 123}})
         self.assertEqual(status, 0)
         self.assertEqual(commands, ["permissions", "footprint", "windows"])
