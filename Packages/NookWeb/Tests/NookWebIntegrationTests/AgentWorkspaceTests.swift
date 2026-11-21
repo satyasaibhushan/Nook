@@ -12,20 +12,28 @@ import WebKit
 struct AgentWorkspaceTests {
     private let blank = URL(string: "about:blank")!
 
-    @Test(arguments: [true, false])
-    func popupKeepsItsOpenerAndWebKitsInitialNavigation(hasWindow: Bool) async throws {
+    enum WindowMode: CaseIterable {
+        case noWindow, otherSpace, agentSpace, collapsedAgentSpace
+    }
+
+    @Test(arguments: WindowMode.allCases)
+    func popupKeepsItsOpenerAndWebKitsInitialNavigation(mode: WindowMode) async throws {
         let fixture = Workspace()
         defer { fixture.cleanUp() }
         let tabs = fixture.tabs
         let window = BrowserWindowState()
-        if hasWindow {
+        if mode != .noWindow {
             tabs.attach(window: window)
             tabs.windowRegistry.register(window)
             tabs.windowRegistry.setActive(window)
         }
-        let visibleSpace = window.spaceID
-
         let caller = try tabs.startAgentCaller(id: "test", name: "Test", logins: nil)
+        let agentSpace = try #require(tabs.agentSpaceID)
+        if mode == .agentSpace || mode == .collapsedAgentSpace {
+            tabs.setSpace(agentSpace, in: window)
+        }
+        let visibleSpace = window.spaceID
+        let firstID = try #require(await tabs.openAgentTab(blank, for: caller))
         let openerID = try #require(await tabs.openAgentTab(blank, for: caller))
         let opener = try #require(tabs.session(for: openerID))
         let openerView = try #require(opener.webView)
@@ -40,7 +48,8 @@ struct AgentWorkspaceTests {
             """) as? Bool
         #expect(hasPopup == true)
 
-        let popupID = try #require(tabs.agentTabs(of: caller).first { $0 != openerID })
+        let popupID = try #require(tabs.agentCurrentTab(of: caller))
+        #expect(tabs.agentTabs(of: caller) == [firstID, openerID, popupID])
         let popup = try #require(tabs.session(for: popupID))
         let popupView = try #require(popup.webView as? RecordingWebView)
         #expect(popupView.requests.isEmpty)
@@ -58,13 +67,20 @@ struct AgentWorkspaceTests {
             """, arguments: [:], in: nil, contentWorld: .page) as? String
         #expect(reply == "signed-in")
 
+        if mode == .collapsedAgentSpace {
+            tabs.toggleFolder(caller.folderID)
+            #expect(tabs.displayOrder(in: window).isEmpty)
+            #expect(window.selectedItemID == popupID)
+        }
         _ = try? await popupView.evaluateJavaScript("window.close();")
         let deadline = ContinuousClock.now + .seconds(2)
         while tabs.session(for: popupID) != nil && ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
-        #expect(tabs.agentTabs(of: caller) == [openerID])
+        #expect(tabs.agentTabs(of: caller) == [firstID, openerID])
         #expect(tabs.agentCurrentTab(of: caller) == openerID)
+        if mode == .otherSpace { tabs.setSpace(agentSpace, in: window) }
+        if mode != .noWindow { #expect(window.selectedItemID == openerID) }
     }
 
     @Test func emptyWorkspaceRecopiesTheSourceCookiesOnNextOpen() async throws {
