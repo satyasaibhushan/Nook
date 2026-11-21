@@ -19,6 +19,7 @@ MAX_LOAD1 = 4.0
 LOCK_WAIT = 300
 ROOT = Path(__file__).resolve().parents[2]
 LOCK_PATH = Path("/tmp") / f"nook-perf-{os.getuid()}.lock"
+APPLICATIONS = Path("/Applications")
 
 
 class Invalid(RuntimeError):
@@ -179,10 +180,36 @@ def check_load(limit=MAX_LOAD1):
     return load
 
 
+def build_output(output):
+    output_path = Path(output).expanduser().absolute()
+    protected = (APPLICATIONS, APPLICATIONS / "Nook.app")
+    protected_paths = {str(path).casefold() for item in protected for path in (item, item.resolve())}
+    protected_ids = set()
+    for path in protected:
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            continue
+        protected_ids.add((info.st_dev, info.st_ino))
+    # Check existing ancestors too, so a new destination under a firmlink is rejected.
+    bundle = output_path / "Nook.app"
+    candidates = set()
+    for path in (output_path, bundle, output_path.resolve(), bundle.resolve()):
+        candidates.update((path, *path.parents))
+    for path in candidates:
+        if str(path).casefold() in protected_paths:
+            raise Invalid("choose a build output directory outside /Applications")
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            continue
+        if (info.st_dev, info.st_ino) in protected_ids:
+            raise Invalid("choose a build output directory outside /Applications")
+    return output_path.resolve()
+
+
 def build(output):
-    output_path = Path(output).expanduser().resolve()
-    if (output_path / "Nook.app").resolve().is_relative_to(Path("/Applications").resolve()):
-        raise Invalid("choose a build output directory outside /Applications")
+    output_path = build_output(output)
     paths = (ROOT / "build", tempfile.gettempdir(), output_path)
     disk_headroom(paths, BUILD_FREE_GIB)
     with exclusive() as lock:
@@ -196,6 +223,9 @@ def build(output):
 
 if __name__ == "__main__":
     try:
-        sys.exit(build(sys.argv[1]))
-    except (Invalid, OSError) as error:
+        if len(sys.argv) == 3 and sys.argv[1] == "--check-build-output":
+            build_output(sys.argv[2])
+        else:
+            sys.exit(build(sys.argv[1]))
+    except (Invalid, OSError, RuntimeError) as error:
         sys.exit(str(error))
