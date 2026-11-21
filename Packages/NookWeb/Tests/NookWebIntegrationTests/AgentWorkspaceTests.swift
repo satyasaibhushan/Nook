@@ -1,4 +1,5 @@
 // Licensed under GPL-3.0. See LICENSE.
+import AppKit
 import Combine
 import Foundation
 import NookBlocker
@@ -122,7 +123,7 @@ struct AgentWorkspaceTests {
         }
     }
 
-    @Test func nativeClickPreflightExplainsObscuredAndDisabledTargets() async throws {
+    @Test func clickPreflightExplainsObstructionsAndForceClicksTheCoveredTarget() async throws {
         let fixture = Workspace()
         defer { fixture.cleanUp() }
         let tabs = fixture.tabs
@@ -133,15 +134,105 @@ struct AgentWorkspaceTests {
         #expect(await page.waitForLoad(timeout: .seconds(3), startGrace: .milliseconds(100)))
         _ = try await view.evaluateJavaScript("""
             document.body.innerHTML =
-              '<button id="covered">Continue</button>' +
+              '<button id="covered" onclick="window.targetClicked = true">Continue</button>' +
               '<div style="position:fixed;inset:0;z-index:1" aria-label="Overlay"></div>' +
               '<fieldset disabled><button id="disabled">Submit</button></fieldset>';
             """)
 
-        let covered = try await page.agentScript("return __nookAgent.locate({ selector: '#covered' })") as? [String: Any]
-        #expect((covered?["covered"] as? String)?.contains("Overlay") == true)
-        let disabled = try await page.agentScript("return __nookAgent.locate({ selector: '#disabled' })") as? [String: Any]
-        #expect(disabled?["disabled"] as? Bool == true)
+        let covered = await #expect(throws: AgentInputError.self) {
+            try await page.agentClick(["selector": "#covered"], force: false)
+        }
+        #expect(covered?.localizedDescription.contains("is covered by") == true)
+        #expect(covered?.localizedDescription.contains("Overlay") == true)
+        #expect(try await view.evaluateJavaScript("window.targetClicked === true") as? Bool == false)
+
+        let forced = try await page.agentClick(["selector": "#covered"], force: true)
+        #expect(forced.hasSuffix("from script (force)."))
+        #expect(try await view.evaluateJavaScript("window.targetClicked === true") as? Bool == true)
+
+        for force in [false, true] {
+            let disabled = await #expect(throws: AgentInputError.self) {
+                try await page.agentClick(["selector": "#disabled"], force: force)
+            }
+            #expect(disabled?.localizedDescription.contains("is disabled") == true)
+        }
+    }
+
+    @Test(arguments: [true, false])
+    func nativeClickReportsAnUnexpectedTarget(navigates: Bool) async throws {
+        let fixture = Workspace()
+        defer { fixture.cleanUp() }
+        let (page, view, window) = try await clickPage(in: fixture)
+        defer { window.contentView = nil }
+        _ = try await view.evaluateJavaScript("""
+            document.body.innerHTML =
+              '<button id="target" style="position:absolute;top:30px;left:30px;width:100px">Continue</button>' +
+              '<button id="other" style="position:absolute;top:30px;left:180px;width:100px">Other</button>';
+            document.querySelector('#other').onclick = () => {
+              if (\(navigates)) location.href = 'about:blank?navigated';
+              else window.otherClicked = true;
+            };
+            void 0;
+            """)
+        // Simulate the page's hit target changing between preflight and event delivery.
+        view.clickXOffset = 150
+        let start = page.loadingNavigationID
+        let error = await #expect(throws: AgentInputError.self) {
+            try await page.agentClick(["selector": "#target"], force: false)
+        }
+        #expect(error?.localizedDescription.contains("landed on button \"Other\"") == true)
+        if navigates {
+            #expect(await page.waitForLoad(timeout: .seconds(3), startGrace: .milliseconds(100)))
+            #expect(page.loadingNavigationID != start)
+            #expect(view.url?.absoluteString == "about:blank?navigated")
+        } else {
+            #expect(try await view.evaluateJavaScript("window.otherClicked === true") as? Bool == true)
+        }
+    }
+
+    @Test func nativeClickConfirmsTheIntendedTargetDuringNavigation() async throws {
+        let fixture = Workspace()
+        defer { fixture.cleanUp() }
+        let (page, view, window) = try await clickPage(in: fixture)
+        defer { window.contentView = nil }
+        _ = try await view.evaluateJavaScript("""
+            document.body.innerHTML = '<a id="target" href="about:blank?navigated">Continue</a>';
+            """)
+        let result = try await page.agentClick(["selector": "#target"], force: false)
+        #expect(result.hasPrefix("Clicked link \"Continue\""))
+        #expect(await page.waitForLoad(timeout: .seconds(3), startGrace: .milliseconds(100)))
+        #expect(view.url?.absoluteString == "about:blank?navigated")
+    }
+
+    @Test func nativeClickTimesOutWithoutAnEvent() async throws {
+        let fixture = Workspace()
+        defer { fixture.cleanUp() }
+        let (page, view, window) = try await clickPage(in: fixture)
+        defer { window.contentView = nil }
+        _ = try await view.evaluateJavaScript("""
+            document.body.innerHTML = '<button id="target">Continue</button>';
+            """)
+        view.clickXOffset = nil
+        let error = await #expect(throws: AgentInputError.self) {
+            try await page.agentClick(["selector": "#target"], force: false)
+        }
+        #expect(error?.localizedDescription.contains("The page did not report a mouse click") == true)
+
+        view.clickXOffset = 0
+        let next = try await page.agentClick(["selector": "#target"], force: false)
+        #expect(next.hasPrefix("Clicked button \"Continue\""))
+    }
+
+    private func clickPage(in fixture: Workspace) async throws -> (PageSession, RecordingWebView, NSWindow) {
+        let tabs = fixture.tabs
+        let caller = try tabs.startAgentCaller(id: "test", name: "Test", logins: nil)
+        let id = try #require(await tabs.openAgentTab(blank, for: caller))
+        let page = try #require(tabs.session(for: id))
+        let view = try #require(page.webView as? RecordingWebView)
+        let window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentView = view
+        #expect(await page.waitForLoad(timeout: .seconds(3), startGrace: .milliseconds(100)))
+        return (page, view, window)
     }
 
     private func cookie(_ name: String, _ value: String) -> HTTPCookie {
@@ -214,9 +305,28 @@ private final class Workspace: WebViewProvider, PageSessionDelegate {
 
 private final class RecordingWebView: WKWebView {
     private(set) var requests: [URLRequest] = []
+    var clickXOffset: CGFloat? = 0
 
     override func load(_ request: URLRequest) -> WKNavigation? {
         requests.append(request)
         return super.load(request)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if let click = offsetClick(event) { super.mouseDown(with: click) }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if let click = offsetClick(event) { super.mouseUp(with: click) }
+    }
+
+    private func offsetClick(_ event: NSEvent) -> NSEvent? {
+        guard let clickXOffset else { return nil }
+        if clickXOffset == 0 { return event }
+        var location = event.locationInWindow
+        location.x += clickXOffset
+        return NSEvent.mouseEvent(with: event.type, location: location, modifierFlags: event.modifierFlags,
+                                  timestamp: event.timestamp, windowNumber: event.windowNumber, context: nil,
+                                  eventNumber: event.eventNumber, clickCount: event.clickCount, pressure: event.pressure)
     }
 }

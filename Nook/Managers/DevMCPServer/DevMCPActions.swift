@@ -81,7 +81,7 @@ extension DevMCPServer {
             let force = args["force"] as? Bool == true
             // WebKit can leave a script evaluation pending while the page is busy.
             guard let result: Result<String, Error> = await withTimeout(2, operation: {
-                do { return .success(try await self.click(session, spec: spec, force: force)) }
+                do { return .success(try await session.agentClick(spec, force: force)) }
                 catch { return .failure(error) }
             }) else {
                 throw ActionError("The page did not answer the click within 2s. Check the page and open tabs before retrying.")
@@ -98,53 +98,6 @@ extension DevMCPServer {
             if let v = args[key] as? String, !v.isEmpty { spec[key] = v }
         }
         return spec
-    }
-
-    // MARK: Click
-
-    private func click(_ session: PageSession, spec: [String: String], force: Bool) async throws -> String {
-        guard !spec.isEmpty else { throw ActionError("Pass ref, selector or text.") }
-        guard let spot = try await session.agentScript("return __nookAgent.locate(spec)", arguments: ["spec": spec]) as? [String: Any],
-              let element = spot["element"] as? String, let ref = spot["ref"] as? String else {
-            throw ActionError("Could not find the element.")
-        }
-        try Task.checkCancellation()
-        if force {
-            _ = try await session.agentScript("__nookAgent.scriptClick(ref)", arguments: ["ref": ref])
-            return "Clicked \(element) from script (force)."
-        }
-        if spot["disabled"] as? Bool == true {
-            throw ActionError("\(element) is disabled.")
-        }
-        if spot["hidden"] as? Bool == true {
-            throw ActionError("\(element) is hidden. Pass force: true to click it from script.")
-        }
-        if let cover = spot["covered"] as? String {
-            throw ActionError("\(element) is covered by \(cover) at its centre. Clear the obstruction or pass force: true to click it from script.")
-        }
-        if spot["outside"] as? Bool == true {
-            throw ActionError("The centre of \(element) is outside the viewport after scrolling.")
-        }
-        let navigation = session.loadingNavigationID
-        try session.agentClick(at: CGPoint(x: spot["x"] as? Double ?? 0, y: spot["y"] as? Double ?? 0),
-                               cssWidth: spot["width"] as? Double ?? 0)
-        // The page answers the click a moment later; a click that navigated leaves no record to read.
-        let deadline = ContinuousClock.now + .milliseconds(500)
-        while ContinuousClock.now < deadline {
-            if session.loadingNavigationID != navigation { return "Clicked \(element)." }
-            if let seen = try? await session.agentScript("return __nookAgent.clickResult()") as? [String: Any] {
-                if let unexpected = seen["unexpected"] as? String {
-                    throw ActionError("The mouse click meant for \(element) landed on \(unexpected). Take a new snapshot.")
-                }
-                return seen["trusted"] as? Bool == true ? "Clicked \(element)." : "Clicked \(element) (the page saw an untrusted click)."
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        if session.loadingNavigationID != navigation { return "Clicked \(element)." }
-        if spot["frame"] as? Bool == true {
-            return "Sent a mouse click to \(element). The top-level page cannot confirm clicks inside a frame."
-        }
-        throw ActionError("The page did not report a mouse click on \(element). Take a new snapshot or pass force: true to click it from script.")
     }
 
     // MARK: Fill

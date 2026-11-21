@@ -34,6 +34,63 @@ extension PageSession {
         }
     }
 
+    /// Clicks the element matching `spec` and reports where the event landed.
+    public func agentClick(_ spec: [String: String], force: Bool) async throws -> String {
+        guard !spec.isEmpty else { throw AgentInputError.page("Pass ref, selector or text.") }
+        guard let webView else { throw AgentInputError.noPage }
+        let contentController = webView.configuration.userContentController
+        let world = DevPickerScript.world
+        let receipt = AgentClickReceipt()
+        let handler = force ? "" : "agentClick\(UUID().uuidString)"
+        if !force { contentController.add(receipt, contentWorld: world, name: handler) }
+        defer {
+            if !force { contentController.removeScriptMessageHandler(forName: handler, contentWorld: world) }
+        }
+
+        guard let spot = try await agentScript("return __nookAgent.locate(spec, handler)",
+                                              arguments: ["spec": spec, "handler": handler]) as? [String: Any],
+              let element = spot["element"] as? String, let ref = spot["ref"] as? String else {
+            throw AgentInputError.page("Could not find the element.")
+        }
+        try Task.checkCancellation()
+        if force {
+            _ = try await agentScript("__nookAgent.scriptClick(ref)", arguments: ["ref": ref])
+            return "Clicked \(element) from script (force)."
+        }
+        if spot["disabled"] as? Bool == true {
+            throw AgentInputError.page("\(element) is disabled.")
+        }
+        if spot["hidden"] as? Bool == true {
+            throw AgentInputError.page("\(element) is hidden. Pass force: true to click it from script.")
+        }
+        if let cover = spot["covered"] as? String {
+            throw AgentInputError.page("\(element) is covered by \(cover) at its centre. Clear the obstruction or pass force: true to click it from script.")
+        }
+        if spot["outside"] as? Bool == true {
+            throw AgentInputError.page("The centre of \(element) is outside the viewport after scrolling.")
+        }
+
+        try agentClick(at: CGPoint(x: spot["x"] as? Double ?? 0, y: spot["y"] as? Double ?? 0),
+                       cssWidth: spot["width"] as? Double ?? 0)
+        // The isolated world sends the result during capture, before a page handler can navigate.
+        let deadline = ContinuousClock.now + .milliseconds(500)
+        while receipt.target == nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        switch receipt.target {
+        case .expected:
+            return "Clicked \(element)."
+        case .unexpected(let target):
+            throw AgentInputError.page("The mouse click meant for \(element) landed on \(target). Take a new snapshot.")
+        case nil:
+            if receipt.sawUntrustedClick { return "Clicked \(element) (the page saw an untrusted click)." }
+            if spot["frame"] as? Bool == true {
+                return "Sent a mouse click to \(element). The top-level page cannot confirm clicks inside a frame."
+            }
+            throw AgentInputError.page("The page did not report a mouse click on \(element). Take a new snapshot or pass force: true to click it from script.")
+        }
+    }
+
     /// A left click at `point`, in CSS pixels of the viewport, sent straight to the page's view.
     /// `cssWidth` is the viewport's width in CSS pixels, which scales the point for zoom.
     public func agentClick(at point: CGPoint, cssWidth: Double) throws {
@@ -68,6 +125,24 @@ extension PageSession {
     public func agentEditCommand(_ selector: String) throws {
         guard let view = webView else { throw AgentInputError.noPage }
         view.doCommand(by: NSSelectorFromString(selector))
+    }
+}
+
+@MainActor
+private final class AgentClickReceipt: NSObject, WKScriptMessageHandler {
+    enum Target { case expected, unexpected(String) }
+    var target: Target?
+    var sawUntrustedClick = false
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard target == nil, message.frameInfo.isMainFrame, let result = message.body as? [String: Any] else { return }
+        if let unexpected = result["unexpected"] as? String {
+            target = .unexpected(unexpected)
+        } else if result["trusted"] as? Bool == true {
+            target = .expected
+        } else {
+            sawUntrustedClick = true
+        }
     }
 }
 
@@ -128,16 +203,17 @@ enum AgentInputScript {
       function matchesClickTarget(el, hit) {
         return hit === el || el.contains(hit) || el.control === hit || hit.control === el;
       }
-      let clickSeen = null, clickTarget = null;
+      let pendingClick = null;
       window.addEventListener('click', e => {
-        if (!clickTarget || !(e.target instanceof Element)) return;
-        if (matchesClickTarget(clickTarget, e.target)) {
-          clickSeen = { trusted: e.isTrusted };
-        } else if (e.isTrusted && !clickSeen) {
-          clickSeen = { unexpected: describe(e.target) };
+        if (!pendingClick || !(e.target instanceof Element)) return;
+        const { el, handler } = pendingClick;
+        const matches = matchesClickTarget(el, e.target);
+        if (e.isTrusted) pendingClick = null;
+        if (matches || e.isTrusted) {
+          window.webkit.messageHandlers[handler]?.postMessage(matches ? { trusted: e.isTrusted } : { unexpected: describe(e.target) });
         }
       }, true);
-      function locate(spec) {
+      function locate(spec, handler) {
         const el = find(Object.assign({ clickable: true }, spec));
         el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
         const r = el.getBoundingClientRect();
@@ -153,11 +229,9 @@ enum AgentInputScript {
         const hit = document.elementFromPoint(out.x, out.y);
         if (!hit) out.outside = true;
         else if (!matchesClickTarget(el, hit)) out.covered = describe(hit);
-        clickSeen = null;
-        clickTarget = el;
+        if (handler && !out.outside && !out.covered) pendingClick = { el, handler };
         return out;
       }
-      function clickResult() { return clickSeen; }
       function scriptClick(ref) {
         const el = P.resolve(ref);
         if (!el) throw new Error('The element left the page');
@@ -301,7 +375,7 @@ enum AgentInputScript {
         };
       }
 
-      window.__nookAgent = { find, describe, locate, clickResult, scriptClick, focusField, fieldValue, setValue, selectOption, keyDown, keyUp, probe };
+      window.__nookAgent = { find, describe, locate, scriptClick, focusField, fieldValue, setValue, selectOption, keyDown, keyUp, probe };
     })();
     """
 }
