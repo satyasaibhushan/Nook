@@ -413,6 +413,35 @@ class CaptureModeTests(unittest.TestCase):
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_ps_timeout_after_launch_still_terminates_pid_before_profile_cleanup(self):
+        browser = object.__new__(uibench.Browser)
+        browser.name = "chrome"
+        browser.path = Path("/tmp/isolated.app")
+        browser.proc = browser.pid = None
+        browser.closed = False
+        browser.temp = Mock()
+        alive = True
+        signals = []
+
+        def kill(pid, signum):
+            nonlocal alive
+            self.assertEqual(pid, 42)
+            if not alive:
+                raise ProcessLookupError
+            if signum:
+                signals.append(signum)
+                alive = False
+
+        browser.temp.cleanup.side_effect = lambda: self.assertFalse(alive)
+        with patch.object(uibench, "spec_call", return_value={"pid": 42, "start": 10}), patch.object(
+            uibench, "run", side_effect=subprocess.TimeoutExpired("ps", 2),
+        ), patch.object(uibench.os, "kill", side_effect=kill):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                browser.spawn(["isolated"], {})
+            browser.cleanup()
+        self.assertEqual(signals, [signal.SIGTERM])
+        browser.temp.cleanup.assert_called_once()
+
     def test_rejected_capture_preserves_raw_and_artifacts_after_cleanup(self):
         raw = raw_capture()
         raw["artifacts"] = {"last.png": base64.b64encode(b"rejected").decode()}
@@ -486,7 +515,7 @@ class PersistenceTests(unittest.TestCase):
     def test_signal_during_launch_handoff_registers_owned_process(self):
         browser = object.__new__(uibench.Browser)
         browser.path = Path("/tmp/isolated.app")
-        process = SimpleNamespace(pid=42)
+        process = Mock(pid=42)
 
         def spawn(*args):
             os.kill(os.getpid(), signal.SIGTERM)

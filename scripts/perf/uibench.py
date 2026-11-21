@@ -15,6 +15,7 @@ import math
 import os
 from pathlib import Path
 import plistlib
+import signal
 import statistics
 import subprocess
 import sys
@@ -63,21 +64,37 @@ class OwnedProcess:
     """A responsibility-isolated child spawned by the native helper."""
     def __init__(self, pid):
         self.pid = pid
-        self.identity = run(["ps","-p",pid,"-o","lstart=,comm="]).strip()
-        if not self.identity:
-            raise Invalid(f"ps could not identify process {pid}")
+        self.identity = None
+
+    def identify(self):
+        identity = run(["ps", "-p", self.pid, "-o", "lstart=,comm="], timeout=2).strip()
+        if not identity:
+            raise Invalid(f"ps could not identify process {self.pid}")
+        self.identity = identity
 
     def poll(self):
+        if self.identity is None:
+            # The launch reply still gives us the PID if its identity lookup failed.
+            try:
+                os.kill(self.pid, 0)
+            except ProcessLookupError:
+                return 0
+            return None
         identity = subprocess.run(["ps","-p",str(self.pid),"-o","lstart=,comm="], capture_output=True, text=True).stdout.strip()
         return None if identity and identity == self.identity else 0
 
-    def terminate(self):
+    def send_signal(self, signum):
         if self.poll() is None:
-            os.kill(self.pid,15)
+            try:
+                os.kill(self.pid, signum)
+            except ProcessLookupError:
+                pass
+
+    def terminate(self):
+        self.send_signal(signal.SIGTERM)
 
     def kill(self):
-        if self.poll() is None:
-            os.kill(self.pid,9)
+        self.send_signal(signal.SIGKILL)
 
     def wait(self, timeout=10):
         end = time.monotonic()+timeout
@@ -445,6 +462,7 @@ class Browser:
                 raise Invalid("launch reused a pre-existing instance; refusing to drive or terminate it")
             self.proc = OwnedProcess(launched["pid"])
             self.pid, self.launch_time = self.proc.pid, launched["start"]
+            self.proc.identify()
 
     def capture(self, *args, **kwargs):
         return capture(self.pid, *args, evidence=self.evidence, **kwargs)
@@ -621,7 +639,7 @@ class Browser:
         self.closed = True
         with finish_on_interrupt():
             try:
-                if self.name == "arc" and self.pid:
+                if self.name == "arc" and self.pid and (self.proc is None or self.proc.identity is not None):
                     self.cleanup_arc_tabs()
             finally:
                 try:
@@ -654,17 +672,20 @@ class Browser:
     def stop_owned_process(self):
         if not self.proc or self.proc.poll() is not None:
             return
-        if self.name == "arc":
+        if self.name == "arc" and self.proc.identity is not None:
             quit_arc(self.path)
             return
         children = []
         try:
-            for pid in self.pids():
-                if pid != self.pid:
-                    try:
-                        children.append(OwnedProcess(pid))
-                    except Invalid:
-                        continue  # The helper exited between process snapshots.
+            if self.proc.identity is not None:
+                for pid in self.pids():
+                    if pid != self.pid:
+                        child = OwnedProcess(pid)
+                        try:
+                            child.identify()
+                        except Invalid:
+                            continue  # The helper exited between process snapshots.
+                        children.append(child)
         finally:
             try:
                 self.proc.terminate()
@@ -675,10 +696,7 @@ class Browser:
                     self.proc.wait()
             finally:
                 for child in children:
-                    try:
-                        child.terminate()
-                    except ProcessLookupError:
-                        pass
+                    child.terminate()
 
 
 def wait_for_beacon(ident, kind, timeout=2):
@@ -1440,8 +1458,9 @@ def desktop_preflight(args, result, output_paths, space_paths):
         raise Invalid("capture helper uses an incompatible evidence protocol; rebuild it from uibench_capture.swift")
     try:
         pid = os.getpid()
-        if pid not in processes() or not OwnedProcess(pid).identity:
+        if pid not in processes():
             raise Invalid("ps could not identify the runner")
+        OwnedProcess(pid).identify()
         if "physical_bytes" not in helper("footprint", pid).get(str(pid), {}):
             raise Invalid("kernel footprint query was denied")
         if not isinstance(helper("windows"), list):
