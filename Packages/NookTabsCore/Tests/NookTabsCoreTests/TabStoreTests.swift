@@ -110,8 +110,10 @@ struct TabStoreTests {
         _ = store.load(now: fixedNow)
         store.save(tree, device)
         store.flush()
-        // A successful load makes today's backup.
-        #expect(TabStore(directory: dir).load(now: fixedNow).outcome == .loaded)
+        // A successful load queues today's backup.
+        let backupStore = TabStore(directory: dir)
+        #expect(backupStore.load(now: fixedNow).outcome == .loaded)
+        backupStore.flush()
 
         try Data("{ not json".utf8).write(to: dir.appendingPathComponent("structure.json"))
         let restored = TabStore(directory: dir).load(now: fixedNow)
@@ -157,7 +159,9 @@ struct TabStoreTests {
         store.save(tree, device)
         store.flush()
         for day in 0..<10 {
-            _ = TabStore(directory: dir).load(now: fixedNow.addingTimeInterval(Double(day) * 86_400))
+            let backupStore = TabStore(directory: dir)
+            _ = backupStore.load(now: fixedNow.addingTimeInterval(Double(day) * 86_400))
+            backupStore.flush()
         }
         #expect(store.backupFolders().count == TabStore.backupDays)
     }
