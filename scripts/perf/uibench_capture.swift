@@ -65,10 +65,14 @@ func ownsKeyboard(_ action: [String: Any]) -> Bool {
     FileHandle.standardError.write(Data("keyboard event dropped: pid \(owner) lost focus\n".utf8))
     return false
 }
-func perform(_ action: [String: Any]) -> Double {
+func perform(_ action: [String: Any]) -> [String: Any] {
     let kind = action["kind"] as? String ?? "key"
-    if ["key", "text"].contains(kind), !ownsKeyboard(action) { return now() }
     let stamp = now()
+    var timing: [String: Any] = ["t": stamp, "action_start": stamp, "posted": true]
+    if ["key", "text", "click", "move", "scroll"].contains(kind), !ownsKeyboard(action) {
+        timing["posted"] = false
+        return timing
+    }
     if kind == "activate", let pid = action["pid"] as? Int32 {
         NSRunningApplication(processIdentifier: pid)?.activate(options: [])
     } else if kind == "key" {
@@ -86,7 +90,14 @@ func perform(_ action: [String: Any]) -> Double {
         for down in [true, false] {
             let event = CGEvent(keyboardEventSource: nil, virtualKey: key, keyDown: down)!
             event.flags = f
+            // Synthetic events can start at zero. Stamp in the capture host clock.
+            event.timestamp = UInt64(now() * 1_000_000_000)
+            if down {
+                timing["key_event_ns"] = event.timestamp
+                timing["key_post_time"] = now()
+            }
             event.post(tap: .cghidEventTap)
+            if down { timing["key_post_return"] = now() }
         }
         for (flag, code) in modifiers.reversed() where f.contains(flag) {
             held.remove(flag)
@@ -97,7 +108,7 @@ func perform(_ action: [String: Any]) -> Double {
         let chars = Array((action["text"] as? String ?? "").utf16)
         for offset in stride(from: 0, to: chars.count, by: 16) {
             let chunk = Array(chars[offset..<min(chars.count, offset+16)])
-            if offset > 0, !ownsKeyboard(action) { break }
+            if offset > 0, !ownsKeyboard(action) { timing["posted"] = false; break }
             for down in [true, false] {
                 let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)!
                 event.flags = []
@@ -118,7 +129,56 @@ func perform(_ action: [String: Any]) -> Double {
         CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
                 wheel1: Int32(action["dy"] as? Int ?? -24), wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)
     }
-    return stamp
+    return timing
+}
+
+func onScreenWindows() -> [[String: Any]]? {
+    CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                              kCGNullWindowID) as? [[String: Any]]
+}
+
+struct WindowVisibility {
+    let pid: pid_t
+    let windowID: CGWindowID
+    let allowedOwner: pid_t?
+    let transparentWindows: [[String: Any]]
+
+    func bounds(_ row: [String: Any]) -> CGRect? {
+        guard let bounds = row[kCGWindowBounds as String] as? [String: Any] else { return nil }
+        return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+    }
+
+    func obstruction(in rows: [[String: Any]]?) -> String? {
+        guard let rows else { return "Window Server did not return a window list" }
+        guard let target = rows.firstIndex(where: {
+            $0[kCGWindowNumber as String] as? CGWindowID == windowID
+                && $0[kCGWindowOwnerPID as String] as? pid_t == pid
+        }), let targetBounds = bounds(rows[target]), !targetBounds.isEmpty else {
+            return "benchmark window is not on screen"
+        }
+        for row in rows[..<target] {
+            let owner = row[kCGWindowOwnerPID as String] as? pid_t
+            let name = row[kCGWindowOwnerName as String] as? String ?? "unknown"
+            let title = row[kCGWindowName as String] as? String
+            let layer = row[kCGWindowLayer as String] as? Int
+            if owner == pid || (allowedOwner != nil && owner == allowedOwner) { continue }
+            if name == "Window Server" && title == "Cursor" && layer == 2147483630 { continue }
+            guard let overlap = bounds(row)?.intersection(targetBounds), !overlap.isEmpty else { continue }
+            // Only the exact, preflight-verified desktop container may be ignored.
+            // Other windows from the same system process can contain prompts.
+            let keys = [kCGWindowNumber, kCGWindowOwnerPID, kCGWindowLayer,
+                        kCGWindowName, kCGWindowBounds, kCGWindowAlpha]
+            if transparentWindows.contains(where: { verified in
+                keys.allSatisfy { key in
+                    verified[key as String] as? NSObject == row[key as String] as? NSObject
+                }
+            }) { continue }
+            let pidText = owner.map(String.init) ?? "unknown"
+            let layerText = layer.map(String.init) ?? "unknown"
+            return "\(name) (pid \(pidText), layer \(layerText))"
+        }
+        return nil
+    }
 }
 
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
@@ -131,35 +191,61 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     var windowRect = CGRect.zero
     var regionRects: [(String, CGRect)] = []
     var windowID: CGWindowID?
+    var visibility: WindowVisibility?
+    var visibilitySamples = 0
+    var obstruction: [String: Any]?
     var attribute = false
     var regionByPixel: [UInt8] = []
     var strips: [CGImage] = []
     var lastStrip = -Double.infinity
     var streamError: String?
     var finalImage: CGImage?
+    var firstImage: CGImage?
     var textFrames: [(Double, CGImage)] = []
-    let needle: String?
-    let directory: String?
+    var inputCrop: CGRect?
+    var inputAfter = Double.infinity
+    var inputBefore = Double.infinity
+    var previousInput: Data?
+    let record: Bool
+    let still: Bool
     let signatures: Bool
-    init(_ directory: String?, signatures: Bool = false, needle: String? = nil) {
-        self.directory = directory; self.signatures = signatures; self.needle = needle
+
+    init(record: Bool, still: Bool, signatures: Bool) {
+        self.record = record
+        self.still = still
+        self.signatures = signatures
     }
-    func stream(_ stream: SCStream, didStopWithError error: Error) { streamError = error.localizedDescription }
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        queue.async { self.streamError = error.localizedDescription }
+    }
+    func sampleVisibility(_ windows: () -> [[String: Any]]? = onScreenWindows) {
+        guard let visibility, obstruction == nil else { return }
+        visibilitySamples += 1
+        let t = now()
+        if let reason = visibility.obstruction(in: windows()) {
+            obstruction = ["t": t, "reason": reason]
+        }
+    }
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, sample.isValid else { return }
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]]
         let status = (attachments?.first?[.status] as? Int) ?? -1
+        let t = CMTimeGetSeconds(sample.presentationTimeStamp)
+        guard t.isFinite else { return }
+        // Sample the display stack even for idle buffers and retain the first obstruction.
+        sampleVisibility()
         // Idle buffers can carry no pixels. Retain their timestamps as repeated presentation samples.
         guard status == SCFrameStatus.complete.rawValue else {
-            if status == SCFrameStatus.idle.rawValue { frames.append(["t": CMTimeGetSeconds(sample.presentationTimeStamp), "idle": true]) }
+            if status == SCFrameStatus.idle.rawValue { frames.append(["t": t, "idle": true]) }
             return
         }
         guard let buffer = sample.imageBuffer else { return }
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
-        let fullWidth = CVPixelBufferGetWidth(buffer), fullHeight = CVPixelBufferGetHeight(buffer)
         let width = Int(crop.width), height = Int(crop.height)
+        let bufferBounds = CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
+        guard !crop.isEmpty, bufferBounds.contains(crop) else { return }
         let stride = CVPixelBufferGetBytesPerRow(buffer)
         let ptr = base.assumingMemoryBound(to: UInt8.self).advanced(by: Int(crop.minY) * stride + Int(crop.minX) * 4)
         var pixels: [UInt8] = []
@@ -180,7 +266,6 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 if Double(g) > Double(r)*1.5 && Double(g) > Double(b)*1.2 { green += 1 }
             }
         }
-        let t = CMTimeGetSeconds(sample.presentationTimeStamp)
         var frame: [String: Any] = ["t": t, "changed": Double(changed)/16000, "red": Double(red)/Double(max(1,colorSamples)),
                                   "blue": Double(blue)/Double(max(1,colorSamples)), "green": Double(green)/Double(max(1,colorSamples)),
                                   "delivery_lag_ms": (now()-t)*1000]
@@ -225,34 +310,51 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
         if signatures { frame["pixels"] = Data(pixels).base64EncodedString() }
         frames.append(frame)
         last = pixels
-        if directory != nil || needle != nil,
-           let provider = CGDataProvider(data: Data(bytes: base, count: stride*fullHeight) as CFData),
-           let fullImage = CGImage(width: fullWidth, height: fullHeight, bitsPerComponent: 8, bitsPerPixel: 32,
-                               bytesPerRow: stride, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
-                               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
-           let image = fullImage.cropping(to: crop) {
+        if let inputCrop, bufferBounds.contains(inputCrop), inputAfter <= t, t < inputBefore, textFrames.count < 60,
+           let image = copyImage(base, stride: stride, rect: inputCrop),
+           let pixels = image.dataProvider?.data as Data?, pixels != previousInput {
+            textFrames.append((t, image))
+            previousInput = pixels
+        }
+        if record, let image = copyImage(base, stride: stride, rect: crop) {
             finalImage = image
-            if needle != nil && changed > 0 && textFrames.count < 150 { textFrames.append((t,image)) }
-            guard let directory else { return }
-            guard t - lastStrip >= 0.16, strips.count < 32 else { return }
-            let w = 480, h = Int(Double(height) * 480 / Double(width))
+            if firstImage == nil { firstImage = image }
+            guard !still, t - lastStrip >= 0.16, strips.count < 32 else { return }
+            let w = 480, h = max(1, Int(Double(height) * 480 / Double(width)))
             let small = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w*4,
                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
             small.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
             strips.append(small.makeImage()!)
             lastStrip = t
-            if strips.count == 1 { save(image, "\(directory)/first.png") }
         }
     }
-    func save(_ image: CGImage, _ path: String) {
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+    func copyImage(_ base: UnsafeMutableRawPointer, stride: Int, rect: CGRect) -> CGImage? {
+        let width = Int(rect.width), height = Int(rect.height)
+        let rowBytes = width * 4
+        var data = Data(count: rowBytes * height)
+        data.withUnsafeMutableBytes { buffer in
+            guard let destination = buffer.baseAddress else { return }
+            for y in 0..<height {
+                let source = base.advanced(by: (Int(rect.minY) + y)*stride + Int(rect.minX)*4)
+                memcpy(destination.advanced(by: y * rowBytes), source, rowBytes)
+            }
+        }
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: rowBytes, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
-    func saveStrip() {
-        guard let directory, let first = strips.first else { return }
+    func png(_ image: CGImage) -> String? {
+        NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.base64EncodedString()
+    }
+    func artifacts() -> [String: String] {
+        var output: [String: String] = [:]
+        if let finalImage { output["last.png"] = png(finalImage) }
+        if still { return output }
+        if let firstImage { output["first.png"] = png(firstImage) }
+        guard let first = strips.first else { return output }
         if let finalImage {
-            save(finalImage, "\(directory)/last.png")
             let tail = CGContext(data: nil, width: first.width, height: first.height, bitsPerComponent: 8,
                                  bytesPerRow: first.width*4, space: CGColorSpaceCreateDeviceRGB(),
                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
@@ -267,33 +369,98 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             context.draw(image, in: CGRect(x: i%columns * first.width, y: (rows-1-i/columns)*first.height,
                                            width: first.width, height: first.height))
         }
-        save(context.makeImage()!, "\(directory)/strip.png")
-    }
-    func firstTextFrame(after: Double) -> Double? {
-        guard let needle else { return nil }
-        for (t,image) in textFrames where t >= after {
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["en-US"]
-            request.usesLanguageCorrection = false
-            request.customWords = [needle]
-            try? VNImageRequestHandler(cgImage: image).perform([request])
-            let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined().lowercased().filter { !$0.isWhitespace }
-            if text.contains(needle.lowercased()) { return t }
-        }
-        return nil
+        output["strip.png"] = png(context.makeImage()!)
+        return output
     }
 }
 
+func recognize(_ path: String) throws {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    guard let spec = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let needle = spec["needle"] as? String, !needle.isEmpty,
+          let frames = spec["frames"] as? [[String: Any]] else {
+        throw NSError(domain: "invalid input evidence", code: 16)
+    }
+    if frames.isEmpty { emit(["first_text_frame": NSNull()]); return }
+    let request = VNRecognizeTextRequest()
+    // The short ASCII probe is compatible with Vision's fast path, which
+    // avoids loading the accurate model for each offline process.
+    request.recognitionLevel = .fast
+    request.recognitionLanguages = ["en-US"]
+    request.usesLanguageCorrection = false
+    for frame in frames {
+        guard let timestamp = frame["t"] as? Double, timestamp.isFinite,
+              let encoded = frame["png"] as? String,
+              let data = Data(base64Encoded: encoded),
+              let bitmap = NSBitmapImageRep(data: data), let image = bitmap.cgImage else {
+            throw NSError(domain: "cannot decode cropped input frame", code: 16)
+        }
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined().lowercased().filter { !$0.isWhitespace }
+        if text.contains(needle.lowercased()) {
+            emit(["first_text_frame": timestamp]); return
+        }
+    }
+    emit(["first_text_frame": NSNull()])
+}
+
+func transparentContainer(windowID: CGWindowID, pid: pid_t) async throws -> Bool {
+    guard #available(macOS 14.0, *),
+          let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+          ["com.apple.dock", "com.apple.notificationcenterui"].contains(bundle) else { return false }
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    guard let window = content.windows.first(where: { $0.windowID == windowID && $0.owningApplication?.processID == pid }),
+          window.title?.isEmpty != false,
+          content.displays.contains(where: {
+              let d = $0.frame, w = window.frame
+              return abs(d.minX - w.minX) <= 2 && abs(d.minY - w.minY) <= 2
+                  && abs(d.width - w.width) <= 2 && abs(d.height - w.height) <= 2
+          }) else { return false }
+    let config = SCStreamConfiguration()
+    config.width = Int(window.frame.width * 2)
+    config.height = Int(window.frame.height * 2)
+    config.shouldBeOpaque = false
+    config.ignoreShadowsSingleWindow = true
+    config.showsCursor = false
+    let image = try await SCScreenshotManager.captureImage(
+        contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: config)
+    // The owner and bounds alone do not establish transparency. Treat any ink
+    // or an unavailable alpha channel as a possible prompt.
+    guard image.alphaInfo != .none, image.alphaInfo != .noneSkipFirst, image.alphaInfo != .noneSkipLast,
+          let alpha = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                                bytesPerRow: image.width*4, space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue),
+          let bytes = alpha.data else { return false }
+    let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+    alpha.clear(rect)
+    alpha.draw(image, in: rect)
+    let rgba = UnsafeRawBufferPointer(start: bytes, count: alpha.bytesPerRow * image.height)
+    return stride(from: 3, to: rgba.count, by: 4).allSatisfy { rgba[$0] == 0 }
+}
+
 @main struct Main {
+    static func specData(_ path: String) throws -> Data {
+        if path == "-" { return FileHandle.standardInput.readDataToEndOfFile() }
+        return try Data(contentsOf: URL(fileURLWithPath: path))
+    }
+
     static func main() async {
         do {
             let a = Array(CommandLine.arguments.dropFirst())
             guard let command = a.first else { throw NSError(domain: "missing command", code: 1) }
             if command == "permissions" {
                 let session = CGSessionCopyCurrentDictionary() as? [String: Any]
-                let unlocked = session != nil && session?["CGSSessionScreenIsLocked"] as? Bool != true
-                emit(["screen": CGPreflightScreenCaptureAccess(), "accessibility": AXIsProcessTrusted(), "post_events": CGPreflightPostEventAccess(), "unlocked": unlocked]); return
+                let active = session?[kCGSessionOnConsoleKey as String] as? Bool == true
+                    && session?[kCGSessionLoginDoneKey as String] as? Bool == true
+                let unlocked = active && session?["CGSSessionScreenIsLocked"] as? Bool != true
+                emit(["screen": CGPreflightScreenCaptureAccess(), "accessibility": AXIsProcessTrusted(),
+                      "post_events": CGPreflightPostEventAccess(), "unlocked": unlocked,
+                      "console_session": active, "capture_protocol": 3]); return
+            }
+            if command == "ocr" { try recognize(a[1]); return }
+            if command == "transparent-container" {
+                let transparent = try await transparentContainer(windowID: UInt32(a[1])!, pid: Int32(a[2])!)
+                emit(["transparent": transparent]); return
             }
             if command == "front" {
                 emit(["pid": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1]); return
@@ -311,7 +478,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 application.run(); return
             }
             if command == "windows" {
-                let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+                guard let list = onScreenWindows() else {
+                    throw NSError(domain: "Window Server did not return a window list", code: 17)
+                }
                 emit(list); return
             }
             if command == "ax" || command == "ax-focused" {
@@ -324,7 +493,8 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                     }
                     root = focused as! AXUIElement
                 }
-                tree(root, [], 0, &rows); emit(rows); return
+                if attr(root, "AXRole") != nil { tree(root, [], 0, &rows) }
+                emit(rows); return
             }
             if command == "press" {
                 var element = AXUIElementCreateApplication(Int32(a[1])!)
@@ -362,7 +532,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 emit(["ok": true]); return
             }
             if command == "action" {
-                let actions = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: a[1]))) as! [[String: Any]]
+                let actions = try JSONSerialization.jsonObject(with: specData(a[1])) as! [[String: Any]]
                 let times = actions.map { action in
                     let t = perform(action)
                     usleep(50000)
@@ -371,7 +541,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 emit(times); return
             }
             if command == "launch" {
-                let spec = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: a[1]))) as! [String: Any]
+                let spec = try JSONSerialization.jsonObject(with: specData(a[1])) as! [String: Any]
                 let arguments = spec["args"] as! [String]
                 let application = spec["app"] as! String
                 let configuration = NSWorkspace.OpenConfiguration()
@@ -429,7 +599,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 emit(["ok": true]); return
             }
             guard command == "capture" else { throw NSError(domain: "unknown command", code: 3) }
-            let spec = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: a[1]))) as! [String: Any]
+            let spec = try JSONSerialization.jsonObject(with: specData(a[1])) as! [String: Any]
             let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
             let pid = spec["pid"] as? Int32
             let requestedWindow = spec["window_id"] as? UInt32
@@ -455,13 +625,26 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             config.showsCursor = false
             config.pixelFormat = kCVPixelFormatType_32BGRA
             config.colorSpaceName = CGColorSpace.sRGB
-            let directory = spec["record_dir"] as? String
-            if let directory { try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true) }
-            let capture = Capture(directory, signatures: spec["signatures"] as? Bool ?? false, needle: spec["ocr_needle"] as? String)
+            let capture = Capture(record: spec["record"] as? Bool ?? false,
+                                  still: spec["still"] as? Bool ?? false,
+                                  signatures: spec["signatures"] as? Bool ?? false)
             capture.crop = CGRect(x: (rect.minX-display.frame.minX)*scale, y: (rect.minY-display.frame.minY)*scale,
                                   width: rect.width*scale, height: rect.height*scale).integral
             capture.captureRect = rect
+            if let r = spec["input_region"] as? [Double], r.count == 4 {
+                let input = CGRect(x:r[0], y:r[1], width:r[2], height:r[3]).intersection(rect)
+                if !input.isEmpty {
+                    capture.inputCrop = CGRect(x: (input.minX-display.frame.minX)*scale,
+                                               y: (input.minY-display.frame.minY)*scale,
+                                               width: input.width*scale, height: input.height*scale).integral
+                }
+            }
             capture.windowID = requestedWindow
+            if let pid, let requestedWindow {
+                capture.visibility = WindowVisibility(
+                    pid: pid, windowID: requestedWindow, allowedOwner: spec["allowed_owner"] as? Int32,
+                    transparentWindows: spec["transparent_windows"] as? [[String: Any]] ?? [])
+            }
             let wr = (spec["window_rect"] as? [Double]) ?? [rect.minX, rect.minY, rect.width, rect.height]
             capture.windowRect = CGRect(x: wr[0], y: wr[1], width: wr[2], height: wr[3])
             capture.attribute = spec["attribute"] as? Bool ?? false
@@ -483,9 +666,16 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             try stream.addStreamOutput(capture, type: .screen, sampleHandlerQueue: capture.queue)
             try await stream.startCapture()
             let start = now()
+            let actions = spec["actions"] as? [[String: Any]] ?? []
+            if let probe = actions.first(where: { $0["kind"] as? String == "text" }) {
+                capture.queue.sync {
+                    capture.inputAfter = start + (probe["at"] as? Double ?? 0.55)
+                    capture.inputBefore = start + (spec["input_until"] as? Double ?? 1.3)
+                }
+            }
             if let ready = spec["ready_file"] as? String { try Data("\(start)".utf8).write(to: URL(fileURLWithPath: ready)) }
             var events: [[String: Any]] = []
-            for action in spec["actions"] as? [[String: Any]] ?? [] {
+            for action in actions {
                 let due = start + (action["at"] as? Double ?? 0.5)
                 let delay = max(0, due - now())
                 try await Task.sleep(nanoseconds: UInt64(delay * 1e9))
@@ -493,17 +683,19 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                 if ["activate", "key"].contains(action["kind"] as? String ?? ""), let pointer = CGEvent(source: nil)?.location {
                     event["pointer_before"] = [pointer.x,pointer.y]
                 }
-                event["t"] = perform(action)
+                event.merge(perform(action)) { _, new in new }
                 events.append(event)
             }
             let end = start + (spec["duration"] as? Double ?? 2.0)
             try await Task.sleep(nanoseconds: UInt64(max(0, end - now()) * 1e9))
-            try await stream.stopCapture()
-            capture.queue.sync {}
+            do { try await stream.stopCapture() }
+            catch { capture.queue.sync { capture.streamError = error.localizedDescription } }
+            capture.queue.sync { capture.sampleVisibility() }
             let endStamp = now()
-            capture.saveStrip()
-            let firstInput = events.first?["t"] as? Double ?? start
-            let echo = capture.firstTextFrame(after: firstInput)
+            let inputFrames: [[String: Any]] = capture.textFrames.compactMap { t, image in
+                guard let png = capture.png(image) else { return nil }
+                return ["t": t, "png": png]
+            }
             var timebase = mach_timebase_info_data_t()
             mach_timebase_info(&timebase)
             emit(["clock": ["host_seconds": now(), "wall_seconds": Date().timeIntervalSince1970,
@@ -513,8 +705,11 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
                   "display_rect": [display.frame.minX,display.frame.minY,display.frame.width,display.frame.height],
                   "buffer_crop": [capture.crop.minX,capture.crop.minY,capture.crop.width,capture.crop.height],
                   "start": start, "end": endStamp, "events": events, "frames": capture.frames,
-                  "capture_end": endStamp, "first_text_frame": echo as Any? ?? NSNull(),
-                  "rect": [rect.minX, rect.minY, rect.width, rect.height], "error": capture.streamError as Any? ?? NSNull()])
+                  "capture_end": endStamp, "artifacts": capture.artifacts(), "input_frames": inputFrames,
+                  "rect": [rect.minX, rect.minY, rect.width, rect.height],
+                  "visibility_samples": capture.visibilitySamples,
+                  "obstruction": capture.obstruction as Any? ?? NSNull(),
+                  "capture_error": capture.streamError as Any? ?? NSNull()])
         } catch {
             emit(["error": error.localizedDescription]); exit(1)
         }
