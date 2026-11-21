@@ -91,7 +91,7 @@ class BrowserToolExecutor {
         case "switchTab":
             result = try executeSwitchTab(toolCall.arguments, browserManager: browserManager, windowState: windowState)
         case "createTab":
-            result = try executeCreateTab(toolCall.arguments, browserManager: browserManager, windowState: windowState)
+            result = try await executeCreateTab(toolCall.arguments, browserManager: browserManager, windowState: windowState)
         case "getSelectedText":
             result = try await executeGetSelectedText(browserManager: browserManager, windowState: windowState)
         case "executeJavaScript":
@@ -122,8 +122,8 @@ class BrowserToolExecutor {
 
     /// A new selected tab: the agent's new current tab when an agent calls, without showing it.
     @discardableResult
-    private func openTab(_ url: URL, _ tabs: TabsController, _ windowState: BrowserWindowState) -> UUID? {
-        if let agent { return tabs.openAgentTab(url, for: agent, name: agentTabName) }
+    private func openTab(_ url: URL, _ tabs: TabsController, _ windowState: BrowserWindowState) async throws -> UUID? {
+        if let agent { return try await tabs.openAgentTab(url, for: agent, name: agentTabName) }
         return tabs.open(url: url, in: windowState, placement: .newTab)
     }
 
@@ -163,7 +163,7 @@ class BrowserToolExecutor {
                 tabs.selectForAgent(id, makeCurrent: agentTabName == nil)
                 session.load(url)
             } else {
-                openTab(url, tabs, windowState)
+                try await openTab(url, tabs, windowState)
             }
             return "Navigated to \(urlString)\(newTab ? " in new tab" : "")"
         }
@@ -511,16 +511,16 @@ class BrowserToolExecutor {
         return "Switched to tab: \(tabTitle(order[index], in: controller))"
     }
 
-    private func executeCreateTab(_ args: [String: Any], browserManager: BrowserManager, windowState: BrowserWindowState) throws -> String {
+    private func executeCreateTab(_ args: [String: Any], browserManager: BrowserManager, windowState: BrowserWindowState) async throws -> String {
         if let urlString = args["url"] as? String, !urlString.isEmpty {
             guard let url = webURL(urlString) else {
                 return "Invalid URL: only http and https URLs are allowed"
             }
-            openTab(url, browserManager.tabs, windowState)
+            try await openTab(url, browserManager.tabs, windowState)
             return "Created new tab with URL: \(urlString)"
         }
 
-        openTab(TabsController.homeURL, browserManager.tabs, windowState)
+        try await openTab(TabsController.homeURL, browserManager.tabs, windowState)
 
         return "Created new empty tab"
     }

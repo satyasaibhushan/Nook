@@ -175,29 +175,43 @@ extension TabsController {
         tabEvents?.tabClosed(itemID: session.itemID)
     }
 
-    /// A WebKit-created popup from `opener`: a new selected tab in the opener's window whose
-    /// session owns `webView`. WebKit drives the popup's first navigation.
+    /// Adds WebKit's popup view to a tab before selection can load a view of its own.
     @discardableResult
     func adoptPopup(webView: WKWebView, url: URL?, opener: PageSession) -> UUID? {
-        guard let window = window(for: opener), let position = childTabPosition(in: window, opener: opener.itemID)
-        else { return nil }
+        let window = window(for: opener)
+        let isAgentPopup = opener.isAgentPage
+        let position: (Parent, UUID?)
+        let owner: Owner
+        if let window, let inWindow = childTabPosition(in: window, opener: opener.itemID) {
+            position = inWindow
+            owner = self.owner(of: window)
+        } else if isAgentPopup, let item = tree.item(opener.itemID) {
+            position = (item.parent, opener.itemID)
+            owner = .main
+        } else {
+            return nil
+        }
+
         let id = UUID()
         let pageURL = url ?? URL(string: "about:blank")!
-        guard perform(owner(of: window), "popup", {
+        guard perform(owner, "popup", {
             try $0.createTab(id: id, url: pageURL, title: "New Tab", in: position.0, after: position.1)
-        }) != nil else { return nil }
+        }) != nil, let session = ensureSession(for: id) else { return nil }
         revealTrail(position.0)
-        let session = PageSession(
-            itemID: id, url: pageURL, title: "New Tab", isPrivate: window.privateTree != nil,
-            controller: self)
         session.isPopupHost = true
-        register(session, in: window)
         session.installPopupWebView(webView)
-        if let url, url.scheme != nil, url.absoluteString != "about:blank" {
-            session.load(url)
+
+        if isAgentPopup {
+            session.agentPopupOpenerID = opener.itemID
+            session.onClose = { [weak self] in self?.close(id, archive: false) }
+            // WebKit loads the request from the opener after the delegate returns.
+            selectForAgent(id)
+        } else if let window {
+            if let url, url.scheme != nil, url.absoluteString != "about:blank" {
+                session.load(url)
+            }
+            select(id, in: window)
         }
-        // Select only after the session owns its view, so selection cannot create a second one.
-        select(id, in: window)
         return id
     }
 
@@ -519,9 +533,15 @@ extension TabsController {
 
     static let recentLimit = 30
 
-    /// Before items disappear (or a pinned tab's page ends), every window selecting one returns
-    /// to the item it selected before, else the next item in display order, else the previous.
+    /// Before items disappear (or a pinned tab's page ends), move the agent and window selections.
     private func moveSelectionOff(_ ids: Set<UUID>) {
+        var popupOpeners: [UUID: UUID] = [:]
+        for id in ids {
+            guard let opener = session(for: id)?.agentPopupOpenerID, !ids.contains(opener),
+                  let caller = agentCaller(owning: id), agentCaller(owning: opener) === caller else { continue }
+            popupOpeners[id] = opener
+            if caller.currentTab == id { caller.currentTab = opener }
+        }
         for window in allWindows {
             for space in window.recentItemsBySpace.keys {
                 window.recentItemsBySpace[space]?.removeAll { ids.contains($0) }
@@ -529,14 +549,13 @@ extension TabsController {
             if let split = window.split, ids.contains(split.leftItemID) || ids.contains(split.rightItemID) {
                 window.split = nil
             }
-            guard let selected = window.selectedItemID, ids.contains(selected), let spaceID = window.spaceID else {
-                for (space, item) in window.selectedItemBySpace where ids.contains(item) {
-                    window.selectedItemBySpace[space] = nil
-                }
-                continue
+            let selected = window.selectedItemID
+            for (space, item) in window.selectedItemBySpace where ids.contains(item) && space != window.spaceID {
+                window.selectedItemBySpace[space] = popupOpeners[item]
             }
+            guard let selected, ids.contains(selected), let spaceID = window.spaceID else { continue }
             let order = displayOrder(in: window)
-            let index = order.firstIndex(of: selected) ?? 0
+            let index = order.firstIndex(of: selected)
             // Recent items stay eligible inside collapsed folders; ones moved to another space do not.
             let source = tree(owner(of: window))
             // Only open tabs qualify: every tab in the tabs section, and pinned tabs or favorites
@@ -545,20 +564,18 @@ extension TabsController {
                 // A reopened page is recorded before its session exists.
                 source.scope(of: id) == .device || self.session(for: id) != nil || self.device.openPages[id] != nil
             }
-            let recent = (window.recentItemsBySpace[spaceID] ?? []).reversed().filter { id in
+            let recent = (window.recentItemsBySpace[spaceID] ?? []).reversed().first { id in
                 guard let item = source.item(id), !item.isFolder, isOpen(id) else { return false }
                 return source.spaceID(of: id) == spaceID
             }
-            let candidates = recent
-                + order[(index + 1)...].filter { !ids.contains($0) && isOpen($0) }
-                + order[..<index].reversed().filter { !ids.contains($0) && isOpen($0) }
-            for (space, item) in window.selectedItemBySpace where ids.contains(item) {
-                window.selectedItemBySpace[space] = nil
-            }
-            if let next = candidates.first {
+            let isCandidate: (UUID) -> Bool = { !ids.contains($0) && isOpen($0) }
+            let following = index.map { order.dropFirst($0 + 1) } ?? order[...]
+            let preceding = order.prefix(index ?? 0)
+            window.selectedItemBySpace[spaceID] = nil
+            if let next = popupOpeners[selected] ?? recent
+                ?? following.first(where: isCandidate) ?? preceding.reversed().first(where: isCandidate) {
                 select(next, in: window)
             } else {
-                window.selectedItemBySpace[spaceID] = nil
                 window.emptiedSpaces.insert(spaceID)
                 mirror(window)
                 window.refreshCompositor()

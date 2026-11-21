@@ -17,6 +17,7 @@ let package = Package(
     ],
     targets: [
         .testTarget(name: "NookWebTests", dependencies: ["NookWeb"]),
+        .testTarget(name: "NookWebIntegrationTests", dependencies: ["NookWeb"]),
         .target(name: "MuteableWKWebView", path: "Sources/MuteableWKWebView", publicHeadersPath: "include"),
         .target(
             name: "NookWeb",

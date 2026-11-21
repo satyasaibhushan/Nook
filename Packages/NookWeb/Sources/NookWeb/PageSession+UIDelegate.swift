@@ -76,7 +76,7 @@ extension PageSession: WKUIDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        guard let delegate = controller?.sessionDelegate else { return nil }
+        guard let controller else { return nil }
         let url = navigationAction.request.url
         if url?.scheme?.lowercased() == "nook" { return nil }
         // Extensions manage their own auth flows, and never get Peek.
@@ -99,18 +99,28 @@ extension PageSession: WKUIDelegate {
             return configuration
         }
 
+        // WebKit owns the initial request and opener relationship even though the workspace
+        // presents the popup in its sidebar as a tab.
+        if isAgentPage {
+            guard let popup = controller.webViews?.makeWebView(configuration: popupConfiguration()),
+                  controller.adoptPopup(webView: popup, url: url, opener: self) != nil
+            else { return nil }
+            return popup
+        }
+
+        guard let delegate = controller.sessionDelegate else { return nil }
+
         // A sign-in popup shows in a mini window as a real popup, so `window.opener` carries the
         // result back to this page the way the site expects.
-        // An agent page's popups, sign-in ones too, open as tabs in the Agent space (adoptPopup).
-        if !isFromExtension, !isAgentPage, let url, isLikelyOAuthOrExternalWindow(url: url, windowFeatures: windowFeatures) {
-            guard let popup = controller?.openDetachedPopup(configuration: popupConfiguration(), url: url, opener: self)
+        if !isFromExtension, let url, isLikelyOAuthOrExternalWindow(url: url, windowFeatures: windowFeatures) {
+            guard let popup = controller.openDetachedPopup(configuration: popupConfiguration(), url: url, opener: self)
             else { return nil }
             delegate.presentPopupWindow(popup)
             return popup.webView
         }
 
         // Air Traffic Control: route popup URLs to designated spaces.
-        if let url, controller?.siteRouting.applyRoute(url: url, from: self) == true {
+        if let url, controller.siteRouting.applyRoute(url: url, from: self) {
             return nil
         }
 
@@ -129,15 +139,10 @@ extension PageSession: WKUIDelegate {
             return nil
         }
 
-        guard let newWebView = controller?.webViews?.makeWebView(configuration: popupConfiguration()) else { return nil }
+        guard let newWebView = controller.webViews?.makeWebView(configuration: popupConfiguration()) else { return nil }
 
         // A session owns the popup's view; a private page's popup stays in its private window.
-        guard let controller,
-              controller.adoptPopup(
-                webView: newWebView,
-                url: navigationAction.request.url,
-                opener: self) != nil
-        else { return nil }
+        guard controller.adoptPopup(webView: newWebView, url: url, opener: self) != nil else { return nil }
 
         return newWebView
     }
@@ -242,7 +247,7 @@ extension PageSession: WKUIDelegate {
             onSuppress: nextDialogSuppressor(), completion: completionHandler)
     }
 
-    /// A popup that finished (a sign-in window) closes itself; only detached pages act on it.
+    /// Closes a sign-in window or Agent tab when its popup finishes.
     public func webViewDidClose(_ webView: WKWebView) {
         onClose?()
     }

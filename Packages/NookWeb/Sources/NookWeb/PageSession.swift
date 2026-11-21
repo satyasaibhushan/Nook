@@ -218,6 +218,8 @@ public final class PageSession: NSObject, Identifiable {
     @ObservationIgnored var navigationGestureCount = 0
     /// One-shot initial-navigation suppression for a WebKit-created popup.
     @ObservationIgnored var isPopupHost: Bool = false
+    /// The agent tab to return to when this popup closes.
+    @ObservationIgnored var agentPopupOpenerID: UUID?
     /// The extension whose pages this view was built to show (`scheme://host`), nil for a web view.
     @ObservationIgnored public internal(set) var viewExtensionOrigin: String?
     @ObservationIgnored private var isReplacingView = false

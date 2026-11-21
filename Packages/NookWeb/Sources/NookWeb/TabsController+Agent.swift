@@ -22,15 +22,16 @@ public final class AgentCaller {
     public let id: String
     /// The client name with the logins it borrowed, shown as its folder's title.
     public let label: String
-    /// The name of the space whose cookies were copied in at the start, or nil for none.
+    /// The name of the space whose cookies seed new browsing sessions, or nil for none.
     public let logins: String?
+    let loginSpaceID: UUID?
     public let folderID: UUID
     /// The tab tools act on; `TabsController.agentCurrentTab(of:)` falls back when it is gone.
     public internal(set) var currentTab: UUID?
     /// Tabs opened with a `tab` name, so workers sharing one connection each keep their own
     /// tab without moving `currentTab` under the others.
     @ObservationIgnored public internal(set) var tabNames: [String: UUID] = [:]
-    @ObservationIgnored public let profile: Profile
+    @ObservationIgnored public internal(set) var profile: Profile
     /// Tool calls of this caller running now.
     @ObservationIgnored public var callsInFlight = 0
     /// Set while its pages are out of the window for being idle.
@@ -40,10 +41,11 @@ public final class AgentCaller {
     @ObservationIgnored public var viewport: CGSize?
     @ObservationIgnored public var idleTask: Task<Void, Never>?
 
-    init(id: String, label: String, logins: String?, folderID: UUID, profile: Profile) {
+    init(id: String, label: String, logins: String?, loginSpaceID: UUID?, folderID: UUID, profile: Profile) {
         self.id = id
         self.label = label
         self.logins = logins
+        self.loginSpaceID = loginSpaceID
         self.folderID = folderID
         self.profile = profile
     }
@@ -52,10 +54,14 @@ public final class AgentCaller {
 public enum AgentCallerError: LocalizedError {
     case noSpace
     case unknownLogins(String, available: [String])
+    case workspaceClosed
+    case tabNameInUse(String)
 
     public var errorDescription: String? {
         switch self {
         case .noSpace: return "No space to make the Agent space next to"
+        case .workspaceClosed: return "The agent workspace closed before the tab could open. Retry the request."
+        case .tabNameInUse(let name): return "A tab named \(name) is already open."
         case .unknownLogins(let name, let available):
             return "No space named \(name). logins takes one of: \(available.joined(separator: ", ")), or none."
         }
@@ -90,39 +96,30 @@ extension TabsController {
         tree.orderedSpaces.filter { !$0.isAgent }.map(\.name)
     }
 
-    /// Starts caller `id`: a folder in the Agent space titled `name · logins` and a fresh data
-    /// store, holding a copy of the cookies of the space named `logins` (any case) when given.
+    /// Starts a caller's folder. A named space seeds the store when its first tab opens.
     /// Agent space tabs no live caller owns are left from an earlier run and close.
-    public func startAgentCaller(id: String, name: String, logins: String?) async throws -> AgentCaller {
-        var source: (name: String, profile: Profile)?
-        if let logins {
-            guard let space = tree.orderedSpaces.first(where: { !$0.isAgent && $0.name.caseInsensitiveCompare(logins) == .orderedSame }),
-                  let profile = profile(forSpace: space.id)
-            else { throw AgentCallerError.unknownLogins(logins, available: agentLoginChoices) }
-            source = (space.name, profile)
-        }
-        let store = WKWebsiteDataStore.nonPersistent()
-        if let source {
-            // One way: the agent's sign-outs and new cookies stay in its own store.
-            for cookie in await source.profile.dataStore.httpCookieStore.allCookies() {
-                await store.httpCookieStore.setCookie(cookie)
-            }
-        }
-        // Another call of this session may have started it while the cookies copied.
+    public func startAgentCaller(id: String, name: String, logins: String?) throws -> AgentCaller {
         if let existing = agentCallers[id] { return existing }
+        let source: SpaceRecord?
+        if let logins {
+            guard let space = tree.orderedSpaces.first(where: { !$0.isAgent && $0.name.caseInsensitiveCompare(logins) == .orderedSame })
+            else { throw AgentCallerError.unknownLogins(logins, available: agentLoginChoices) }
+            source = space
+        } else {
+            source = nil
+        }
         guard let agent = ensureAgentSpace() else { throw AgentCallerError.noSpace }
         closeOrphanedAgentTabs(in: agent)
 
         let label = uniqueAgentLabel("\(name) · \(source?.name ?? "No logins")")
-        let profile = Profile(name: label, icon: "sparkles", dataStore: store)
-        profile.isEphemeral = true
         let lastFolder = tree.children(of: .tabs(spaceID: agent)).last?.id
         let folderID = UUID()
         guard perform(.main, "agentCaller", undoable: false, {
             try $0.createFolder(id: folderID, title: label, in: .tabs(spaceID: agent), after: lastFolder)
         }) != nil else { throw AgentCallerError.noSpace }
         openFolder(folderID)
-        let caller = AgentCaller(id: id, label: label, logins: source?.name, folderID: folderID, profile: profile)
+        let caller = AgentCaller(id: id, label: label, logins: source?.name, loginSpaceID: source?.id,
+                                 folderID: folderID, profile: agentProfile(label: label))
         agentCallers[id] = caller
         return caller
     }
@@ -188,7 +185,15 @@ extension TabsController {
     /// A new tab at the end of `caller`'s folder: its current tab, or, given a `name`, a tab
     /// addressed by that name that leaves the current tab alone.
     @discardableResult
-    public func openAgentTab(_ url: URL, for caller: AgentCaller, name: String? = nil) -> UUID? {
+    public func openAgentTab(_ url: URL, for caller: AgentCaller, name: String? = nil) async throws -> UUID? {
+        try await refreshAgentLoginsIfEmpty(caller)
+        try Task.checkCancellation()
+        guard agentCallers[caller.id] === caller, tree.item(caller.folderID) != nil else {
+            throw AgentCallerError.workspaceClosed
+        }
+        if let name, agentTab(named: name, of: caller) != nil {
+            throw AgentCallerError.tabNameInUse(name)
+        }
         let last = tree.children(of: .folder(itemID: caller.folderID)).last?.id
         let id = UUID()
         guard perform(.main, "open", {
@@ -197,6 +202,41 @@ extension TabsController {
         if let name { caller.tabNames[name] = id }
         selectForAgent(id, makeCurrent: name == nil)
         return id
+    }
+
+    /// Replace the store so removed source cookies and the agent's old cookies cannot survive.
+    /// An opener that lost the race uses the winner's store, or retries if that batch already closed.
+    private func refreshAgentLoginsIfEmpty(_ caller: AgentCaller) async throws {
+        guard let sourceID = caller.loginSpaceID, let logins = caller.logins else { return }
+        while agentTabs(of: caller).isEmpty {
+            guard agentCallers[caller.id] === caller, tree.item(caller.folderID) != nil else {
+                throw AgentCallerError.workspaceClosed
+            }
+            guard let source = profile(forSpace: sourceID) else {
+                throw AgentCallerError.unknownLogins(logins, available: agentLoginChoices)
+            }
+            let previous = caller.profile
+            let refreshed = agentProfile(label: caller.label)
+            for cookie in await source.dataStore.httpCookieStore.allCookies() {
+                try Task.checkCancellation()
+                await refreshed.dataStore.httpCookieStore.setCookie(cookie)
+            }
+            try Task.checkCancellation()
+            guard agentCallers[caller.id] === caller, tree.item(caller.folderID) != nil else {
+                throw AgentCallerError.workspaceClosed
+            }
+            guard agentTabs(of: caller).isEmpty else { return }
+            guard caller.profile === previous else { continue }
+            caller.profile = refreshed
+            previous.destroyEphemeralDataStore()
+            return
+        }
+    }
+
+    private func agentProfile(label: String) -> Profile {
+        let profile = Profile(name: label, icon: "sparkles", dataStore: .nonPersistent())
+        profile.isEphemeral = true
+        return profile
     }
 
     /// Makes `itemID` its caller's current tab. Windows showing the Agent space show it; the
@@ -223,8 +263,7 @@ extension TabsController {
     /// person opens there never touches their logins.
     var agentLooseProfile: Profile {
         if let existing = agentLooseProfileStorage { return existing }
-        let profile = Profile(name: "Agent", icon: "sparkles", dataStore: .nonPersistent())
-        profile.isEphemeral = true
+        let profile = agentProfile(label: "Agent")
         agentLooseProfileStorage = profile
         return profile
     }
